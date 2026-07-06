@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARABLE — Concept Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;800;900&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --substrate:#0E1410;
+    --panel:#161D18;
+    --panel-2:#1C2620;
+    --line:#2B372E;
+    --line-soft:#222C25;
+    --bone:#EAE6D8;
+    --bone-dim:#97A294;
+    --chloro:#84BC55;   /* production / growth */
+    --amber:#E2A641;    /* market / economy */
+    --alien:#48E0C2;    /* lost-civ tech */
+    --rust:#CD6543;     /* pressure / hazard */
+    --sky:#79A9D6;      /* progression / narrative */
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--substrate);
+    color:var(--bone);
+    font-family:'Archivo',sans-serif;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:clamp(18px,4vw,56px);
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(72,224,194,0.05), transparent 60%),
+      linear-gradient(180deg, rgba(132,188,85,0.025), transparent 30%);
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+
+  .mono{font-family:'Spline Sans Mono',monospace}
+  .tag{
+    font-family:'Spline Sans Mono',monospace;
+    font-size:11px;letter-spacing:0.14em;text-transform:uppercase;
+    color:var(--bone-dim);
+  }
+
+  /* ---- dossier header ---- */
+  .dossier{
+    display:flex;flex-wrap:wrap;gap:12px 28px;
+    align-items:baseline;justify-content:space-between;
+    border-bottom:1px solid var(--line);
+    padding-bottom:14px;margin-bottom:clamp(28px,5vw,48px);
+  }
+  .dossier .field{display:flex;gap:8px;align-items:baseline}
+  .dossier .field b{color:var(--bone);font-family:'Spline Sans Mono',monospace;font-weight:500;font-size:11px;letter-spacing:0.06em}
+  .stamp{
+    color:var(--rust);border:1px solid var(--rust);
+    padding:3px 9px;border-radius:2px;font-size:10px;letter-spacing:0.18em;
+    font-family:'Spline Sans Mono',monospace;
+  }
+
+  /* ---- title block ---- */
+  .title-block{margin-bottom:clamp(30px,5vw,52px)}
+  .eyebrow{color:var(--alien);margin-bottom:14px}
+  h1{
+    font-family:'Archivo',sans-serif;font-weight:900;
+    font-stretch:125%;
+    font-size:clamp(52px,12vw,128px);
+    line-height:0.86;letter-spacing:-0.02em;
+    color:var(--bone);
+    text-transform:uppercase;
+  }
+  h1 .alt{color:var(--bone-dim);font-weight:400;font-stretch:75%}
+  .logline{
+    margin-top:20px;max-width:60ch;
+    font-size:clamp(16px,2.2vw,20px);color:#CDC9BC;font-weight:400;
+  }
+  .logline em{color:var(--chloro);font-style:normal;font-weight:600}
+  .premise{
+    margin-top:18px;max-width:62ch;font-size:14.5px;color:var(--bone-dim);
+    border-left:2px solid var(--sky);padding-left:16px;
+  }
+
+  /* ---- section heads ---- */
+  .sec-head{
+    display:flex;align-items:baseline;gap:14px;
+    margin:clamp(44px,6vw,68px) 0 22px;
+  }
+  .sec-head .num{font-family:'Spline Sans Mono',monospace;font-size:12px;color:var(--bone-dim)}
+  .sec-head h2{
+    font-family:'Archivo',sans-serif;font-weight:800;font-stretch:110%;
+    font-size:clamp(20px,3vw,28px);text-transform:uppercase;letter-spacing:0.01em;
+  }
+  .sec-head .rule{flex:1;height:1px;background:var(--line);align-self:center}
+
+  /* ---- pipeline (signature) ---- */
+  .pipe-frame{
+    background:var(--panel);border:1px solid var(--line);
+    border-radius:6px;padding:clamp(18px,3vw,30px) clamp(14px,3vw,26px);
+  }
+  .pipe{
+    display:flex;align-items:stretch;gap:0;flex-wrap:wrap;
+  }
+  .stage{
+    flex:1 1 130px;min-width:120px;position:relative;
+    padding:4px 8px;
+  }
+  .stage .node{
+    border:1px solid var(--line);background:var(--panel-2);
+    border-radius:5px;padding:13px 12px;height:100%;
+    transition:border-color .25s ease, transform .25s ease;
+  }
+  .stage .node:hover{border-color:var(--chloro);transform:translateY(-2px)}
+  .stage .s-num{font-family:'Spline Sans Mono',monospace;font-size:10px;color:var(--chloro);letter-spacing:0.1em}
+  .stage .s-name{font-weight:800;font-stretch:110%;text-transform:uppercase;font-size:15px;margin:5px 0 4px;letter-spacing:0.01em}
+  .stage .s-desc{font-size:12px;color:var(--bone-dim);line-height:1.4}
+  .arrow{
+    align-self:center;color:var(--line);font-size:20px;
+    padding:0 2px;flex:0 0 auto;user-select:none;
+  }
+  .tap{
+    margin-top:9px;display:flex;align-items:center;gap:6px;
+    font-family:'Spline Sans Mono',monospace;font-size:10px;
+    color:var(--amber);letter-spacing:0.04em;
+  }
+  .tap::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px rgba(226,166,65,.6)}
+  .pipe-note{
+    margin-top:20px;padding-top:16px;border-top:1px dashed var(--line);
+    display:flex;gap:10px;align-items:flex-start;font-size:13px;color:#C7C3B6;
+  }
+  .pipe-note .k{color:var(--amber);font-family:'Spline Sans Mono',monospace;font-size:11px;letter-spacing:0.08em;white-space:nowrap;padding-top:1px}
+
+  /* ---- systems grid ---- */
+  .grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+    gap:14px;
+  }
+  .card{
+    background:var(--panel);border:1px solid var(--line);
+    border-radius:6px;padding:18px 18px 16px;
+    border-top:2px solid var(--c, var(--line));
+    display:flex;flex-direction:column;
+    transition:border-color .2s ease;
+  }
+  .card:hover{border-color:var(--line-soft);border-top-color:var(--c)}
+  .card .c-tag{
+    font-family:'Spline Sans Mono',monospace;font-size:10px;letter-spacing:0.12em;
+    text-transform:uppercase;color:var(--c,var(--bone-dim));margin-bottom:9px;
+  }
+  .card h3{
+    font-family:'Archivo',sans-serif;font-weight:800;font-stretch:108%;
+    font-size:18px;text-transform:uppercase;letter-spacing:0.005em;
+    line-height:1.05;margin-bottom:10px;color:var(--bone);
+  }
+  .card .what{font-size:13.5px;color:#CBC7BA;margin-bottom:12px}
+  .card .why{
+    font-size:12.5px;color:var(--bone-dim);line-height:1.45;
+    margin-top:auto;padding-top:11px;border-top:1px solid var(--line-soft);
+  }
+  .card .why b{color:var(--c,var(--bone));font-weight:600}
+
+  /* hazard sub-rows */
+  .haz{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
+  .haz-row{display:flex;gap:10px;align-items:baseline;font-size:12.5px}
+  .haz-row .h-k{font-family:'Spline Sans Mono',monospace;font-size:11px;color:var(--rust);min-width:64px;letter-spacing:0.04em}
+  .haz-row .h-v{color:#CBC7BA}
+
+  /* parked footer */
+  .parked{
+    margin-top:30px;border:1px dashed var(--line);border-radius:6px;
+    padding:16px 18px;display:flex;gap:14px;flex-wrap:wrap;align-items:baseline;
+    opacity:.82;
+  }
+  .parked .tag{color:var(--bone-dim)}
+  .parked .p-body{font-size:13px;color:var(--bone-dim);max-width:70ch}
+  .parked .p-body b{color:#C7C3B6;font-weight:600}
+
+  footer{
+    margin-top:40px;padding-top:16px;border-top:1px solid var(--line);
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none!important;scroll-behavior:auto!important}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- dossier strip -->
+  <div class="dossier">
+    <div class="field"><span class="tag">Project</span><b>ARABLE</b></div>
+    <div class="field"><span class="tag">Designation</span><b>PENAL TERRAFORM / AGRI</b></div>
+    <div class="field"><span class="tag">Subject status</span><b>PAROLE — PENDING</b></div>
+    <span class="stamp">CONCEPT MAP</span>
+  </div>
+
+  <!-- title -->
+  <div class="title-block">
+    <div class="eyebrow tag">Automation game · ideas pass, not a build</div>
+    <h1>Arable<br><span class="alt">working title</span></h1>
+    <p class="logline">Factorio's pull, grown in real dirt: chains that <em>gather → clean → transform → sell</em>, where the market decides which link is worth running today.</p>
+    <p class="premise">You're a convict dropped on a dead world. Parole means proving the planet can feed itself — one viability tier at a time. The authority watches, buys your output, and decides when you've earned the next thing.</p>
+  </div>
+
+  <!-- CORE LOOP -->
+  <div class="sec-head">
+    <span class="num">01</span><h2>The core loop</h2><span class="rule"></span>
+  </div>
+  <div class="pipe-frame">
+    <div class="pipe">
+      <div class="stage">
+        <div class="node">
+          <div class="s-num">STAGE 00</div>
+          <div class="s-name">Gather</div>
+          <div class="s-desc">Harvest the field — grain, veg, fruit, herbs.</div>
+        </div>
+        <div class="tap">sell raw</div>
+      </div>
+      <span class="arrow">→</span>
+      <div class="stage">
+        <div class="node">
+          <div class="s-num">STAGE 01</div>
+          <div class="s-name">Clean</div>
+          <div class="s-desc">Blowers strip hay, dust, stone. Move it down the line.</div>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+      <div class="stage">
+        <div class="node">
+          <div class="s-num">STAGE 02</div>
+          <div class="s-name">Refine</div>
+          <div class="s-desc">Mill to flour, blend grades, pasteurise milk.</div>
+        </div>
+        <div class="tap">sell flour</div>
+      </div>
+      <span class="arrow">→</span>
+      <div class="stage">
+        <div class="node">
+          <div class="s-num">STAGE 03</div>
+          <div class="s-name">Transform</div>
+          <div class="s-desc">Bake bread, age cheese — the high-value tier.</div>
+        </div>
+        <div class="tap">sell goods</div>
+      </div>
+      <span class="arrow">→</span>
+      <div class="stage">
+        <div class="node" style="border-color:var(--amber)">
+          <div class="s-num" style="color:var(--amber)">MARKET</div>
+          <div class="s-name">Sell</div>
+          <div class="s-desc">Every stage has a price. They move independently.</div>
+        </div>
+      </div>
+    </div>
+    <div class="pipe-note">
+      <span class="k">WHY IT HOLDS</span>
+      <span>The same harvest can exit as raw grain, flour, or bread — and a kilo of flour isn't always worth the same. You <b style="color:var(--bone)">throttle links on and off</b> to chase whatever the market wants now. That tension between deep chains and short-term opportunism is the whole game.</span>
+    </div>
+  </div>
+
+  <!-- SYSTEMS -->
+  <div class="sec-head">
+    <span class="num">02</span><h2>Systems &amp; why we want them</h2><span class="rule"></span>
+  </div>
+  <div class="grid">
+
+    <div class="card" style="--c:var(--chloro)">
+      <div class="c-tag">Production</div>
+      <h3>Five categories, not fifty crops</h3>
+      <div class="what">Grains, vegetables, fruits, herbs, and animals + their products. Each category has its own chain shape — grain mills, fruit ferments, herb extracts, dairy.</div>
+      <div class="why"><b>Why:</b> keeps the variety and the distinct processing rhythms without drowning the player (or you) in barley-vs-wheat-vs-hops micro-variants.</div>
+    </div>
+
+    <div class="card" style="--c:var(--chloro)">
+      <div class="c-tag">Production</div>
+      <h3>Product tiers per chain</h3>
+      <div class="what">Wheat → flour → bread. Milk → pasteurised → cheese. Each step is a choice to sell now or invest in the next transform.</div>
+      <div class="why"><b>Why:</b> vertical depth inside one resource gives the Factorio "now automate the next thing" climb without needing a huge tech sprawl.</div>
+    </div>
+
+    <div class="card" style="--c:var(--amber)">
+      <div class="c-tag">Economy</div>
+      <h3>Reactive dynamic market</h3>
+      <div class="what">Prices float. You read what's valuable <em>now</em> and pivot — maybe with a small heads-up (a merchant's list, a shortage rumour) so you can react in time.</div>
+      <div class="why"><b>Why:</b> turns "maximise output" into "make decisions." Skill is in reading and re-routing, not just building bigger. Kept reactive to stay snappy.</div>
+    </div>
+
+    <div class="card" style="--c:var(--sky)">
+      <div class="c-tag">Progression</div>
+      <h3>Proof-of-viability gating</h3>
+      <div class="what">You don't buy cows — you <em>earn</em> them. Sustain a grain operation and the authority sends livestock: "you can feed them now, prove you can handle them."</div>
+      <div class="why"><b>Why:</b> diegetic unlocks. Each gate is the world saying "show me you can handle this complexity," which doubles as the narrative spine.</div>
+    </div>
+
+    <div class="card" style="--c:var(--sky)">
+      <div class="c-tag">Narrative</div>
+      <h3>Prisoner → parole arc</h3>
+      <div class="what">Exiled to prove a dead world habitable. Endgame is a sustainability threshold = your parole. Leave, or stay because you built something real.</div>
+      <div class="why"><b>Why:</b> gives every gate, inspection, and quota a reason to exist. The market isn't abstract — it's them testing whether the colony is viable.</div>
+    </div>
+
+    <div class="card" style="--c:var(--rust)">
+      <div class="c-tag">Pressure</div>
+      <h3>Three-speed hazards</h3>
+      <div class="haz">
+        <div class="haz-row"><span class="h-k">WEEDS</span><span class="h-v">constant low drain — forces ongoing maintenance.</span></div>
+        <div class="haz-row"><span class="h-k">SPOILAGE</span><span class="h-v">time-urgent — process before it degrades.</span></div>
+        <div class="haz-row"><span class="h-k">PESTS</span><span class="h-v">catastrophic but plannable-against.</span></div>
+      </div>
+      <div class="why"><b>Why:</b> this is the biters' replacement. A rhythm of slow / urgent / spiky pressure means you're never just coasting, and difficulty stays tunable.</div>
+    </div>
+
+    <div class="card" style="--c:var(--alien)">
+      <div class="c-tag">Sci-fi layer</div>
+      <h3>Lost-civilisation tech</h3>
+      <div class="what">The planet had a prior species. Dig up their engineering — growth accelerants, water purifiers, soil-magic that Earth tools can't match. Found = works immediately.</div>
+      <div class="why"><b>Why:</b> a second progression track beside Earth-tech, and a license for "magical" upgrades without breaking immersion. Instant-use keeps the find satisfying.</div>
+    </div>
+
+    <div class="card" style="--c:var(--alien)">
+      <div class="c-tag">Sci-fi layer</div>
+      <h3>Competency-gated, not map-gated</h3>
+      <div class="what">The alien gear sits on the map from the start, but stays locked until you've proven the relevant skill — sustained a harvest, raised livestock.</div>
+      <div class="why"><b>Why:</b> stops a third-playthrough beeline to the best tool. Even veterans play the core loop before they shortcut. Replayability without removing the toy.</div>
+    </div>
+
+  </div>
+
+  <!-- parked -->
+  <div class="parked">
+    <span class="tag">⏸ Back burner</span>
+    <div class="p-body"><b>Neighbouring farms / competitors.</b> Tempting — rivals selling milk could crash your milk price (real supply &amp; demand), and they'd move the market organically. But it drags in a whole simulation of <em>their</em> decision-making and risks the player feeling like they're fighting the system. Parked until the core loop is solid.</div>
+  </div>
+
+  <footer>
+    <span class="tag">Status: ideas pass · implementation deferred</span>
+    <span class="tag">Inspirations: Factorio · Oxygen Not Included</span>
+  </footer>
+
+</div>
+</body>
+</html>
