@@ -1,0 +1,53 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
+[ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
+[ext_resource type="MeshLibrary" path="res://assets/dev/tile_library.tres" id="3_tiles"]
+[ext_resource type="PackedScene" path="res://scenes/world/Machine.tscn" id="4_machine"]
+
+[sub_resource type="Environment" id="env_main"]
+background_mode = 1
+background_color = Color(0.54, 0.68, 0.84, 1)
+ambient_light_source = 2
+ambient_light_color = Color(1, 1, 1, 1)
+ambient_light_energy = 0.35
+
+[sub_resource type="StandardMaterial3D" id="mat_ground"]
+albedo_color = Color(0.35, 0.52, 0.3, 1)
+
+[sub_resource type="PlaneMesh" id="mesh_ground"]
+material = SubResource("mat_ground")
+size = Vector2(200, 200)
+
+[node name="Main" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env_main")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation = Vector3(-0.9, -0.5, 0)
+shadow_enabled = true
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("mesh_ground")
+
+[node name="World" type="Node3D" parent="."]
+script = ExtResource("2_world")
+MachineScene = ExtResource("4_machine")
+
+[node name="GridMap" type="GridMap" parent="World"]
+mesh_library = ExtResource("3_tiles")
+cell_size = Vector3(2, 1, 2)
+cell_center_y = false
+
+[node name="CameraRig" type="Node3D" parent="."]
+rotation = Vector3(0, 0.785398, 0)
+script = ExtResource("1_camrig")
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig"]
+position = Vector3(0, 46.188, 65.32)
+rotation = Vector3(-0.615479, 0, 0)
+projection = 1
+size = 20.0
+near = 1.0
+far = 300.0

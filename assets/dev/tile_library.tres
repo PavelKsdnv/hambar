@@ -1,0 +1,25 @@
+[gd_resource type="MeshLibrary" load_steps=5 format=3]
+
+[sub_resource type="StandardMaterial3D" id="mat_road"]
+albedo_color = Color(0.32, 0.33, 0.35, 1)
+
+[sub_resource type="StandardMaterial3D" id="mat_field"]
+albedo_color = Color(0.45, 0.32, 0.2, 1)
+
+[sub_resource type="BoxMesh" id="mesh_road"]
+material = SubResource("mat_road")
+size = Vector3(2, 0.1, 2)
+
+[sub_resource type="BoxMesh" id="mesh_field"]
+material = SubResource("mat_field")
+size = Vector3(2, 0.2, 2)
+
+[resource]
+item/0/name = "Road"
+item/0/mesh = SubResource("mesh_road")
+item/0/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+item/0/shapes = []
+item/1/name = "Field"
+item/1/mesh = SubResource("mesh_field")
+item/1/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+item/1/shapes = []
