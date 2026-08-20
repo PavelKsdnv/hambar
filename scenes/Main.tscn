@@ -1,9 +1,11 @@
-[gd_scene load_steps=8 format=3]
+[gd_scene load_steps=10 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
 [ext_resource type="MeshLibrary" path="res://assets/dev/tile_library.tres" id="3_tiles"]
 [ext_resource type="PackedScene" path="res://scenes/world/Machine.tscn" id="4_machine"]
+[ext_resource type="Script" path="res://src/ui/MenuController.cs" id="5_menu"]
+[ext_resource type="Script" path="res://src/ui/RoadBuildTool.cs" id="6_roadtool"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -39,6 +41,15 @@ MachineScene = ExtResource("4_machine")
 mesh_library = ExtResource("3_tiles")
 cell_size = Vector3(2, 1, 2)
 cell_center_y = false
+
+[node name="RoadTool" type="Node3D" parent="." node_paths=PackedStringArray("World")]
+script = ExtResource("6_roadtool")
+World = NodePath("../World")
+
+[node name="Menu" type="Node" parent="." node_paths=PackedStringArray("World", "RoadTool")]
+script = ExtResource("5_menu")
+World = NodePath("../World")
+RoadTool = NodePath("../RoadTool")
 
 [node name="CameraRig" type="Node3D" parent="."]
 rotation = Vector3(0, 0.785398, 0)

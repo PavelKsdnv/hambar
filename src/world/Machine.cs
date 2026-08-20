@@ -34,7 +34,7 @@ public partial class Machine : Node3D
     public override void _Ready()
     {
         AddToGroup("machines");
-        GetNode<MeshInstance3D>("Body").MaterialOverride =
+        GetNode<MeshInstance3D>("Model/Body").MaterialOverride =
             new StandardMaterial3D { AlbedoColor = BodyColor };
     }
 
@@ -95,6 +95,9 @@ public partial class Machine : Node3D
             {
                 continue;
             }
+            // String-pull the cell path into long straight runs so the drive
+            // is smooth instead of turning at every cell.
+            path = _world.SmoothRoadPath(path);
             for (int j = 1; j < path.Count; j++)
             {
                 _waypoints.Enqueue(_world.CellToWorld(path[j]) + Vector3.Up * DeckHeight);

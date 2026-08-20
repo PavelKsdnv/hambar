@@ -24,30 +24,33 @@ height = 0.25
 [node name="Machine" type="Node3D"]
 script = ExtResource("1_machine")
 
-[node name="Body" type="MeshInstance3D" parent="."]
+[node name="Model" type="Node3D" parent="."]
+scale = Vector3(0.75, 0.75, 0.75)
+
+[node name="Body" type="MeshInstance3D" parent="Model"]
 position = Vector3(0, 0.75, 0)
 mesh = SubResource("mesh_body")
 
-[node name="Cab" type="MeshInstance3D" parent="."]
+[node name="Cab" type="MeshInstance3D" parent="Model"]
 position = Vector3(0, 1.35, 0.45)
 mesh = SubResource("mesh_cab")
 
-[node name="WheelFL" type="MeshInstance3D" parent="."]
+[node name="WheelFL" type="MeshInstance3D" parent="Model"]
 position = Vector3(-0.65, 0.35, -0.6)
 rotation = Vector3(0, 0, 1.5708)
 mesh = SubResource("mesh_wheel")
 
-[node name="WheelFR" type="MeshInstance3D" parent="."]
+[node name="WheelFR" type="MeshInstance3D" parent="Model"]
 position = Vector3(0.65, 0.35, -0.6)
 rotation = Vector3(0, 0, 1.5708)
 mesh = SubResource("mesh_wheel")
 
-[node name="WheelRL" type="MeshInstance3D" parent="."]
+[node name="WheelRL" type="MeshInstance3D" parent="Model"]
 position = Vector3(-0.65, 0.35, 0.6)
 rotation = Vector3(0, 0, 1.5708)
 mesh = SubResource("mesh_wheel")
 
-[node name="WheelRR" type="MeshInstance3D" parent="."]
+[node name="WheelRR" type="MeshInstance3D" parent="Model"]
 position = Vector3(0.65, 0.35, 0.6)
 rotation = Vector3(0, 0, 1.5708)
 mesh = SubResource("mesh_wheel")
