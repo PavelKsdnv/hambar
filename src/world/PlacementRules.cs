@@ -32,6 +32,15 @@ public enum PlacementRule
     /// footprint rule, not a per-cell one.
     /// </summary>
     TouchesRoad = 1 << 2,
+
+    /// <summary>
+    /// The cell must hold <i>nothing at all</i> — stricter than
+    /// <see cref="NoOverlap"/>, which lets a tool place over its own tile.
+    /// Fields opt into this because a cell belongs to exactly one
+    /// <see cref="Field"/>: re-covering a field cell would mean two fields
+    /// claiming it, so a new rectangle has to start on free ground.
+    /// </summary>
+    VacantCell = 1 << 3,
 }
 
 /// <summary>Why a cell, or a whole placement, was refused.</summary>
@@ -165,7 +174,14 @@ public static class PlacementRules
             }
         }
 
-        if (rules.HasFlag(PlacementRule.NoOverlap))
+        if (rules.HasFlag(PlacementRule.VacantCell))
+        {
+            if (world.GetTile(cell) != TileType.Empty)
+            {
+                return PlacementRefusal.Occupied;
+            }
+        }
+        else if (rules.HasFlag(PlacementRule.NoOverlap))
         {
             TileType existing = world.GetTile(cell);
             if (existing != TileType.Empty && existing != placing)

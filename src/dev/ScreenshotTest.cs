@@ -94,10 +94,14 @@ public partial class ScreenshotTest : Node
         // so both verdicts get a picture.
         await ShowBuildGhost(main, rig);
 
+        // Fields, which nothing before M2 could put on the map at all: the
+        // live rectangle during a drag, then the same rectangle committed.
+        await ShowFieldRectangle(main, rig);
+
         // One 90° step: catches a rotation that skews or flips the world.
         SendAction("camera_rotate_left");
         await Settle(SettleSeconds);
-        Capture("04-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
+        Capture("06-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
 
         // As far out as the rig allows — the "does it read at farm scale" view.
         for (int i = 0; i < ZoomOutSteps; i++)
@@ -106,20 +110,20 @@ public partial class ScreenshotTest : Node
         }
 
         await Settle(SettleSeconds);
-        Capture("05-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
+        Capture("07-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
 
         // Diagnostic only: a detached camera beyond the rig's ZoomMax, so the
         // whole world is in frame even when the player could never see it.
         AddOverviewCamera(main);
         await Settle(0.2f);
-        Capture("06-overview", "detached diagnostic camera, whole world");
+        Capture("08-overview", "detached diagnostic camera, whole world");
 
         // The hover readout, which no other view can show. Driven by an
         // explicit pixel with _Process switched off, so it names a known cell
         // instead of following a cursor this run does not have.
         camera.MakeCurrent();
         string readout = await ShowReadout(main);
-        Capture("07-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
+        Capture("09-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
 
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
@@ -184,6 +188,97 @@ public partial class ScreenshotTest : Node
         await CaptureGhost(world, tool, rig, anchor, wantLegal: false,
             name: "03-ghost-refused", what: "road drag refused before the click");
 
+        tool.SetActive(false);
+        tool.SetProcess(true);
+        rig.Position = home;
+    }
+
+    /// <summary>
+    /// Captures a field being marked, in the two states a still picture can
+    /// tell apart: the filled rectangle ghosted mid-drag, and the field left
+    /// on the map after the commit. Neither existed before M2 — terrain
+    /// generation places only road, so no earlier view has ever contained a
+    /// field tile, and "the rectangle previews live during the drag" is a
+    /// claim about pixels rather than about state.
+    ///
+    /// Where the rectangle goes is found by asking the tool, never assumed: a
+    /// seed change moves the clear soil, and a hard-coded rectangle would
+    /// quietly start photographing a refusal. The capture writes a real field
+    /// into the world and deliberately leaves it there, so the later rotated,
+    /// zoomed and overview shots all carry it too.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowFieldRectangle(Node main, CameraRig rig)
+    {
+        const int Span = 3;
+        const int SearchRadius = 14;
+
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var tool = main.GetNodeOrNull<BuildTool>("FieldTool");
+        if (world == null || tool == null)
+        {
+            GD.Print("FAIL: field rectangle — no World or FieldTool in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        Vector3 home = rig.Position;
+        tool.SetProcess(false);
+        tool.SetActive(true);
+
+        for (int radius = 2; radius <= SearchRadius; radius++)
+        {
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dz)) != radius)
+                    {
+                        continue;
+                    }
+
+                    var from = new Vector2I(dx, dz);
+                    var to = new Vector2I(dx + Span - 1, dz + Span - 1);
+                    tool.SetActive(true);   // re-arm: also drops the old anchor
+                    if (!tool.ClickCell(from))
+                    {
+                        continue;
+                    }
+
+                    tool.HoverAt(to);
+                    if (tool.Preview is not { Legal: true } plan)
+                    {
+                        continue;
+                    }
+
+                    rig.Position = world.CellToWorld((from + to) / 2);
+                    await Settle(0.3f);
+                    Capture("04-field-ghost",
+                        $"field rectangle previewed mid-drag — {from} to {to}, {Describe(plan)}");
+
+                    tool.ClickCell(to);
+                    tool.SetActive(false);
+                    await Settle(0.3f);
+                    Field? field = world.GetField(from);
+                    Capture("05-field-marked",
+                        $"the same rectangle committed — {field?.ToString() ?? "no field!"}, "
+                        + $"bounds {field?.Bounds.ToString() ?? "-"}");
+
+                    if (field == null)
+                    {
+                        GD.Print("FAIL: 05-field-marked — the commit registered no field");
+                        _failed = true;
+                    }
+
+                    tool.SetProcess(true);
+                    rig.Position = home;
+                    return;
+                }
+            }
+        }
+
+        GD.Print($"FAIL: field rectangle — no legal {Span}x{Span} rectangle "
+            + $"within {SearchRadius} cells of the origin");
+        _failed = true;
         tool.SetActive(false);
         tool.SetProcess(true);
         rig.Position = home;

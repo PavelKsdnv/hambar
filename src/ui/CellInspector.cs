@@ -80,7 +80,8 @@ public partial class CellInspector : Node
 
     /// <summary>
     /// The readout text for a cell: coordinates, terrain (+ fertility, which
-    /// only soil has), and the placed tile. Off the map the terrain layer
+    /// only soil has), and the placed tile — plus the name of the field that
+    /// owns the cell, when one does. Off the map the terrain layer
     /// already answers <see cref="TerrainType.OutOfBounds"/>, so that case needs
     /// no extra bounds check — it just reads differently.
     /// </summary>
@@ -95,9 +96,17 @@ public partial class CellInspector : Node
         string fertility = terrain == TerrainType.Soil
             ? World.GetFertility(c).ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
             : "-";
+        // A field cell names the field it belongs to, because a field — not a
+        // cell — is the unit the game addresses farmland by (see Field).
+        string tile = TileName(World.GetTile(c));
+        if (World.GetField(c) is { } field)
+        {
+            tile += $" ({field.Name})";
+        }
+
         return $"cell: {c.X}, {c.Y}\n"
             + $"terrain: {TerrainName(terrain)}   fertility: {fertility}\n"
-            + $"tile: {TileName(World.GetTile(c))}";
+            + $"tile: {tile}";
     }
 
     private static string TerrainName(TerrainType terrain) => terrain switch

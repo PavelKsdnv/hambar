@@ -84,6 +84,12 @@ public partial class WorldGrid : Node3D
     private readonly Dictionary<Vector2I, TileType> _tiles = new();
     private readonly List<Vector2I> _roadCells = new();
 
+    // Fields are entities, not just tiles: the tile layer says a cell is
+    // farmland, these say *which* field it belongs to (see Field).
+    private readonly List<Field> _fields = new();
+    private readonly Dictionary<Vector2I, Field> _fieldOf = new();
+    private int _fieldsCreated;
+
     // Terrain layer: dense flat arrays indexed by Index(cell). Every in-bounds
     // cell has a value, so a dictionary would only add overhead — this is the
     // first piece of state laid out the way the M3 sim core wants all of it.
@@ -147,6 +153,65 @@ public partial class WorldGrid : Node3D
     /// <summary>How many cells currently hold a road tile.</summary>
     public int RoadCellCount => _roadCells.Count;
 
+    /// <summary>Every field the player has marked, in creation order.</summary>
+    public IReadOnlyList<Field> Fields => _fields;
+
+    /// <summary>How many cells belong to a field.</summary>
+    public int FieldCellCount => _fieldOf.Count;
+
+    /// <summary>
+    /// The field that owns the cell, or null when no field does. This is the
+    /// lookup the rest of the game uses to go from "the cell under the cursor"
+    /// to the entity that actually holds crop, jobs and yield.
+    /// </summary>
+    public Field? GetField(Vector2I cell) => _fieldOf.GetValueOrDefault(cell);
+
+    /// <summary>
+    /// Marks the cells as <b>one new field</b> — the addressable unit farmland
+    /// comes in (see <see cref="Field"/>) — and returns it, or null for an
+    /// empty region. Cells another field owned are transferred to the new one,
+    /// so the cell to field map can never disagree with the tile layer; the
+    /// field tool never places over an occupied cell in the first place, but
+    /// dev and scenario code calls this directly, the way
+    /// <see cref="BuildRoadLine"/> is the unvalidated way to lay road.
+    /// </summary>
+    public Field? MarkField(IReadOnlyList<Vector2I> cells)
+    {
+        if (cells.Count == 0)
+        {
+            return null;
+        }
+
+        _fieldsCreated++;
+        var field = new Field(_fieldsCreated, $"Field {_fieldsCreated}", cells);
+        _fields.Add(field);
+        foreach (Vector2I cell in cells)
+        {
+            ReleaseFieldCell(cell);
+            SetTile(cell, TileType.Field);
+            _fieldOf[cell] = field;
+        }
+        return field;
+    }
+
+    /// <summary>
+    /// Detaches a cell from the field that owns it, and drops that field
+    /// entirely once it has lost its last cell — a field is its cells, so an
+    /// empty one is not a field the player can still address.
+    /// </summary>
+    private void ReleaseFieldCell(Vector2I cell)
+    {
+        if (!_fieldOf.Remove(cell, out Field? field))
+        {
+            return;
+        }
+        field.RemoveCell(cell);
+        if (field.CellCount == 0)
+        {
+            _fields.Remove(field);
+        }
+    }
+
     public void SetTile(Vector2I cell, TileType type)
     {
         TileType previous = GetTile(cell);
@@ -158,6 +223,10 @@ public partial class WorldGrid : Node3D
         if (previous == TileType.Road)
         {
             _roadCells.Remove(cell);
+        }
+        if (previous == TileType.Field)
+        {
+            ReleaseFieldCell(cell);
         }
         if (type == TileType.Road)
         {
@@ -404,6 +473,31 @@ public partial class WorldGrid : Node3D
                 cell.Y += sy;
             }
             cells.Add(cell);
+        }
+        return cells;
+    }
+
+    /// <summary>
+    /// Cells of the filled axis-aligned rectangle spanned by two opposite
+    /// corners, both corners included — the footprint of a field drag, the way
+    /// <see cref="LineCells"/> is the footprint of a road drag. Row-major from
+    /// the minimum corner, so the order does not depend on which corner the
+    /// player started from and the same rectangle always yields the same list.
+    /// </summary>
+    public static List<Vector2I> RectCells(Vector2I from, Vector2I to)
+    {
+        int minX = Math.Min(from.X, to.X);
+        int maxX = Math.Max(from.X, to.X);
+        int minY = Math.Min(from.Y, to.Y);
+        int maxY = Math.Max(from.Y, to.Y);
+
+        var cells = new List<Vector2I>((maxX - minX + 1) * (maxY - minY + 1));
+        for (int y = minY; y <= maxY; y++)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                cells.Add(new Vector2I(x, y));
+            }
         }
         return cells;
     }

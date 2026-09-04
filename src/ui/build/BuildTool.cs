@@ -27,6 +27,14 @@ namespace Arable;
 /// </summary>
 public abstract partial class BuildTool : Node3D
 {
+    /// <summary>
+    /// Scene group every build tool joins on entering the tree. Arming one tool
+    /// disarms the rest through it, so the player can never have two tools
+    /// listening to the same click — and a new tool gets that for free, without
+    /// the menu (or the M2 palette) having to know the full list.
+    /// </summary>
+    public const string ToolGroup = "build_tools";
+
     /// <summary>Highlights sit just above the road deck so they never z-fight.</summary>
     protected const float HighlightY = Machine.DeckHeight + 0.05f;
 
@@ -133,6 +141,7 @@ public abstract partial class BuildTool : Node3D
 
     public override void _Ready()
     {
+        AddToGroup(ToolGroup);
         _cursorMaterial = MakeMaterial(CursorLegal);
         _cursor = new MeshInstance3D { Mesh = MakeSquare(_cursorMaterial), Visible = false };
         AddChild(_cursor);
@@ -150,17 +159,43 @@ public abstract partial class BuildTool : Node3D
 
     public void Toggle() => SetActive(!Active);
 
-    /// <summary>Arms or disarms the tool, always dropping any pending anchor.</summary>
+    /// <summary>
+    /// Arms or disarms the tool, always dropping any pending anchor. Arming
+    /// disarms every other build tool: build mode has one active tool.
+    /// </summary>
     public void SetActive(bool active)
     {
         Active = active;
         Anchor = null;
-        if (!active)
+        if (active)
+        {
+            DisarmOtherTools();
+        }
+        else
         {
             HoverCell = null;
             _cursor.Visible = false;
         }
         RefreshPreview();
+    }
+
+    /// <summary>
+    /// Disarms every other tool in <see cref="ToolGroup"/>. Only ever called
+    /// when arming, so it cannot recurse.
+    /// </summary>
+    private void DisarmOtherTools()
+    {
+        if (!IsInsideTree())
+        {
+            return;
+        }
+        foreach (Node node in GetTree().GetNodesInGroup(ToolGroup))
+        {
+            if (node is BuildTool other && other != this && other.Active)
+            {
+                other.SetActive(false);
+            }
+        }
     }
 
     /// <summary>
