@@ -13,14 +13,15 @@ namespace Arable;
 /// godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 ///
-/// Two tools are covered, in order: the road tool first, then the field tool —
-/// which therefore validates against a world that already holds this test's
-/// roads, and is also where the "only one tool armed at a time" rule is
-/// proven. The rest of M2 (structures, bulldoze, costs, the palette) adds its
-/// assertions the same way: give each new tool a section like
-/// <see cref="CheckLegalPlacement"/> and reuse the cell-finding helpers at the
-/// bottom, which look terrain up at runtime instead of hard-coding coordinates
-/// that a seed change would invalidate.
+/// Three tools are covered, in that order: the road tool first, then the field
+/// tool — which therefore validates against a world that already holds this
+/// test's roads, and is also where the "only one tool armed at a time" rule is
+/// proven — and last the structure tool, whose must-touch-a-road rule only
+/// means anything once there is a road network to touch. The rest of M2
+/// (bulldoze, costs, the palette) adds its assertions the same way: give each
+/// new tool a section like <see cref="CheckLegalPlacement"/> and reuse the
+/// cell-finding helpers at the bottom, which look terrain up at runtime
+/// instead of hard-coding coordinates that a seed change would invalidate.
 /// </summary>
 public partial class BuildSmokeTest : Node
 {
@@ -31,6 +32,8 @@ public partial class BuildSmokeTest : Node
     private WorldGrid _world = null!;
     private RoadBuildTool _tool = null!;
     private FieldBuildTool _fieldTool = null!;
+    private StructureBuildTool _structureTool = null!;
+    private CellInspector _inspector = null!;
     private int _frame;
     private bool _failed;
 
@@ -52,6 +55,13 @@ public partial class BuildSmokeTest : Node
     private Vector2I _belowRect;
     private Field? _markedField;
 
+    // The structure section's cell and the buildings it places. Like the field
+    // section's cells these are found (or, for the road-access checks, built)
+    // at the point of use, once this test's roads and fields are on the map.
+    private Vector2I _structureCell;
+    private Structure? _structure;
+    private Structure? _secondStructure;
+
     public override void _Ready()
     {
         Node main = GD.Load<PackedScene>("res://scenes/Main.tscn").Instantiate();
@@ -59,6 +69,8 @@ public partial class BuildSmokeTest : Node
         _world = main.GetNode<WorldGrid>("World");
         _tool = main.GetNode<RoadBuildTool>("RoadTool");
         _fieldTool = main.GetNode<FieldBuildTool>("FieldTool");
+        _structureTool = main.GetNode<StructureBuildTool>("StructureTool");
+        _inspector = main.GetNode<CellInspector>("CellInspector");
     }
 
     public override void _Process(double delta)
@@ -147,6 +159,18 @@ public partial class BuildSmokeTest : Node
             CheckFieldIntoRoughTerrainIsRefused();
             CheckClearingShrinksAndDropsAField();
 
+            // Menu slot 4 arms the structure tool — the player's path again.
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_4", Pressed = true });
+        }
+        else if (_frame == 40)
+        {
+            CheckStructureToolArmed();
+            CheckStructurePlacement();
+            CheckStructureNeedsRoadAccess();
+            CheckStructureOnRoughGroundIsRefused();
+            CheckStructureOnOccupiedGroundIsRefused();
+            CheckClearingDemolishesAStructure();
+
             GD.Print(_failed ? "BUILD SMOKE TEST FAILED" : "BUILD SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
         }
@@ -162,8 +186,12 @@ public partial class BuildSmokeTest : Node
         Check("build tool is wired to the world", _tool.World == _world);
         Check("the field tool starts inactive too", !_fieldTool.Active);
         Check("the field tool is wired to the world", _fieldTool.World == _world);
+        Check("the structure tool starts inactive too", !_structureTool.Active);
+        Check("the structure tool is wired to the world", _structureTool.World == _world);
         Check("no field is registered before one is marked",
             _world.Fields.Count == 0 && _world.FieldCellCount == 0);
+        Check("no structure is registered before one is placed",
+            _world.Structures.Count == 0 && _world.StructureCellCount == 0);
     }
 
     /// <summary>
@@ -327,8 +355,9 @@ public partial class BuildSmokeTest : Node
         Check("the disarmed tool clears its ghost", _tool.GhostCellCount == 0);
         Check("the disarmed tool clears its preview", _tool.Preview == null);
         Check("the disarmed tool drops any anchor", _tool.Anchor == null);
-        Check("both tools joined the build-tool group",
-            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 2);
+        Check("the structure tool is not armed either", !_structureTool.Active);
+        Check("every tool joined the build-tool group",
+            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 3);
     }
 
     /// <summary>
@@ -618,6 +647,284 @@ public partial class BuildSmokeTest : Node
             _world.FieldCellCount == WorldGrid.RectCells(_rectFrom, _rectTo).Count);
     }
 
+    // --- structures --------------------------------------------------------
+
+    /// <summary>
+    /// The structure tool comes last, so the road network it has to touch is
+    /// already on the map. Arming it also re-proves the tool-group rule with a
+    /// third member.
+    /// </summary>
+    private void CheckStructureToolArmed()
+    {
+        Check("menu key 4 activates the structure tool", _structureTool.Active);
+        Check("arming the structure tool disarms the field tool", !_fieldTool.Active);
+        Check("arming the structure tool leaves the road tool disarmed", !_tool.Active);
+        // No anchor to check for — a single-click tool never takes one, and it
+        // ghosts the cell under the cursor from the moment it is armed.
+        Check("arming the structure tool leaves no anchor pending",
+            _structureTool.Anchor == null);
+        Check("no structure was registered by the road or field sections",
+            _world.Structures.Count == 0 && _world.StructureCellCount == 0);
+    }
+
+    /// <summary>
+    /// The accepted case, and what the issue is really about: one click on free
+    /// soil that shares an edge with the road network puts a building down, and
+    /// what lands is a <see cref="Structure"/> with an id — not a tile the game
+    /// could only ever read back as an enum value.
+    /// </summary>
+    private void CheckStructurePlacement()
+    {
+        // Searched here rather than up front: the cell beside the road has to
+        // still be clear now that this test's roads and fields are on the map.
+        Vector2I? found = FindCell(cell => IsFreeSoil(cell) && TouchesRoad(cell));
+        Check("found clear soil beside the road network", found != null);
+        if (found is not { } beside)
+        {
+            return;
+        }
+
+        _structureCell = beside;
+        int structuresBefore = _world.Structures.Count;
+
+        _structureTool.HoverAt(beside);
+        Check("a cell beside a road previews as legal", _structureTool.PreviewLegal);
+        Check("a single-click tool ghosts before any anchor",
+            _structureTool.GhostCellCount == 1 && _structureTool.Anchor == null);
+        Check("a structure footprint is one cell", _structureTool.Preview?.Count == 1);
+        Check("the ghost cell of a legal placement is drawn legal",
+            CountGhost(_structureTool, BuildTool.GhostLegal) == 1);
+        Check("the hover square reads legal beside a road",
+            _structureTool.CursorColor.IsEqualApprox(BuildTool.CursorLegal));
+        Check("the preview itself builds nothing",
+            _world.Structures.Count == structuresBefore);
+
+        Check("one click places the structure", _structureTool.ClickCell(beside));
+        Check("placing needs no second click", _structureTool.Anchor == null);
+        Check("placing keeps the tool armed for the next building", _structureTool.Active);
+        Check("the cell became a structure tile",
+            _world.GetTile(beside) == TileType.Structure);
+        Check("exactly one structure was registered",
+            _world.Structures.Count == structuresBefore + 1);
+        Check("the building covers exactly one cell", _world.StructureCellCount == 1);
+        Check("the cell it stands on now previews as occupied",
+            _structureTool.Preview?.Refusal == PlacementRefusal.Occupied);
+
+        // The point of the whole feature: a building is an entity with an
+        // identity, reachable by cell *and* by id, not a bare tile value.
+        _structure = _world.GetStructure(beside);
+        Check("the placed cell addresses a structure", _structure != null);
+        if (_structure is not { } structure)
+        {
+            return;
+        }
+        Check("the structure has an id", structure.Id > 0);
+        Check("the structure is addressable by id, not just by tile",
+            _world.GetStructure(structure.Id) == structure);
+        Check("an id nothing was ever handed resolves to nothing",
+            _world.GetStructure(structure.Id + 1) == null);
+        Check("the structure knows the cell it stands on",
+            structure.CellCount == 1 && structure.Cells[0] == beside
+            && structure.Contains(beside) && structure.Origin == beside);
+        Check("the structure footprint is a 1x1 rectangle",
+            structure.Bounds == new Rect2I(beside, Vector2I.One));
+        Check("the structure is the one the world just registered",
+            _world.Structures[^1] == structure);
+        Check("the structure is named", !string.IsNullOrEmpty(structure.Name));
+        Check("the hover readout names the building on the cell",
+            _inspector.Describe(beside).Contains($"tile: structure ({structure.Name})"));
+    }
+
+    /// <summary>
+    /// The rule that makes the road network load-bearing, taken through all
+    /// three of its verdicts on <b>one</b> cell: refused with no road near it,
+    /// still refused when the nearest road only touches its corner (access is
+    /// 4-neighbour, not 8), and accepted the moment a road shares an edge with
+    /// it. The roads are laid rather than searched for, so nothing but the road
+    /// changes between the three answers.
+    /// </summary>
+    private void CheckStructureNeedsRoadAccess()
+    {
+        Vector2I? found = FindCell(cell =>
+            IsFreeSoil(cell) && !TouchesRoad(cell)
+            && IsFreeSoil(cell + Vector2I.Right) && IsFreeSoil(cell + Vector2I.One));
+        Check("found clear soil away from every road", found != null);
+        if (found is not { } isolated)
+        {
+            return;
+        }
+
+        int structuresBefore = _world.Structures.Count;
+        int cellsBefore = _world.StructureCellCount;
+
+        _structureTool.HoverAt(isolated);
+        Check("a cell with no road beside it previews as refused",
+            !_structureTool.PreviewLegal);
+        Check("the refusal names the missing road",
+            _structureTool.Preview?.Refusal == PlacementRefusal.NoRoadAccess);
+        Check("the ghost still covers the cell", _structureTool.GhostCellCount == 1);
+        Check("no cell of a refused placement is drawn legal",
+            CountGhost(_structureTool, BuildTool.GhostLegal) == 0);
+        // Road access is a footprint rule, so no single cell is the offender:
+        // the ghost dims the whole placement instead of pointing at a cell.
+        Check("the whole placement reads refused, with no cell blamed",
+            CountGhost(_structureTool, BuildTool.GhostRefused) == 1
+            && CountGhost(_structureTool, BuildTool.GhostIllegalCell) == 0);
+        Check("the hover square reads refused away from the road",
+            _structureTool.CursorColor.IsEqualApprox(BuildTool.CursorRefused));
+
+        Check("the click away from the road is rejected",
+            !_structureTool.ClickCell(isolated));
+        Check("nothing was built away from the road",
+            _world.GetTile(isolated) == TileType.Empty);
+        Check("the refused click registered no structure",
+            _world.Structures.Count == structuresBefore
+            && _world.StructureCellCount == cellsBefore);
+        Check("the refused cell addresses no structure",
+            _world.GetStructure(isolated) == null);
+
+        // A road on the diagonal touches the cell's corner, not its edge.
+        _world.SetTile(isolated + Vector2I.One, TileType.Road);
+        _structureTool.HoverAt(isolated);
+        Check("a road touching only the corner is not road access",
+            _structureTool.Preview?.Refusal == PlacementRefusal.NoRoadAccess);
+        Check("the click beside a diagonal-only road is rejected",
+            !_structureTool.ClickCell(isolated));
+        Check("nothing was built beside the diagonal road",
+            _world.GetTile(isolated) == TileType.Empty);
+
+        // One road sharing an edge, and the very same cell becomes legal.
+        _world.SetTile(isolated + Vector2I.Right, TileType.Road);
+        _structureTool.HoverAt(isolated);
+        Check("a road sharing an edge grants access", _structureTool.PreviewLegal);
+        Check("the ghost turns legal with the road",
+            CountGhost(_structureTool, BuildTool.GhostLegal) == 1);
+        Check("the click is accepted once a road touches the cell",
+            _structureTool.ClickCell(isolated));
+
+        _secondStructure = _world.GetStructure(isolated);
+        Check("the second building is registered",
+            _secondStructure != null && _world.Structures.Count == structuresBefore + 1);
+        if (_secondStructure is not { } second || _structure is not { } first)
+        {
+            return;
+        }
+        Check("ids are handed out in creation order", second.Id > first.Id);
+        Check("each cell addresses its own building",
+            second != first && _world.GetStructure(_structureCell) == first);
+        Check("each id resolves to its own building",
+            _world.GetStructure(second.Id) == second
+            && _world.GetStructure(first.Id) == first);
+    }
+
+    /// <summary>
+    /// Rock and water refuse a building the way they refuse a road. To prove it
+    /// is the <i>terrain</i> talking and not the road rule, the check lays a
+    /// road beside the rough cell first — so road access is satisfied and
+    /// cannot be the reason — and takes it up again afterwards.
+    /// </summary>
+    private void CheckStructureOnRoughGroundIsRefused()
+    {
+        bool found = TryFindRoughCellWithSoilBeside(out Vector2I rough, out Vector2I beside);
+        Check("found rock or water with clear soil beside it", found);
+        if (!found)
+        {
+            return;
+        }
+
+        int structuresBefore = _world.Structures.Count;
+        _world.SetTile(beside, TileType.Road);
+        Check("the rough cell now has road access",
+            PlacementRules.HasRoadAccess(_world, [rough]));
+
+        _structureTool.HoverAt(rough);
+        Check("rock or water is refused even with a road beside it",
+            _structureTool.Preview?.Refusal == PlacementRefusal.UnbuildableTerrain);
+        Check("the ghost marks the rough cell as the offender",
+            CountGhost(_structureTool, BuildTool.GhostIllegalCell) == 1);
+        Check("the click on rough ground is rejected", !_structureTool.ClickCell(rough));
+        Check("the rough cell stayed unbuilt", _world.GetTile(rough) == TileType.Empty);
+        Check("no structure was registered on rough ground",
+            _world.Structures.Count == structuresBefore);
+
+        _world.SetTile(beside, TileType.Empty);
+    }
+
+    /// <summary>
+    /// <see cref="PlacementRule.VacantCell"/> again, from the building side: a
+    /// structure may not be stacked on a road, a field or another building —
+    /// and all three of those cells have road access, so nothing but occupancy
+    /// is refusing them.
+    /// </summary>
+    private void CheckStructureOnOccupiedGroundIsRefused()
+    {
+        int structuresBefore = _world.Structures.Count;
+
+        Check("a cell that already holds a building is refused",
+            _structureTool.PlanFor(_structureCell).Refusal == PlacementRefusal.Occupied);
+        Check("the click on a building is rejected",
+            !_structureTool.ClickCell(_structureCell));
+        Check("the building that was there survived",
+            _world.GetStructure(_structureCell) == _structure);
+        Check("the refused click registered no second building",
+            _world.Structures.Count == structuresBefore);
+
+        Vector2I? road = FindCell(cell =>
+            _world.IsRoad(cell) && _world.IsRoad(cell + Vector2I.Right));
+        Check("found a road cell with another road beside it", road != null);
+        if (road is { } onRoad)
+        {
+            Check("a road cell is refused as occupied, not accepted for touching one",
+                _structureTool.PlanFor(onRoad).Refusal == PlacementRefusal.Occupied);
+            Check("the click on a road is rejected", !_structureTool.ClickCell(onRoad));
+            Check("the road survived the refused building", _world.IsRoad(onRoad));
+        }
+
+        Check("a field cell is refused as occupied",
+            _structureTool.PlanFor(_rectFrom).Refusal == PlacementRefusal.Occupied);
+        Check("the field survived the refused building",
+            _world.GetField(_rectFrom) == _markedField);
+    }
+
+    /// <summary>
+    /// Clearing a structure cell takes the whole building with it — tile, cell
+    /// lookup, registry entry and id. This is the path M2's bulldoze will take,
+    /// and it is where a building parts company with a <see cref="Field"/>: a
+    /// field shrinks cell by cell, a building is demolished whole, because half
+    /// a mill is not a mill.
+    /// </summary>
+    private void CheckClearingDemolishesAStructure()
+    {
+        if (_structure is not { } structure)
+        {
+            return;
+        }
+
+        int structuresBefore = _world.Structures.Count;
+        int cellsBefore = _world.StructureCellCount;
+        int id = structure.Id;
+
+        _world.SetTile(_structureCell, TileType.Empty);
+        Check("clearing a structure cell empties the tile",
+            _world.GetTile(_structureCell) == TileType.Empty);
+        Check("the cleared cell addresses no building",
+            _world.GetStructure(_structureCell) == null);
+        Check("the building is gone from the registry",
+            _world.Structures.Count == structuresBefore - 1);
+        Check("its id resolves to nothing once it is demolished",
+            _world.GetStructure(id) == null);
+        Check("the world lost exactly that one structure cell",
+            _world.StructureCellCount == cellsBefore - 1);
+        Check("the terrain under a demolished building is untouched",
+            _world.IsSoil(_structureCell));
+        Check("the other building is untouched",
+            _secondStructure != null
+            && _world.GetStructure(_secondStructure.Origin) == _secondStructure);
+        Check("the other building's id still resolves",
+            _secondStructure != null
+            && _world.GetStructure(_secondStructure.Id) == _secondStructure);
+    }
+
     /// <summary>Cells the tool's ghost currently draws in that colour.</summary>
     private static int CountGhost(BuildTool tool, Color color)
     {
@@ -801,6 +1108,47 @@ public partial class BuildSmokeTest : Node
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Whether the cell borders the road network the way
+    /// <see cref="PlacementRule.TouchesRoad"/> means it — asked through the
+    /// rule itself, so the test's idea of adjacency can never drift from the
+    /// game's.
+    /// </summary>
+    private bool TouchesRoad(Vector2I cell) => PlacementRules.HasRoadAccess(_world, [cell]);
+
+    /// <summary>
+    /// A rock or water cell with clear soil beside it, so a road can be laid on
+    /// that neighbour and the rough cell then judged with its road requirement
+    /// already satisfied.
+    /// </summary>
+    private bool TryFindRoughCellWithSoilBeside(out Vector2I rough, out Vector2I beside)
+    {
+        Vector2I[] directions = [Vector2I.Right, Vector2I.Left, Vector2I.Up, Vector2I.Down];
+        for (int radius = 1; radius <= 40; radius++)
+        {
+            foreach (Vector2I cell in Ring(radius))
+            {
+                TerrainType terrain = _world.GetTerrain(cell);
+                if ((terrain != TerrainType.Rock && terrain != TerrainType.Water)
+                    || _world.GetTile(cell) != TileType.Empty)
+                {
+                    continue;
+                }
+                foreach (Vector2I direction in directions)
+                {
+                    if (IsFreeSoil(cell + direction))
+                    {
+                        rough = cell;
+                        beside = cell + direction;
+                        return true;
+                    }
+                }
+            }
+        }
+        rough = beside = Vector2I.Zero;
+        return false;
     }
 
     /// <summary>

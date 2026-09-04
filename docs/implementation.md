@@ -26,8 +26,9 @@ src/camera/        CameraRig.cs
 src/ui/            MenuController.cs (keyboard menu),
                    CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
 src/ui/build/      BuildTool.cs (base for every placement tool), RoadBuildTool.cs,
-                   FieldBuildTool.cs
-src/world/         TileType.cs, WorldGrid.cs, PlacementRules.cs, Field.cs, Machine.cs
+                   FieldBuildTool.cs, StructureBuildTool.cs
+src/world/         TileType.cs, WorldGrid.cs, PlacementRules.cs, Field.cs,
+                   Structure.cs, Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
 
@@ -68,12 +69,13 @@ diamond orientation.
 
 ## World grid (`src/world/`)
 
-Three entity kinds exist: **roads** (machine-traversable), **fields** (workable
-land), and **machines** (vehicles that move around the map). Roads are plain
-grid tiles; a field is a tile layer *plus* a `Field` entity that owns those
-cells (see **Fields** at the end of the build-tools section — that is the unit
-farmland is addressed by); machines are moving scene entities — deliberately
-*not* grid cells.
+Four entity kinds exist: **roads** (machine-traversable), **fields** (workable
+land), **structures** (placed buildings), and **machines** (vehicles that move
+around the map). Roads are plain grid tiles; a field and a structure are each a
+tile layer *plus* an entity that owns those cells (see **Fields** and
+**Structures** at the end of the build-tools section — those are the units
+farmland and buildings are addressed by); machines are moving scene entities —
+deliberately *not* grid cells.
 
 **Data/view split.** `WorldGrid` (a `Node3D` named `World` in Main.tscn) owns
 the logical world state; its child `GridMap` is presentation only. Game logic
@@ -88,8 +90,10 @@ rendering.
 - **terrain** — `TerrainType` (`OutOfBounds | Soil | Rock | Water`) plus a
   `float` fertility per cell. Generated from the world seed; the player never
   edits it. Read with `GetTerrain(cell)` / `GetFertility(cell)` / `IsSoil(cell)`.
-- **placement** — `TileType` (`Empty | Road | Field`). The player owns it;
-  clearing a cell back to `Empty` leaves the terrain underneath untouched.
+- **placement** — `TileType` (`Empty | Road | Field | Structure`). The player
+  owns it; clearing a cell back to `Empty` leaves the terrain underneath
+  untouched. `Field` and `Structure` say only *that* something is placed —
+  *which* field or building is a question for the entity registries below.
 
 `TerrainType.OutOfBounds` is the value `GetTerrain` returns off the map, so a
 caller can tell "not on the map" from any real terrain in one call;
@@ -161,6 +165,12 @@ calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
   game goes through) and `FieldCellCount`. `SetTile` keeps both sides in step —
   writing anything over a field cell detaches that cell from its field, and a
   field that has lost its last cell is dropped.
+- Structure placing: `PlaceStructure(cells)` is the field mutator's twin — it
+  creates **one** `Structure`, stamps the tiles and indexes cell → structure.
+  Beside it sit `Structures`, `GetStructure(cell)`, `GetStructure(id)` and
+  `StructureCellCount`. `SetTile` keeps this side in step too, but with the
+  opposite rule to fields: overwriting *any* cell of a building demolishes the
+  whole building (see **Structures** below).
 - **Start layout** (`GenerateStartRoad`, deterministic): a single straight
   road along x through the origin (cells −16..16 at z = 0), on the soil strip
   generation carved for it. Nothing else is placed — fields and further roads
@@ -170,8 +180,11 @@ calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
 - **Dev tiles** (`assets/dev/tile_library.tres`, a hand-written `MeshLibrary`):
   road = flat gray box (item 0), field = raised brown box (item 1), rock =
   tall gray block (item 2), water = thin dark-blue slab sitting lower than
-  soil (item 3), and soil in **four fertility shades** (items 4–7, pale straw
-  → deep green) so the fertility field is legible in the iso view. Item ids
+  soil (item 3), soil in **four fertility shades** (items 4–7, pale straw
+  → deep green) so the fertility field is legible in the iso view, and
+  structure = a barn-red box 1.4 m tall and inset from the cell (item 8), so a
+  building reads as a building from any zoom — twice the height of the tallest
+  rock, and the only tile art that is neither flat nor gray-brown. Item ids
   are mirrored as constants in `WorldGrid`; soil picks its item by
   `SoilItemFirst + floor(fertility × 4)`.
 
@@ -207,8 +220,8 @@ for now, varied per instance by exported `Speed`, `TurnSpeed`, `BodyColor`.
 A minimal command menu on the number keys: actions `menu_1`..`menu_9` in
 `project.godot` map keys 1–9 to slots, handled in `_UnhandledInput` on the
 `Menu` node in Main.tscn. **1** toggles the road-build tool, **2** the hover
-readout, **3** the field-marking tool, **9** calls `WorldGrid.SpawnMachine()`;
-the other slots log "unassigned". The `World`, `Inspector` and tool references
+readout, **3** the field-marking tool, **4** the structure tool, **9** calls
+`WorldGrid.SpawnMachine()`; the other slots log "unassigned". The `World`, `Inspector` and tool references
 are node `[Export]`s wired in the scene — the tool slots are typed as the
 `BuildTool` base, so a slot (or the M2 palette) can point at any build tool
 without touching the menu. The menu never has to *disarm* anything either:
@@ -233,13 +246,14 @@ most of them comment — copying it is how the next tool gets written, and
 | `void Apply(PlacementPlan)` *(virtual)* | writes the placement; the default stamps `PlacedTile` over every cell |
 | `bool NeedsAnchor` *(virtual, true)* | false for tools that place on a single click, which then ghost as soon as the cursor moves |
 
-**The tools that fill it in** (one row per subclass; the remaining M2 tools —
-structures, bulldoze — add their rows here):
+**The tools that fill it in** (one row per subclass; the remaining M2 tool —
+bulldoze — adds its row here):
 
 | Tool | Menu key | Places | Rules | Footprint | `Apply` |
 |---|---|---|---|---|---|
 | `RoadBuildTool` | **1** | `Road` | `BuildableTerrain` + `NoOverlap` | `LineCells` — a stair-stepped line | default (stamps tiles) |
 | `FieldBuildTool` | **3** | `Field` | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
+| `StructureBuildTool` | **4** | `Structure` | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
 
 **The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
 re-coding a check inside a tool):
@@ -258,9 +272,12 @@ re-coding a check inside a tool):
   sets both gets `VacantCell`, the stricter one.
 - `TouchesRoad` — a *footprint-level* rule: some cell of the placement must
   share an edge with a road cell **outside** the footprint, so a placement can
-  never satisfy its own road requirement. No tool opts in yet (the M2
-  structure tool will); `BuildSmokeTest` exercises it through
-  `PlacementRules.Check` directly so it stays proven until then.
+  never satisfy its own road requirement. Adjacency is 4-neighbour — a road
+  meeting only a corner is not access. `StructureBuildTool` is its one user,
+  and the reason it exists: it is what makes the road network load-bearing
+  rather than decorative. Because it is a footprint rule, a refusal blames no
+  individual cell — every per-cell verdict is `None`, so the ghost dims the
+  whole placement (`GhostRefused`) instead of marking an offender.
 
 `PlacementRules.Check(world, cells, rules, placing)` returns a
 `PlacementPlan`: the cells, a parallel array of per-cell `PlacementRefusal`s,
@@ -284,7 +301,9 @@ because none of it is going to be built. Highlights sit at
 anchor on rock, or on a cell a field already owns), second left click places
 and re-arms. A refused click writes nothing *and keeps the anchor*, so the
 player just re-aims. Right click / Esc drops the anchor first and leaves the
-tool second.
+tool second. A tool with `NeedsAnchor` = false — the structure tool — skips the
+anchor entirely: it ghosts the cell under the cursor the moment it is armed and
+places on the first click.
 
 **One armed tool at a time.** Every tool joins the `build_tools` scene group
 (`BuildTool.ToolGroup`) in `_Ready`, and `SetActive(true)` disarms every other
@@ -356,12 +375,67 @@ held them rather than refusing, so the cell → field map can never disagree
 with the tile layer. Player placements go through the tool, and therefore
 through `VacantCell`, so that path never comes up in play.
 
+### Structures (`src/world/Structure.cs`, `src/ui/build/StructureBuildTool.cs`)
+
+> **A building is addressed by one `Structure` entity — never by the cell.**
+> The cells it covers get `TileType.Structure` only so the `GridMap` can draw
+> them and `PlacementRules` can call them occupied. Reach the building itself
+> with `WorldGrid.GetStructure(cell)` or `GetStructure(id)`.
+
+`StructureBuildTool` (menu key **4**) places one generic placeholder building;
+the roster — silo in M5, cleaner, mill and bakery in M6 — hangs off the same
+tool. What exists today is placement and the adjacency rule: free soil
+(`VacantCell`), buildable ground, and `TouchesRoad`. `NeedsAnchor` is false, so
+it is the first single-click tool: no drag, and the ghost shows the verdict as
+soon as the cursor moves. `Structure` holds `Id` (creation order, never
+reused), `Name` (defaulted `"Structure N"`), the `Cells` it covers, `Origin`
+(the first of them), `CellCount`, `Contains` and `Bounds`.
+
+**Why an entity and not just a tile value.** `TileType.Structure` can say that
+*a* building is here; it cannot say *which*, and a building needs an identity
+long before it needs behaviour. M5 sends a vehicle to *a silo*; M6 hangs a
+recipe, an input buffer and an output buffer off *that* mill and not the one
+next to it; a save file has to name it. All of that wants a stable handle, and
+`Id` is it — handed out in creation order, never reused, and resolving to null
+once the building is gone, so an order pointing at a demolished mill fails
+loudly rather than hitting whatever was built there since. Bolting the entity
+on later would have meant migrating every cell already stamped as a bare tile —
+the rewrite this shape exists to avoid.
+
+**How a 2x2 lands on this without a rewrite.** A structure owns a *list* of
+cells, like a `Field`, even though the tool hands it one. Everything
+downstream of the footprint is already per cell: `PlacementRules.Check`
+iterates cells, `TouchesRoad` is a footprint-level test that already excludes
+the placement's own cells, the ghost draws a cell per plan entry, the registry
+indexes cell → structure, and demolition walks the footprint. The one line
+that would change is the tool's `Footprint`, from the hovered cell to
+`WorldGrid.RectCells(cell, cell + size - 1)`.
+
+**Where a building parts company with a field** — the one deliberate
+asymmetry: a building is **atomic**. A field shrinks cell by cell as it is
+bulldozed and only disappears with its last cell; clearing *any* cell of a
+building demolishes the whole thing, taking the rest of its footprint with it,
+because half a mill is not a mill. `WorldGrid.SetTile` does that
+(`DemolishStructureAt` detaches the whole footprint from the registry *before*
+writing any tile, so the clearing writes can't re-enter it). Today, with 1×1
+footprints, the two rules are indistinguishable — the difference is written now
+because it is the multi-tile question, not later when four cells make it
+urgent.
+
+Road access is checked at *placement* only; nothing re-checks it when the
+player bulldozes the road afterwards. That is deliberate — cut-off buildings
+are M5's problem, when there is delivery to fail.
+
+`PlaceStructure` is also the unvalidated entry point for dev and scenario code,
+the way `MarkField` and `BuildRoadLine` are: it clears whatever held the cells
+rather than refusing.
+
 ## Cell picking (`src/ui/CellPicker.cs`)
 
 One implementation of "which cell is under that pixel", shared by every
-mouse-driven tool — the road and field tools and the hover readout today, M2's
-remaining tools next — so the answer can never drift between them. A static class, not a node:
-it holds no state.
+mouse-driven tool — the road, field and structure tools and the hover readout
+today, bulldoze next — so the answer can never drift between them. A static
+class, not a node: it holds no state.
 
 The camera ray for a screen position is intersected with the ground plane at
 y = 0 **analytically** (`Plane.IntersectsRay`), then handed to
@@ -391,9 +465,9 @@ tile: road
 - Three lines, all four facts: coordinates, terrain, fertility, placed tile.
   Fertility prints only for soil (rock and water have none by definition, so
   they read `fertility: -`), formatted with `InvariantCulture` so the text is
-  the same on every machine. A cell a field owns names it too
-  (`tile: field (Field 1)`) — because the field, not the cell, is what the
-  game addresses farmland by.
+  the same on every machine. A cell a field or a building owns names it too
+  (`tile: field (Field 1)`, `tile: structure (Structure 1)`) — because the
+  entity, not the cell, is what the game addresses farmland and buildings by.
 - **Off the map** needs no extra bounds check: the terrain layer already
   answers `TerrainType.OutOfBounds` there, which prints as
   `terrain: off the map` — the cell coordinates are still real and still shown.
@@ -478,6 +552,26 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   is refused whole — not even its soil cells are marked. Finally, `SetTile`
   over a field cell shrinks its field, and the field disappears when its last
   cell goes.
+  The **structure tool** comes last, because the rule it exists for only means
+  something once there is a road network to touch. Menu key 4 arms it (and
+  disarms the field tool — the group rule again, now with three members). The
+  accepted case: free soil beside a road previews legal, ghosts one legal cell
+  *without* an anchor, and goes down on a **single** click — after which the
+  cell holds a `Structure` reachable both by cell and by `Id`, with the
+  registry, the cell count, `Origin`, `Bounds` and the hover readout's name all
+  asserted, and that same cell now previewing as occupied. The road rule is
+  then taken through all three of its verdicts on **one** cell, with the roads
+  laid rather than searched for so nothing else changes between the answers:
+  refused as `NoRoadAccess` with nothing written (and the ghost dimming the
+  whole placement, blaming no cell); still refused when the only road nearby
+  meets it diagonally — that is the 4-neighbour check; accepted the moment a
+  road shares an edge, placing a second building with a higher id. Refusals
+  after that: rock or water, checked with a road laid beside it so the terrain
+  is unambiguously the reason; and a building, a road and a field cell each
+  refused as `Occupied` (all three have road access, so only vacancy is
+  talking). Finally, clearing the cell demolishes the building — tile, cell
+  lookup, registry entry and id all gone, terrain intact, the other building
+  untouched.
   It picks its cells by **searching the generated terrain at runtime**
   (nearest rock, a clear soil run, a soil run ending in water, a clear soil
   block for the rectangles, a strip running into rough ground) instead of
@@ -500,8 +594,10 @@ godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>
 `01-start` (default pose), `02-ghost-legal` / `03-ghost-refused` (the build
 ghost in both verdicts), `04-field-ghost` / `05-field-marked` (a field
 rectangle previewed mid-drag, then the same rectangle committed),
-`06-rotated`, `07-zoomed-out`, `08-overview` (detached diagnostic camera),
-`09-readout` (the hover readout). Each `PASS` line captions what the frame is
+`06-structure-refused` / `07-structure-placed` (the must-touch-a-road rule
+refused before the click, then a building standing beside the road),
+`08-rotated`, `09-zoomed-out`, `10-overview` (detached diagnostic camera),
+`11-readout` (the hover readout). Each `PASS` line captions what the frame is
 meant to show — the ghost views list their cells and per-cell refusals, so the
 caption, not the pixel colour, is what says which cell killed a drag.
 
@@ -509,7 +605,8 @@ Where a view needs a legal spot on the map, it *searches* for one through the
 tool itself rather than hard-coding cells, for the same reason
 `BuildSmokeTest` does: a seed change must not quietly turn a view into a
 picture of something else. `04-field-ghost` leaves its field on the map on
-purpose, so the rotated, zoomed and overview shots carry one too.
+purpose, and `07-structure-placed` its building, so the rotated, zoomed and
+overview shots carry both too.
 
 Views settle by **time**, not frame count (the rig smooths on `delta`, so a
 frame count converges differently on a fast machine). Anything driven by the
@@ -528,12 +625,18 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
 - Fields have no behavior — a `Field` is a named region and nothing more.
   "Workable" starts when machines get jobs, fertility is generated but nothing
   reads it yet, and there is no crop, yield or rename UI (all M4).
+- Structures have no behavior either, and there is only the one generic kind:
+  a `Structure` is an identified building that occupies ground and must touch a
+  road. The roster and what buildings *do* is M5 (silo) and M6 (cleaner, mill,
+  bakery); multi-tile footprints are unwritten but not designed out (see
+  **Structures**); nothing re-checks road access when the road under a
+  building's neighbour is bulldozed later.
 - Validation lives in the **tools**, not in the data layer: `WorldGrid.SetTile`
   still writes anywhere (including off the map), which is what start layout,
   dev code and tests want. Anything the *player* places goes through
   `BuildTool`, and therefore through `PlacementRules`.
-- Player interaction is the keyboard menu plus the road and field tools. The
-  remaining M2 tools — structures, bulldoze — and the build palette and build
+- Player interaction is the keyboard menu plus the road, field and structure
+  tools. The remaining M2 tool — bulldoze — and the build palette and build
   costs are not written yet; they are meant to be subclasses of `BuildTool`
   (plus, for bulldoze, a rule of its own) and assertions in `BuildSmokeTest`.
 - The simulation still lives in Godot nodes; the standalone deterministic sim

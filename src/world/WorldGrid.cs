@@ -38,6 +38,9 @@ public partial class WorldGrid : Node3D
     private const int SoilItemFirst = 4;
     private const int SoilTiers = 4;
 
+    /// <summary>Dev art for a placed building: a tall box, so it reads as one.</summary>
+    private const int StructureItem = 8;
+
     /// <summary>
     /// Offset that derives the rock/water mask seed from the world seed, so a
     /// single seed still describes the whole map.
@@ -89,6 +92,15 @@ public partial class WorldGrid : Node3D
     private readonly List<Field> _fields = new();
     private readonly Dictionary<Vector2I, Field> _fieldOf = new();
     private int _fieldsCreated;
+
+    // Buildings are entities too, and for a stronger reason: a tile enum has
+    // no room for the identity M5 delivers to and M6 hangs state off (see
+    // Structure). Same shape as the field registry — a list in creation order
+    // plus a cell -> entity index — so both kinds of placed thing are looked
+    // up the same way.
+    private readonly List<Structure> _structures = new();
+    private readonly Dictionary<Vector2I, Structure> _structureOf = new();
+    private int _structuresCreated;
 
     // Terrain layer: dense flat arrays indexed by Index(cell). Every in-bounds
     // cell has a value, so a dictionary would only add overhead — this is the
@@ -194,6 +206,106 @@ public partial class WorldGrid : Node3D
         return field;
     }
 
+    /// <summary>Every building the player has placed, in creation order.</summary>
+    public IReadOnlyList<Structure> Structures => _structures;
+
+    /// <summary>How many cells are covered by a building.</summary>
+    public int StructureCellCount => _structureOf.Count;
+
+    /// <summary>
+    /// The building that occupies the cell, or null when none does — the
+    /// lookup that turns "the cell under the cursor" into the entity that
+    /// holds the recipe and the buffers.
+    /// </summary>
+    public Structure? GetStructure(Vector2I cell) => _structureOf.GetValueOrDefault(cell);
+
+    /// <summary>
+    /// The building with that <see cref="Structure.Id"/>, or null when it has
+    /// been demolished — how a saved order, a job or a recipe refers to a
+    /// building without holding the object or knowing a cell. Linear over the
+    /// registry: buildings are few, and an index can be added the day one is
+    /// worth keeping in step.
+    /// </summary>
+    public Structure? GetStructure(int id)
+    {
+        foreach (Structure structure in _structures)
+        {
+            if (structure.Id == id)
+            {
+                return structure;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Places the cells as <b>one new building</b> — the addressable unit
+    /// buildings come in (see <see cref="Structure"/>) — and returns it, or
+    /// null for an empty footprint. Whatever held those cells is cleared
+    /// first, so the cell → structure map can never disagree with the tile
+    /// layer; the structure tool refuses an occupied cell in the first place,
+    /// but dev and scenario code calls this directly, the way
+    /// <see cref="BuildRoadLine"/> is the unvalidated way to lay road and
+    /// <see cref="MarkField"/> is for farmland.
+    ///
+    /// The footprint is a list, so a multi-cell building needs nothing here
+    /// beyond a wider list from the tool.
+    /// </summary>
+    public Structure? PlaceStructure(IReadOnlyList<Vector2I> cells)
+    {
+        if (cells.Count == 0)
+        {
+            return null;
+        }
+
+        _structuresCreated++;
+        var structure = new Structure(
+            _structuresCreated, $"Structure {_structuresCreated}", cells);
+        foreach (Vector2I cell in cells)
+        {
+            DemolishStructureAt(cell);
+        }
+        _structures.Add(structure);
+        foreach (Vector2I cell in cells)
+        {
+            SetTile(cell, TileType.Structure);
+            _structureOf[cell] = structure;
+        }
+        return structure;
+    }
+
+    /// <summary>
+    /// Demolishes the building that owns the cell, if one does — <b>the whole
+    /// building</b>, clearing every other cell of its footprint too. That is
+    /// where a building parts company with a <see cref="Field"/>, which shrinks
+    /// cell by cell instead: half a mill is not a mill, so bulldozing one
+    /// corner of a 2x2 takes the mill with it.
+    ///
+    /// Every cell is detached from the registry before any tile is written, so
+    /// the <see cref="SetTile"/> calls that clear the rest cannot re-enter.
+    /// </summary>
+    private void DemolishStructureAt(Vector2I cell)
+    {
+        if (!_structureOf.Remove(cell, out Structure? structure))
+        {
+            return;
+        }
+
+        _structures.Remove(structure);
+        var footprint = new List<Vector2I>(structure.Cells);
+        foreach (Vector2I owned in footprint)
+        {
+            _structureOf.Remove(owned);
+        }
+        foreach (Vector2I owned in footprint)
+        {
+            if (owned != cell)
+            {
+                SetTile(owned, TileType.Empty);
+            }
+        }
+    }
+
     /// <summary>
     /// Detaches a cell from the field that owns it, and drops that field
     /// entirely once it has lost its last cell — a field is its cells, so an
@@ -228,6 +340,12 @@ public partial class WorldGrid : Node3D
         {
             ReleaseFieldCell(cell);
         }
+        // Buildings are atomic: overwriting one of their cells takes the whole
+        // building, and with it the rest of its footprint.
+        if (previous == TileType.Structure)
+        {
+            DemolishStructureAt(cell);
+        }
         if (type == TileType.Road)
         {
             _roadCells.Add(cell);
@@ -259,6 +377,8 @@ public partial class WorldGrid : Node3D
                 return RoadItem;
             case TileType.Field:
                 return FieldItem;
+            case TileType.Structure:
+                return StructureItem;
         }
 
         return GetTerrain(cell) switch

@@ -98,10 +98,15 @@ public partial class ScreenshotTest : Node
         // live rectangle during a drag, then the same rectangle committed.
         await ShowFieldRectangle(main, rig);
 
+        // The must-touch-a-road rule, which is what makes the road network
+        // load-bearing rather than decorative, plus the first dev-art tile
+        // with real height on it.
+        await ShowStructure(main, rig);
+
         // One 90° step: catches a rotation that skews or flips the world.
         SendAction("camera_rotate_left");
         await Settle(SettleSeconds);
-        Capture("06-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
+        Capture("08-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
 
         // As far out as the rig allows — the "does it read at farm scale" view.
         for (int i = 0; i < ZoomOutSteps; i++)
@@ -110,20 +115,20 @@ public partial class ScreenshotTest : Node
         }
 
         await Settle(SettleSeconds);
-        Capture("07-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
+        Capture("09-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
 
         // Diagnostic only: a detached camera beyond the rig's ZoomMax, so the
         // whole world is in frame even when the player could never see it.
         AddOverviewCamera(main);
         await Settle(0.2f);
-        Capture("08-overview", "detached diagnostic camera, whole world");
+        Capture("10-overview", "detached diagnostic camera, whole world");
 
         // The hover readout, which no other view can show. Driven by an
         // explicit pixel with _Process switched off, so it names a known cell
         // instead of following a cursor this run does not have.
         camera.MakeCurrent();
         string readout = await ShowReadout(main);
-        Capture("09-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
+        Capture("11-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
 
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
@@ -282,6 +287,103 @@ public partial class ScreenshotTest : Node
         tool.SetActive(false);
         tool.SetProcess(true);
         rig.Position = home;
+    }
+
+    /// <summary>
+    /// Captures the structure tool in both verdicts: a cell the road rule
+    /// refuses, and a cell beside the road where the building actually lands.
+    /// Two separate claims about pixels live here — that the ghost shows the
+    /// refusal <i>before</i> the click, and that a placed structure reads as a
+    /// building rather than as another flat tile, which is the first dev-art
+    /// mesh with real height and so has never appeared in any view.
+    ///
+    /// Both cells are found by asking the tool, never assumed. The structure
+    /// tool places on a single click, so the refused cell is only ever
+    /// hovered; the legal one is clicked and the building deliberately left
+    /// standing for the later views.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowStructure(Node main, CameraRig rig)
+    {
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var tool = main.GetNodeOrNull<BuildTool>("StructureTool");
+        if (world == null || tool == null)
+        {
+            GD.Print("FAIL: structure — no World or StructureTool in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        Vector3 home = rig.Position;
+        tool.SetProcess(false);
+        tool.SetActive(true);
+
+        await CaptureStructure(world, tool, rig, PlacementRefusal.NoRoadAccess,
+            place: false, name: "06-structure-refused",
+            what: "structure refused before the click, no road beside it");
+        await CaptureStructure(world, tool, rig, PlacementRefusal.None,
+            place: true, name: "07-structure-placed",
+            what: "structure placed on a cell touching the road");
+
+        tool.SetActive(false);
+        tool.SetProcess(true);
+        rig.Position = home;
+    }
+
+    /// <summary>
+    /// Hovers outward from the origin until the tool returns
+    /// <paramref name="want"/>, frames that cell and captures it — committing
+    /// the placement first when <paramref name="place"/> is set, so the shot
+    /// shows the building itself rather than its ghost.
+    /// </summary>
+    private async System.Threading.Tasks.Task CaptureStructure(
+        WorldGrid world, BuildTool tool, CameraRig rig,
+        PlacementRefusal want, bool place, string name, string what)
+    {
+        const int SearchRadius = 14;
+
+        for (int radius = 1; radius <= SearchRadius; radius++)
+        {
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dz)) != radius)
+                    {
+                        continue;
+                    }
+
+                    var cell = new Vector2I(dx, dz);
+                    tool.HoverAt(cell);
+                    if (tool.Preview is not { } plan || plan.Refusal != want)
+                    {
+                        continue;
+                    }
+
+                    string caption = $"{what} — {cell}, {Describe(plan)}";
+                    if (place)
+                    {
+                        tool.ClickCell(cell);
+                        tool.HoverAt(null);
+                        caption += $", {world.GetStructure(cell)?.ToString() ?? "no structure!"}";
+                    }
+
+                    rig.Position = world.CellToWorld(cell);
+                    await Settle(0.3f);
+                    Capture(name, caption);
+
+                    if (place && world.GetStructure(cell) == null)
+                    {
+                        GD.Print($"FAIL: {name} — the click registered no structure");
+                        _failed = true;
+                    }
+                    return;
+                }
+            }
+        }
+
+        GD.Print($"FAIL: {name} — no cell within {SearchRadius} of the origin "
+            + $"gave verdict {want}");
+        _failed = true;
     }
 
     /// <summary>

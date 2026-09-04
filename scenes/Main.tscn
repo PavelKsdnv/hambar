@@ -1,4 +1,4 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=13 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
@@ -8,6 +8,7 @@
 [ext_resource type="Script" path="res://src/ui/build/RoadBuildTool.cs" id="6_roadtool"]
 [ext_resource type="Script" path="res://src/ui/CellInspector.cs" id="7_inspector"]
 [ext_resource type="Script" path="res://src/ui/build/FieldBuildTool.cs" id="8_fieldtool"]
+[ext_resource type="Script" path="res://src/ui/build/StructureBuildTool.cs" id="9_structuretool"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -52,6 +53,10 @@ World = NodePath("../World")
 script = ExtResource("8_fieldtool")
 World = NodePath("../World")
 
+[node name="StructureTool" type="Node3D" parent="." node_paths=PackedStringArray("World")]
+script = ExtResource("9_structuretool")
+World = NodePath("../World")
+
 [node name="Hud" type="CanvasLayer" parent="."]
 
 [node name="CellReadout" type="Label" parent="Hud"]
@@ -70,11 +75,12 @@ script = ExtResource("7_inspector")
 World = NodePath("../World")
 Readout = NodePath("../Hud/CellReadout")
 
-[node name="Menu" type="Node" parent="." node_paths=PackedStringArray("World", "RoadTool", "FieldTool", "Inspector")]
+[node name="Menu" type="Node" parent="." node_paths=PackedStringArray("World", "RoadTool", "FieldTool", "StructureTool", "Inspector")]
 script = ExtResource("5_menu")
 World = NodePath("../World")
 RoadTool = NodePath("../RoadTool")
 FieldTool = NodePath("../FieldTool")
+StructureTool = NodePath("../StructureTool")
 Inspector = NodePath("../CellInspector")
 
 [node name="CameraRig" type="Node3D" parent="."]
