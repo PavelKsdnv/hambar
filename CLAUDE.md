@@ -19,6 +19,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run the game from the CLI with the Godot .NET editor binary: `godot --path .` (add `--headless` for editor-less operations like `--build-solutions` or `--import`).
 - `.godot/` is generated cache — never edit or commit-worthy content lives there.
 
+## Issue tracking
+
+Tasks live as GitHub issues on the `origin` repo. Two stdlib-only Python scripts wrap the API — `scripts/README.md` has the full flag set:
+
+- `python scripts/gh_issues_read.py list|get|comments|search|labels|milestones` — read side; `--json` (optionally `--fields`) for machine-readable output, PRs filtered out by default.
+- `python scripts/gh_issues_publish.py create|batch|update|comment|close|reopen` — write side; `--dry-run` previews the payload, `--dedupe` keeps repeat runs idempotent.
+- Both resolve the repo from the `origin` remote and the token from `$GITHUB_TOKEN` / `gh auth token`, so `--repo`/`--token` are rarely needed.
+- Caveat: GitHub's issue *list* endpoint lags a few seconds behind a write, so a `--dedupe` scan run immediately after a create can miss it.
+
+When the user asks to write something down as a task or issue, follow the `task` skill (`.claude/skills/task/SKILL.md`): file a self-contained brief sized for a single agent session, label it `needs-review`, and publish without asking for approval in chat — the user reviews and edits on GitHub.
+
 ## Architecture decisions (from docs/tech.md)
 
 These are settled decisions; follow them rather than re-deciding:
