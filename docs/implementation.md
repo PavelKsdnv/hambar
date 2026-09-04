@@ -2,7 +2,7 @@
 
 What exists in the codebase today and how it fits together. Companion to
 `tech.md` (the decisions) — this documents how those decisions were realized.
-Last updated: 2026-07-06.
+Last updated: 2026-09-04.
 
 ## Building & running
 
@@ -23,7 +23,8 @@ scenes/            .tscn scenes; Main.tscn is the entry point
 scenes/world/      scenes instanced by the world (Machine.tscn)
 scenes/dev/        headless smoke-test scenes (not part of the game)
 src/camera/        CameraRig.cs
-src/ui/            MenuController.cs (keyboard menu), RoadBuildTool.cs
+src/ui/            MenuController.cs (keyboard menu), RoadBuildTool.cs,
+                   CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
 src/world/         TileType.cs, WorldGrid.cs, Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
@@ -71,13 +72,59 @@ are static grid tiles; machines are moving scene entities — deliberately *not*
 grid cells.
 
 **Data/view split.** `WorldGrid` (a `Node3D` named `World` in Main.tscn) owns
-the logical tile state in a `Dictionary<Vector2I, TileType>`; its child
-`GridMap` is presentation only. Game logic must go through `WorldGrid`
-(`GetTile`/`SetTile`/`IsRoad`/…) and never read the `GridMap` back —
-`SetTile` keeps the view in sync. This is the first step toward the tech.md
-rule that the sim is decoupled from rendering.
+the logical world state; its child `GridMap` is presentation only. Game logic
+must go through `WorldGrid` (`GetTile`/`SetTile`/`GetTerrain`/`IsRoad`/…) and
+never read the `GridMap` back — every mutator keeps the view in sync. This is
+the first step toward the tech.md rule that the sim is decoupled from
+rendering.
 
-- `TileType`: `Empty | Road | Field`.
+**Two layers, stored separately.** What the land *is* and what the player
+*built* are different things and never share storage:
+
+- **terrain** — `TerrainType` (`OutOfBounds | Soil | Rock | Water`) plus a
+  `float` fertility per cell. Generated from the world seed; the player never
+  edits it. Read with `GetTerrain(cell)` / `GetFertility(cell)` / `IsSoil(cell)`.
+- **placement** — `TileType` (`Empty | Road | Field`). The player owns it;
+  clearing a cell back to `Empty` leaves the terrain underneath untouched.
+
+`TerrainType.OutOfBounds` is the value `GetTerrain` returns off the map, so a
+caller can tell "not on the map" from any real terrain in one call;
+`InBounds(cell)` answers the same question directly and `GetFertility` returns
+0 out of bounds.
+
+**Terrain generation** (`GenerateTerrain`, called from `_Ready` before the
+start road):
+
+- The map is **bounded**: cells −`MapHalfExtent`..`MapHalfExtent` on both axes.
+  `MapHalfExtent = 48` → a 97×97 grid = 194 m across at 2 m cells, which fits
+  inside Main.tscn's 200×200 ground plane and is a little larger than what the
+  camera shows at maximum zoom-out.
+- **One seed** (`WorldSeed`, exported) drives everything. Two `FastNoiseLite`
+  fields derive from it: fertility (`Seed = WorldSeed`) and a rock/water mask
+  (`Seed = WorldSeed + 7919`), both SimplexSmooth + FBM. The mask reads like a
+  coarse elevation — below `WaterLevel` becomes water, above `RockLevel`
+  becomes rock, the rest soil — so, deliberately, water and rock never border
+  each other. Defaults give roughly 76 % soil / 14 % water / 10 % rock.
+- Fertility is the fertility noise remapped to 0..1, and is **0 on rock and
+  water**: it means "how good is this soil", and those cells have none.
+- Storage is **flat arrays** indexed by cell (`TerrainType[]`, `float[]`), not
+  a dictionary — every in-bounds cell has a value, and this is the first piece
+  of state laid out the way the M3 sim core wants all of it. The extent the
+  arrays were built with is cached in `_halfExtent`, so `MapHalfExtent`
+  changing at runtime can never index past the arrays.
+- `GenerateTerrain` is **deterministic and re-runnable**: same seed in, same
+  arrays out (bit-exact fertility), and it never touches the placement layer,
+  so regenerating leaves roads and fields where they were.
+- The starting road is **carved**: generation forces its strip (z = 0,
+  x = −16..16) to soil rather than biasing the noise, so the seed still owns
+  every other cell.
+
+**How the two layers render.** One `GridMap` draws both. `ViewItem(cell)`
+returns the placed tile's mesh item when the cell has one and the terrain's
+otherwise, so placement *hides* terrain visually without overwriting it, and
+clearing the tile brings the same terrain back. `SetTile` writes data then
+calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
+
 - Grid cells are **2 m** (`cell_size = (2, 1, 2)`, `cell_center_y = false` so
   tile origin is the ground plane). Cell↔world conversion goes through
   `CellToWorld`/`WorldToCell`.
@@ -99,11 +146,17 @@ rule that the sim is decoupled from rendering.
   Machines still *drive* such a road diagonally: the corner-cutting rule lets
   both the BFS and the smoothing pass run straight along the staircase.
 - **Start layout** (`GenerateStartRoad`, deterministic): a single straight
-  road along x through the origin (cells −16..16 at z = 0). Nothing else is
-  placed — fields and further roads will come from gameplay/build actions.
+  road along x through the origin (cells −16..16 at z = 0), on the soil strip
+  generation carved for it. Nothing else is placed — fields and further roads
+  will come from gameplay/build actions. Building outside `MapHalfExtent` is
+  still allowed (placement validation is M2); such cells are drawn too.
 - **Dev tiles** (`assets/dev/tile_library.tres`, a hand-written `MeshLibrary`):
-  road = flat gray box (item 0), field = slightly raised brown box (item 1).
-  Item ids are mirrored as constants in `WorldGrid`.
+  road = flat gray box (item 0), field = raised brown box (item 1), rock =
+  tall gray block (item 2), water = thin dark-blue slab sitting lower than
+  soil (item 3), and soil in **four fertility shades** (items 4–7, pale straw
+  → deep green) so the fertility field is legible in the iso view. Item ids
+  are mirrored as constants in `WorldGrid`; soil picks its item by
+  `SoilItemFirst + floor(fertility × 4)`.
 
 ## Machines (`src/world/Machine.cs`, `scenes/world/Machine.tscn`)
 
@@ -146,9 +199,8 @@ The first mouse-driven build action. A `RoadTool` node in Main.tscn; menu
 key 1 toggles it. While active:
 
 - A **blinking square** (unshaded translucent `PlaneMesh`, visibility cycled
-  at 0.5 s) highlights the hovered cell. Picking casts the camera ray from
-  `Viewport.GetMousePosition()` against the ground plane (y = 0) — no physics
-  involved — then `WorldGrid.WorldToCell`.
+  at 0.5 s) highlights the hovered cell, resolved through the shared
+  `CellPicker` (below).
 - **First left click** anchors the road start; a preview line (a `MultiMesh`
   of the same squares over `WorldGrid.LineCells`) follows the cursor.
 - **Second left click** places the road via `WorldGrid.BuildRoadLine` and
@@ -156,13 +208,64 @@ key 1 toggles it. While active:
 - **Right click / Esc** cancels the pending anchor first, then deactivates.
 
 Highlights sit at `Machine.DeckHeight + 0.05` so they never z-fight the road
-deck. `ClickCell` (the anchor/place step) is public so the headless smoke test
-can drive the tool without a real cursor.
+deck. `ClickCell` (the anchor/place step) and `PickCell(screenPosition)` are
+public so the headless smoke test can drive the tool without a real cursor.
 
 Gotcha (hand-written .tscn): a Node-typed export serialized as
 `World = NodePath("../World")` only resolves to the actual node if the
 `[node]` header also carries `node_paths=PackedStringArray("World")` —
 without that marker the property loads as null.
+
+## Cell picking (`src/ui/CellPicker.cs`)
+
+One implementation of "which cell is under that pixel", shared by every
+mouse-driven tool — the road tool and the hover readout today, M2's build tools
+next — so the answer can never drift between them. A static class, not a node:
+it holds no state.
+
+The camera ray for a screen position is intersected with the ground plane at
+y = 0 **analytically** (`Plane.IntersectsRay`), then handed to
+`WorldGrid.WorldToCell`. No physics bodies, no collision layers, no raycast
+query: picking stays exact, deterministic, and independent of what happens to
+be drawn on the cell (a tall rock mesh must not change which cell a pixel
+means). Picks are **not clamped** to the map — off-map picks come back as real
+coordinates and callers ask `InBounds`/`GetTerrain` what that means.
+
+`CellAt(world, camera, screenPosition)` is the core; `CellAt(node, world,
+screenPosition)` takes the camera from the node's viewport (what scene nodes
+want), and `CellUnderMouse(node, world)` adds the cursor position. Every
+caller's per-frame path ends in the same two lines, and the position-driven
+overloads are what lets the headless test drive a known pixel.
+
+## Hover readout (`src/ui/CellInspector.cs`)
+
+The debug instrument that confirms the generated world is what the generator
+thinks it is: a screen-corner `Label` naming the cell under the cursor.
+
+```
+cell: 12, -3
+terrain: soil   fertility: 0.62
+tile: road
+```
+
+- Three lines, all four facts: coordinates, terrain, fertility, placed tile.
+  Fertility prints only for soil (rock and water have none by definition, so
+  they read `fertility: -`), formatted with `InvariantCulture` so the text is
+  the same on every machine.
+- **Off the map** needs no extra bounds check: the terrain layer already
+  answers `TerrainType.OutOfBounds` there, which prints as
+  `terrain: off the map` — the cell coordinates are still real and still shown.
+- `CellInspector` is a plain `Node` in Main.tscn with `[Export]`s for the
+  `WorldGrid` and the `Label` (under a `Hud` `CanvasLayer`); it owns the
+  label's visibility. `Inspect(screenPosition)` does the pick + refresh and
+  returns the cell — `_Process` calls it with the mouse position, the smoke
+  test with a computed pixel.
+- **Toggle:** menu key 2. It starts **on** (`EnabledOnStart`), because a dev
+  instrument that needs arming isn't one; `ScreenshotTest` calls
+  `SetEnabled(false)` before capturing so the canonical views stay clean.
+
+This is *not* the player-facing inspector — field inspection is M4, building
+inspection M6. It is a dev readout that happens to be on screen.
 
 ## Dev smoke tests (`scenes/dev/`, `src/dev/`)
 
@@ -178,13 +281,29 @@ godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
   actions; `Input.ParseInputEvent(InputEventAction)` for event-driven ones,
   which is required to reach `_UnhandledInput`) and asserts the rig pans,
   rotates, and zooms.
-- **WorldSmokeTest** asserts exactly the starting road generated (33 road
-  cells, nothing else, no machines), then presses menu key 9 and asserts the
-  spawned machine has moved after ~3 s and is still on the road. It also
-  exercises the road-build tool: menu key 1 toggles it on/off, two `ClickCell`
-  calls place a diagonal road, `FindRoadPath` across it returns the
-  corner-cutting diagonal walk, and `SmoothRoadPath` collapses that to a
-  single straight segment.
+- **WorldSmokeTest** asserts the generated **terrain** (every in-bounds cell
+  has terrain and a GridMap item; cells past the edge report `OutOfBounds`;
+  rock, water and soil all exist; fertility stays in 0..1, varies, and is 0 on
+  rock/water; the start-road strip is soil), then **seed determinism**:
+  regenerating the same seed reproduces terrain and fertility bit-exactly,
+  a different seed produces a different map, and returning to the seed
+  restores the original. It then asserts the **layers are independent** —
+  placing a road leaves `GetTerrain`/`GetFertility` unchanged and only swaps
+  the GridMap item, and clearing it restores that item. After that: exactly
+  the starting road placed (33 road cells, no machines), menu key 9 spawns a
+  machine that has moved after ~3 s and is still on the road, and the
+  road-build tool works (menu key 1 toggles it on/off, two `ClickCell` calls
+  place a diagonal road, `FindRoadPath` across it returns the corner-cutting
+  diagonal walk, and `SmoothRoadPath` collapses that to a single straight
+  segment). Finally the **hover readout**: headless has no cursor, so instead
+  of moving a mouse the test projects a known cell center to its pixel
+  (`Camera3D.UnprojectPosition`) and drives that pixel back through the picker
+  — a round trip that fails if either half of screen ↔ cell drifts. It asserts
+  the picker, the inspector and the road tool all resolve the *same* cell from
+  the *same* pixel (that is the "one shared code path" check), that the label
+  mirrors the inspector's text, that the readout names all four facts for the
+  origin, that an off-map pixel still resolves to its real coordinates and
+  reads "off the map", and that menu key 2 switches the readout off and on.
 
 For a visual check without a window grab, Godot's movie-maker mode renders
 frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
@@ -192,7 +311,11 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
 
 ## Not yet implemented (deliberate)
 
-- Fields have no behavior — "workable" starts when machines get jobs.
+- Fields have no behavior — "workable" starts when machines get jobs, and
+  fertility is generated but nothing reads it yet (crop growth is M4).
+- Terrain does not restrict building: roads and fields can be placed on rock,
+  water, or right off the map. Placement validation is M2 — `GetTerrain`,
+  `IsSoil` and `InBounds` are the hooks it will ask.
 - Player interaction is the keyboard menu plus the road-build tool; there is
   no other tile painting/building UI yet, and no build costs or validation
   (roads can be drawn anywhere, over fields included).

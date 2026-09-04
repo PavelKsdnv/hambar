@@ -27,6 +27,9 @@ public partial class RoadBuildTool : Node3D
     public bool Active { get; private set; }
     public Vector2I? Anchor { get; private set; }
 
+    /// <summary>Cell the cursor was last over while the tool was active.</summary>
+    public Vector2I? HoverCell => _hoverCell;
+
     private MeshInstance3D _cursor = null!;
     private MultiMesh _previewMesh = null!;
     private Vector2I? _hoverCell;
@@ -108,7 +111,7 @@ public partial class RoadBuildTool : Node3D
             return;
         }
         _time += (float)delta;
-        _hoverCell = PickCell();
+        _hoverCell = CellPicker.CellUnderMouse(this, World);
 
         if (_hoverCell is { } hover)
         {
@@ -136,19 +139,14 @@ public partial class RoadBuildTool : Node3D
         }
     }
 
-    /// <summary>The world cell under the mouse cursor (ray vs. ground plane).</summary>
-    private Vector2I? PickCell()
-    {
-        Camera3D? camera = GetViewport().GetCamera3D();
-        if (camera == null)
-        {
-            return null;
-        }
-        Vector2 mouse = GetViewport().GetMousePosition();
-        Vector3? hit = new Plane(Vector3.Up, 0f)
-            .IntersectsRay(camera.ProjectRayOrigin(mouse), camera.ProjectRayNormal(mouse));
-        return hit is { } point ? World!.WorldToCell(point) : null;
-    }
+    /// <summary>
+    /// The world cell at a screen position, through the shared
+    /// <see cref="CellPicker"/> — the same code path the hover readout uses, so
+    /// what the readout names is always what a click would build on. Public and
+    /// position-driven so the headless smoke test can drive a known pixel.
+    /// </summary>
+    public Vector2I? PickCell(Vector2 screenPosition) =>
+        CellPicker.CellAt(this, World, screenPosition);
 
     private void UpdatePreview()
     {
