@@ -16,6 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Rendering: Forward Plus, D3D12 on Windows; physics: Jolt.
 - `dotnet build Arable.sln` compiles the game assembly (`Arable.csproj`/`Arable.sln` are hand-written; Godot's `--build-solutions` doesn't create them from scratch).
 - Verify changes with the headless smoke tests: `godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn` (and `WorldSmokeTest.tscn`) — they print PASS/FAIL and exit 0/1.
+- Check *visual* claims with `godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>`, which renders the canonical views to PNGs you (or an agent) can actually look at. **Must run windowed** — under `--headless` the rasterizer is a dummy, there is no framebuffer to read back, and the run hangs. Output dir defaults to `user://screenshots`; pass a scratchpad path to keep runs disposable.
 - Run the game from the CLI with the Godot .NET editor binary: `godot --path .` (add `--headless` for editor-less operations like `--build-solutions` or `--import`).
 - `.godot/` is generated cache — never edit or commit-worthy content lives there.
 
@@ -29,6 +30,10 @@ Tasks live as GitHub issues on the `origin` repo. Two stdlib-only Python scripts
 - Caveat: GitHub's issue *list* endpoint lags a few seconds behind a write, so a `--dedupe` scan run immediately after a create can miss it.
 
 When the user asks to write something down as a task or issue, follow the `task` skill (`.claude/skills/task/SKILL.md`): file a self-contained brief sized for a single agent session, label it `needs-review`, and publish without asking for approval in chat — the user reviews and edits on GitHub.
+
+Each milestone also has one `[Mn] Tracker:` issue holding its acceptance criteria — an umbrella, not a session-sized task. Issues carry `needs-review` until a human vets them, then `reviewed` ("ready for development"); only `reviewed` issues are ready to be picked up.
+
+When the user asks to *implement* a milestone, follow the `milestone` skill (`.claude/skills/milestone/SKILL.md`): it works the milestone's `reviewed` issues one at a time on a `milestone/<id>` branch, each in its own fresh subagent, with the driver re-running the build and smoke tests itself before committing and closing, and the tracker checked and closed last.
 
 ## Architecture decisions (from docs/tech.md)
 
