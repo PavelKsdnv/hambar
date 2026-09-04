@@ -23,7 +23,8 @@ scenes/            .tscn scenes; Main.tscn is the entry point
 scenes/world/      scenes instanced by the world (Machine.tscn)
 scenes/dev/        headless smoke-test scenes (not part of the game)
 src/camera/        CameraRig.cs
-src/ui/            MenuController.cs (keyboard menu), RoadBuildTool.cs
+src/ui/            MenuController.cs (keyboard menu), RoadBuildTool.cs,
+                   CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
 src/world/         TileType.cs, WorldGrid.cs, Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
@@ -198,9 +199,8 @@ The first mouse-driven build action. A `RoadTool` node in Main.tscn; menu
 key 1 toggles it. While active:
 
 - A **blinking square** (unshaded translucent `PlaneMesh`, visibility cycled
-  at 0.5 s) highlights the hovered cell. Picking casts the camera ray from
-  `Viewport.GetMousePosition()` against the ground plane (y = 0) — no physics
-  involved — then `WorldGrid.WorldToCell`.
+  at 0.5 s) highlights the hovered cell, resolved through the shared
+  `CellPicker` (below).
 - **First left click** anchors the road start; a preview line (a `MultiMesh`
   of the same squares over `WorldGrid.LineCells`) follows the cursor.
 - **Second left click** places the road via `WorldGrid.BuildRoadLine` and
@@ -208,13 +208,64 @@ key 1 toggles it. While active:
 - **Right click / Esc** cancels the pending anchor first, then deactivates.
 
 Highlights sit at `Machine.DeckHeight + 0.05` so they never z-fight the road
-deck. `ClickCell` (the anchor/place step) is public so the headless smoke test
-can drive the tool without a real cursor.
+deck. `ClickCell` (the anchor/place step) and `PickCell(screenPosition)` are
+public so the headless smoke test can drive the tool without a real cursor.
 
 Gotcha (hand-written .tscn): a Node-typed export serialized as
 `World = NodePath("../World")` only resolves to the actual node if the
 `[node]` header also carries `node_paths=PackedStringArray("World")` —
 without that marker the property loads as null.
+
+## Cell picking (`src/ui/CellPicker.cs`)
+
+One implementation of "which cell is under that pixel", shared by every
+mouse-driven tool — the road tool and the hover readout today, M2's build tools
+next — so the answer can never drift between them. A static class, not a node:
+it holds no state.
+
+The camera ray for a screen position is intersected with the ground plane at
+y = 0 **analytically** (`Plane.IntersectsRay`), then handed to
+`WorldGrid.WorldToCell`. No physics bodies, no collision layers, no raycast
+query: picking stays exact, deterministic, and independent of what happens to
+be drawn on the cell (a tall rock mesh must not change which cell a pixel
+means). Picks are **not clamped** to the map — off-map picks come back as real
+coordinates and callers ask `InBounds`/`GetTerrain` what that means.
+
+`CellAt(world, camera, screenPosition)` is the core; `CellAt(node, world,
+screenPosition)` takes the camera from the node's viewport (what scene nodes
+want), and `CellUnderMouse(node, world)` adds the cursor position. Every
+caller's per-frame path ends in the same two lines, and the position-driven
+overloads are what lets the headless test drive a known pixel.
+
+## Hover readout (`src/ui/CellInspector.cs`)
+
+The debug instrument that confirms the generated world is what the generator
+thinks it is: a screen-corner `Label` naming the cell under the cursor.
+
+```
+cell: 12, -3
+terrain: soil   fertility: 0.62
+tile: road
+```
+
+- Three lines, all four facts: coordinates, terrain, fertility, placed tile.
+  Fertility prints only for soil (rock and water have none by definition, so
+  they read `fertility: -`), formatted with `InvariantCulture` so the text is
+  the same on every machine.
+- **Off the map** needs no extra bounds check: the terrain layer already
+  answers `TerrainType.OutOfBounds` there, which prints as
+  `terrain: off the map` — the cell coordinates are still real and still shown.
+- `CellInspector` is a plain `Node` in Main.tscn with `[Export]`s for the
+  `WorldGrid` and the `Label` (under a `Hud` `CanvasLayer`); it owns the
+  label's visibility. `Inspect(screenPosition)` does the pick + refresh and
+  returns the cell — `_Process` calls it with the mouse position, the smoke
+  test with a computed pixel.
+- **Toggle:** menu key 2. It starts **on** (`EnabledOnStart`), because a dev
+  instrument that needs arming isn't one; `ScreenshotTest` calls
+  `SetEnabled(false)` before capturing so the canonical views stay clean.
+
+This is *not* the player-facing inspector — field inspection is M4, building
+inspection M6. It is a dev readout that happens to be on screen.
 
 ## Dev smoke tests (`scenes/dev/`, `src/dev/`)
 
@@ -244,7 +295,15 @@ godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
   road-build tool works (menu key 1 toggles it on/off, two `ClickCell` calls
   place a diagonal road, `FindRoadPath` across it returns the corner-cutting
   diagonal walk, and `SmoothRoadPath` collapses that to a single straight
-  segment).
+  segment). Finally the **hover readout**: headless has no cursor, so instead
+  of moving a mouse the test projects a known cell center to its pixel
+  (`Camera3D.UnprojectPosition`) and drives that pixel back through the picker
+  — a round trip that fails if either half of screen ↔ cell drifts. It asserts
+  the picker, the inspector and the road tool all resolve the *same* cell from
+  the *same* pixel (that is the "one shared code path" check), that the label
+  mirrors the inspector's text, that the readout names all four facts for the
+  origin, that an off-map pixel still resolves to its real coordinates and
+  reads "off the map", and that menu key 2 switches the readout off and on.
 
 For a visual check without a window grab, Godot's movie-maker mode renders
 frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30

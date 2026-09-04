@@ -7,9 +7,10 @@ namespace Arable;
 /// Headless smoke test for the world grid and machines: instances Main.tscn and
 /// asserts the generated terrain (seeded, bounded, varied, deterministic) and
 /// the starting road, that terrain and placement are independent layers, then
-/// spawns a machine via menu key 9 and asserts it drives the road, and
-/// exercises the road-build tool (menu key 1: anchor click + place click →
-/// straight road with diagonal steps). Run with:
+/// spawns a machine via menu key 9 and asserts it drives the road, exercises
+/// the road-build tool (menu key 1: anchor click + place click → straight road
+/// with diagonal steps), and drives known screen pixels through the shared cell
+/// picker to check the hover readout (menu key 2). Run with:
 /// godot --headless res://scenes/dev/WorldSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 /// </summary>
@@ -18,6 +19,8 @@ public partial class WorldSmokeTest : Node
     private WorldGrid _world = null!;
     private GridMap _gridMap = null!;
     private RoadBuildTool _roadTool = null!;
+    private CellInspector _inspector = null!;
+    private Label _readout = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
     private bool _failed;
@@ -29,6 +32,8 @@ public partial class WorldSmokeTest : Node
         _world = main.GetNode<WorldGrid>("World");
         _gridMap = _world.GetNode<GridMap>("GridMap");
         _roadTool = main.GetNode<RoadBuildTool>("RoadTool");
+        _inspector = main.GetNode<CellInspector>("CellInspector");
+        _readout = main.GetNode<Label>("Hud/CellReadout");
     }
 
     public override void _Process(double delta)
@@ -84,6 +89,25 @@ public partial class WorldSmokeTest : Node
         else if (_frame == 20)
         {
             Check("menu key 1 deactivates the road tool", !_roadTool.Active);
+            Check("inspector is wired to the world and its label",
+                _inspector.World == _world && _inspector.Readout == _readout);
+            Check("the readout starts switched on", _inspector.Enabled && _readout.Visible);
+
+            CheckHoverReadout();
+
+            // Menu slot 2 toggles the readout (so it can be off for screenshots).
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_2", Pressed = true });
+        }
+        else if (_frame == 25)
+        {
+            Check("menu key 2 switches the readout off",
+                !_inspector.Enabled && !_readout.Visible);
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_2", Pressed = true });
+        }
+        else if (_frame == 30)
+        {
+            Check("menu key 2 switches the readout back on",
+                _inspector.Enabled && _readout.Visible);
         }
         else if (_frame == 190)
         {
@@ -96,6 +120,66 @@ public partial class WorldSmokeTest : Node
             GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
         }
+    }
+
+    /// <summary>
+    /// Hover readout and the cell picking behind it. Headless has no cursor, so
+    /// instead of moving a mouse the test projects a known cell center to its
+    /// pixel and drives that pixel back through the picker — a round trip that
+    /// fails if either half of screen ↔ cell drifts.
+    /// </summary>
+    private void CheckHoverReadout()
+    {
+        Camera3D? camera = GetViewport().GetCamera3D();
+        Check("a camera is available to pick through", camera != null);
+        if (camera == null)
+        {
+            return;
+        }
+
+        // Cells on screen at the default camera pose, plus one off the map.
+        var probes = new[] { Vector2I.Zero, new Vector2I(4, -3), new Vector2I(-6, 5) };
+        foreach (Vector2I cell in probes)
+        {
+            Vector2 pixel = camera.UnprojectPosition(_world.CellToWorld(cell));
+            Check($"picker turns the pixel of cell {cell.X},{cell.Y} back into it",
+                CellPicker.CellAt(_world, camera, pixel) == cell);
+            Check($"inspector reads cell {cell.X},{cell.Y} at that pixel",
+                _inspector.Inspect(pixel) == cell);
+            Check($"road tool picks cell {cell.X},{cell.Y} at the same pixel",
+                _roadTool.PickCell(pixel) == cell);
+            Check($"the label shows what the inspector read for {cell.X},{cell.Y}",
+                _readout.Text == _inspector.Text && _readout.Text.Length > 0);
+        }
+
+        // The readout names all four facts: coords, terrain, fertility, tile.
+        // The origin is on the starting road, and generation carved that strip
+        // to soil, so its expected content is known.
+        string origin = _inspector.Describe(Vector2I.Zero);
+        GD.Print("readout at 0,0: " + origin.Replace('\n', ' '));
+        Check("readout names the cell coordinates", origin.Contains("cell: 0, 0"));
+        Check("readout names the terrain", origin.Contains("terrain: soil"));
+        Check("readout names the fertility", origin.Contains("fertility: "
+            + _world.GetFertility(Vector2I.Zero)
+                .ToString("F2", System.Globalization.CultureInfo.InvariantCulture)));
+        Check("readout names the placed tile", origin.Contains("tile: road"));
+
+        // Moving the cursor changes the readout: a neighbouring cell off the
+        // road reads as empty rather than repeating the road cell.
+        Check("readout follows the cursor to another cell",
+            _inspector.Describe(new Vector2I(0, 3)).Contains("cell: 0, 3"));
+        Check("an unbuilt cell reads as empty",
+            _inspector.Describe(new Vector2I(0, 3)).Contains("tile: empty"));
+
+        // Off the map edge: still a cell, but the terrain layer says so.
+        var beyond = new Vector2I(_world.MapSize / 2 + 5, 0);
+        Vector2 beyondPixel = camera.UnprojectPosition(_world.CellToWorld(beyond));
+        Check("picking past the map edge still resolves the cell",
+            _inspector.Inspect(beyondPixel) == beyond);
+        Check("readout reports off-map cells sensibly",
+            _inspector.Text.Contains($"cell: {beyond.X}, 0")
+            && _inspector.Text.Contains("off the map")
+            && _inspector.Text.Contains("fertility: -"));
     }
 
     /// <summary>

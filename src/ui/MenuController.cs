@@ -4,9 +4,9 @@ namespace Arable;
 
 /// <summary>
 /// Keyboard menu: number keys 1-9 (actions menu_1..menu_9) trigger game
-/// commands. Slot 1 toggles the road-building tool, slot 9 spawns a new
-/// machine on the road network; the other slots just log that they are
-/// unassigned.
+/// commands. Slot 1 toggles the road-building tool, slot 2 the hover readout,
+/// slot 9 spawns a new machine on the road network; the other slots just log
+/// that they are unassigned.
 /// </summary>
 public partial class MenuController : Node
 {
@@ -14,6 +14,7 @@ public partial class MenuController : Node
 
     [Export] public WorldGrid? World { get; set; }
     [Export] public RoadBuildTool? RoadTool { get; set; }
+    [Export] public CellInspector? Inspector { get; set; }
 
     public override void _UnhandledInput(InputEvent @event)
     {
@@ -34,6 +35,9 @@ public partial class MenuController : Node
         {
             case 1:
                 RoadTool?.Toggle();
+                break;
+            case 2:
+                Inspector?.Toggle();
                 break;
             case 9:
                 World?.SpawnMachine();

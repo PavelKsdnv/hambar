@@ -79,6 +79,12 @@ public partial class ScreenshotTest : Node
         var rig = main.GetNode<CameraRig>("CameraRig");
         var camera = rig.GetNode<Camera3D>("Camera3D");
 
+        // The hover readout is a dev instrument, not part of the canonical
+        // views — and with no real cursor it would only report whatever cell
+        // pixel (0, 0) happens to sit over. Switch it off so the screenshots
+        // show the world and nothing else.
+        main.GetNodeOrNull<CellInspector>("CellInspector")?.SetEnabled(false);
+
         // The view the player gets on load.
         await Settle(SettleSeconds);
         Capture("01-start", $"default pose, ortho size {camera.Size:0.0}");
@@ -103,8 +109,39 @@ public partial class ScreenshotTest : Node
         await Settle(0.2f);
         Capture("04-overview", "detached diagnostic camera, whole world");
 
+        // The hover readout, which no other view can show. Driven by an
+        // explicit pixel with _Process switched off, so it names a known cell
+        // instead of following a cursor this run does not have.
+        camera.MakeCurrent();
+        string readout = await ShowReadout(main);
+        Capture("05-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
+
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Switches the hover readout on and pins it to the middle of the screen.
+    /// The inspector normally follows the mouse in <c>_Process</c>; there is no
+    /// cursor in a screenshot run, so processing is stopped and the position is
+    /// supplied directly, which makes the captured readout deterministic.
+    /// Returns the text it ended up showing.
+    /// </summary>
+    private async System.Threading.Tasks.Task<string> ShowReadout(Node main)
+    {
+        var inspector = main.GetNodeOrNull<CellInspector>("CellInspector");
+        if (inspector == null)
+        {
+            GD.Print("FAIL: 05-readout — no CellInspector in Main.tscn");
+            _failed = true;
+            return string.Empty;
+        }
+
+        inspector.SetEnabled(true);
+        inspector.SetProcess(false);
+        inspector.Inspect(GetViewport().GetVisibleRect().Size / 2f);
+        await Settle(0.2f);
+        return inspector.Text;
     }
 
     private static void AddOverviewCamera(Node main)
