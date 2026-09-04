@@ -13,6 +13,7 @@ public partial class CameraSmokeTest : Node
     private CameraRig _rig = null!;
     private Camera3D _camera = null!;
     private Vector3 _startPosition;
+    private Vector3 _dragStart;
     private float _startYaw;
     private float _startZoom;
     private int _frame;
@@ -44,7 +45,32 @@ public partial class CameraSmokeTest : Node
         else if (_frame == 90)
         {
             Check("rotate changes yaw", Mathf.Abs(_rig.Rotation.Y - _startYaw) > 0.5f);
+            // A rotate step is exactly a quarter turn: the rig eases into it, so
+            // compare the settled target rather than the smoothed angle.
+            Check("rotate steps by 90 degrees",
+                Mathf.Abs(Mathf.Abs(_rig.TargetYaw - _startYaw) - Mathf.Pi / 2f) < 0.001f);
             Check("zoom shrinks ortho size", _camera.Size < _startZoom - 0.5f);
+
+            // Middle-mouse drag pan: press the drag button, then move the mouse.
+            _dragStart = _rig.Position;
+            Input.ParseInputEvent(
+                new InputEventMouseButton { ButtonIndex = MouseButton.Middle, Pressed = true });
+            Input.ParseInputEvent(new InputEventMouseMotion { Relative = new Vector2(120f, 80f) });
+        }
+        else if (_frame == 92)
+        {
+            Check("middle-drag pans the rig", _rig.Position.DistanceTo(_dragStart) > 0.1f);
+
+            // Releasing the button must stop the drag: further motion is ignored.
+            Input.ParseInputEvent(
+                new InputEventMouseButton { ButtonIndex = MouseButton.Middle, Pressed = false });
+            _dragStart = _rig.Position;
+            Input.ParseInputEvent(new InputEventMouseMotion { Relative = new Vector2(120f, 80f) });
+        }
+        else if (_frame == 94)
+        {
+            Check("releasing the drag button stops panning",
+                _rig.Position.DistanceTo(_dragStart) < 0.001f);
             GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
         }

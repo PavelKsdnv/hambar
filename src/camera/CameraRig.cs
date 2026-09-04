@@ -20,6 +20,12 @@ public partial class CameraRig : Node3D
     private Camera3D _camera = null!;
     private float _yaw;
     private float _targetYaw;
+
+    /// <summary>
+    /// Yaw the rig is easing toward, in radians. Exposed read-only so tests can
+    /// assert the exact rotation step without waiting out the smoothing.
+    /// </summary>
+    public float TargetYaw => _targetYaw;
     private float _targetZoom;
     private bool _dragging;
 
