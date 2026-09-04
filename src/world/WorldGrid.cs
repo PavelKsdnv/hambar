@@ -5,21 +5,70 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Owns the logical tile data (roads, fields) and keeps the child GridMap view
-/// in sync. Also answers road-network queries (pathfinding, random road cells)
-/// for machines. The GridMap is presentation only — game logic must always go
+/// Owns the logical world data and keeps the child GridMap view in sync.
+///
+/// Two independent layers live here:
+/// <list type="bullet">
+/// <item><b>terrain</b> — what the land is (<see cref="TerrainType"/> plus a
+/// fertility scalar). Generated from <see cref="WorldSeed"/>, bounded by
+/// <see cref="MapHalfExtent"/>, and never edited by the player.</item>
+/// <item><b>placement</b> — what the player built (<see cref="TileType"/>).
+/// Sparse; clearing it back to <see cref="TileType.Empty"/> leaves the terrain
+/// underneath untouched.</item>
+/// </list>
+///
+/// Also answers road-network queries (pathfinding, random road cells) for
+/// machines. The GridMap is presentation only — game logic must always go
 /// through this class, never read the GridMap back.
 /// </summary>
 public partial class WorldGrid : Node3D
 {
-    private const int HalfExtent = 16; // the starting road spans cells -16..16
+    private const int StartRoadHalfExtent = 16; // the starting road spans cells -16..16
 
     // MeshLibrary item ids in assets/dev/tile_library.tres.
     private const int RoadItem = 0;
     private const int FieldItem = 1;
+    private const int RockItem = 2;
+    private const int WaterItem = 3;
+
+    /// <summary>
+    /// Soil is drawn in <see cref="SoilTiers"/> shades by fertility, as
+    /// consecutive MeshLibrary items starting at this id.
+    /// </summary>
+    private const int SoilItemFirst = 4;
+    private const int SoilTiers = 4;
+
+    /// <summary>
+    /// Offset that derives the rock/water mask seed from the world seed, so a
+    /// single seed still describes the whole map.
+    /// </summary>
+    private const int MaskSeedOffset = 7919;
 
     [Export] public PackedScene? MachineScene { get; set; }
     [Export] public int MachineCount { get; set; } = 0;
+
+    /// <summary>
+    /// The map spans cells −<c>MapHalfExtent</c>..<c>MapHalfExtent</c> on both
+    /// axes. 48 → a 97×97 grid = 194 m across at 2 m cells: inside the
+    /// 200×200 ground plane, and a little larger than what the camera shows
+    /// when fully zoomed out.
+    /// </summary>
+    [Export] public int MapHalfExtent { get; set; } = 48;
+
+    /// <summary>Single seed for the whole map: both noise fields derive from it.</summary>
+    [Export] public int WorldSeed { get; set; } = 20260904;
+
+    /// <summary>Noise frequency (per cell) of the fertility field.</summary>
+    [Export] public float FertilityFrequency { get; set; } = 0.04f;
+
+    /// <summary>Noise frequency (per cell) of the rock/water mask.</summary>
+    [Export] public float MaskFrequency { get; set; } = 0.06f;
+
+    /// <summary>Mask values below this become water.</summary>
+    [Export] public float WaterLevel { get; set; } = -0.3f;
+
+    /// <summary>Mask values above this become rock.</summary>
+    [Export] public float RockLevel { get; set; } = 0.34f;
 
     private static readonly Color[] MachineColors =
     [
@@ -30,14 +79,31 @@ public partial class WorldGrid : Node3D
     ];
 
     private GridMap _gridMap = null!;
+
+    // Placement layer: sparse, the player owns it.
     private readonly Dictionary<Vector2I, TileType> _tiles = new();
     private readonly List<Vector2I> _roadCells = new();
+
+    // Terrain layer: dense flat arrays indexed by Index(cell). Every in-bounds
+    // cell has a value, so a dictionary would only add overhead — this is the
+    // first piece of state laid out the way the M3 sim core wants all of it.
+    private TerrainType[] _terrain = [];
+    private float[] _fertility = [];
+
+    /// <summary>
+    /// Half-extent the current terrain arrays were generated with; −1 until
+    /// <see cref="GenerateTerrain"/> has run, which makes every cell out of
+    /// bounds until then.
+    /// </summary>
+    private int _halfExtent = -1;
+
     private readonly Random _spawnRng = new(1234);
     private int _machinesSpawned;
 
     public override void _Ready()
     {
         _gridMap = GetNode<GridMap>("GridMap");
+        GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
         {
@@ -45,9 +111,41 @@ public partial class WorldGrid : Node3D
         }
     }
 
+    /// <summary>Side length of the generated map, in cells.</summary>
+    public int MapSize => _halfExtent < 0 ? 0 : _halfExtent * 2 + 1;
+
+    /// <summary>Number of generated terrain cells.</summary>
+    public int CellCount => MapSize * MapSize;
+
+    /// <summary>Whether the cell lies inside the generated map.</summary>
+    public bool InBounds(Vector2I cell) =>
+        cell.X >= -_halfExtent && cell.X <= _halfExtent
+        && cell.Y >= -_halfExtent && cell.Y <= _halfExtent;
+
+    private int Index(Vector2I cell) => (cell.Y + _halfExtent) * MapSize + (cell.X + _halfExtent);
+
+    /// <summary>
+    /// Terrain under the cell, or <see cref="TerrainType.OutOfBounds"/> when the
+    /// cell is off the map. Never affected by what the player placed on top.
+    /// </summary>
+    public TerrainType GetTerrain(Vector2I cell) =>
+        InBounds(cell) ? _terrain[Index(cell)] : TerrainType.OutOfBounds;
+
+    /// <summary>
+    /// Soil quality of the cell, 0..1. Rock, water and out-of-bounds cells have
+    /// no soil and answer 0.
+    /// </summary>
+    public float GetFertility(Vector2I cell) => InBounds(cell) ? _fertility[Index(cell)] : 0f;
+
+    /// <summary>Whether the terrain is workable ground.</summary>
+    public bool IsSoil(Vector2I cell) => GetTerrain(cell) == TerrainType.Soil;
+
     public TileType GetTile(Vector2I cell) => _tiles.GetValueOrDefault(cell, TileType.Empty);
 
     public bool IsRoad(Vector2I cell) => GetTile(cell) == TileType.Road;
+
+    /// <summary>How many cells currently hold a road tile.</summary>
+    public int RoadCellCount => _roadCells.Count;
 
     public void SetTile(Vector2I cell, TileType type)
     {
@@ -75,14 +173,38 @@ public partial class WorldGrid : Node3D
             _tiles[cell] = type;
         }
 
-        int item = type switch
+        RefreshCell(cell);
+    }
+
+    /// <summary>
+    /// MeshLibrary item a cell should show: the placed tile when there is one,
+    /// otherwise the terrain underneath. One GridMap draws both layers, so
+    /// placement hides terrain visually without ever overwriting it — clearing
+    /// the tile brings the same terrain back.
+    /// </summary>
+    private int ViewItem(Vector2I cell)
+    {
+        switch (GetTile(cell))
         {
-            TileType.Road => RoadItem,
-            TileType.Field => FieldItem,
+            case TileType.Road:
+                return RoadItem;
+            case TileType.Field:
+                return FieldItem;
+        }
+
+        return GetTerrain(cell) switch
+        {
+            TerrainType.Soil => SoilItemFirst
+                + Math.Clamp((int)(GetFertility(cell) * SoilTiers), 0, SoilTiers - 1),
+            TerrainType.Rock => RockItem,
+            TerrainType.Water => WaterItem,
             _ => (int)GridMap.InvalidCellItem,
         };
-        _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), item);
     }
+
+    /// <summary>Pushes one cell's current state to the GridMap view.</summary>
+    private void RefreshCell(Vector2I cell) =>
+        _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), ViewItem(cell));
 
     /// <summary>Center of the cell on the ground plane (y = 0).</summary>
     public Vector3 CellToWorld(Vector2I cell) =>
@@ -309,10 +431,100 @@ public partial class WorldGrid : Node3D
         new(-1, -1),
     ];
 
+    /// <summary>
+    /// Generates the terrain layer from <see cref="WorldSeed"/> and redraws the
+    /// view. Two <c>FastNoiseLite</c> fields, both derived from that one seed:
+    /// fertility, and a rock/water mask that reads like a coarse elevation —
+    /// its low ground becomes water and its high ground bare rock, so the two
+    /// unusable kinds never border each other. The placement layer is untouched,
+    /// so regenerating leaves roads and fields exactly where they were.
+    /// Deterministic: the same seed and extent always produce the same arrays.
+    /// </summary>
+    public void GenerateTerrain()
+    {
+        _halfExtent = Mathf.Max(0, MapHalfExtent);
+        int cells = CellCount;
+        _terrain = new TerrainType[cells];
+        _fertility = new float[cells];
+
+        var fertilityNoise = new FastNoiseLite
+        {
+            Seed = WorldSeed,
+            NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
+            Frequency = FertilityFrequency,
+            FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
+            FractalOctaves = 4,
+        };
+        var maskNoise = new FastNoiseLite
+        {
+            Seed = WorldSeed + MaskSeedOffset,
+            NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
+            Frequency = MaskFrequency,
+            FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
+            FractalOctaves = 3,
+        };
+
+        for (int z = -_halfExtent; z <= _halfExtent; z++)
+        {
+            for (int x = -_halfExtent; x <= _halfExtent; x++)
+            {
+                var cell = new Vector2I(x, z);
+                float mask = maskNoise.GetNoise2D(x, z);
+                TerrainType terrain =
+                    mask < WaterLevel ? TerrainType.Water
+                    : mask > RockLevel ? TerrainType.Rock
+                    : TerrainType.Soil;
+
+                // The starting road has to land on legal ground: carve its strip
+                // back to soil rather than biasing the noise, so the seed still
+                // owns every other cell.
+                if (IsStartRoadCell(cell))
+                {
+                    terrain = TerrainType.Soil;
+                }
+
+                int i = Index(cell);
+                _terrain[i] = terrain;
+                _fertility[i] = terrain == TerrainType.Soil
+                    ? Mathf.Clamp(fertilityNoise.GetNoise2D(x, z) * 0.5f + 0.5f, 0f, 1f)
+                    : 0f;
+            }
+        }
+
+        RedrawAllCells();
+    }
+
+    /// <summary>Redraws the whole GridMap from both layers.</summary>
+    private void RedrawAllCells()
+    {
+        _gridMap.Clear();
+        for (int z = -_halfExtent; z <= _halfExtent; z++)
+        {
+            for (int x = -_halfExtent; x <= _halfExtent; x++)
+            {
+                RefreshCell(new Vector2I(x, z));
+            }
+        }
+
+        // Placement outside the generated map is still allowed (build
+        // validation is a later milestone), so those cells need drawing too.
+        foreach (Vector2I cell in _tiles.Keys)
+        {
+            if (!InBounds(cell))
+            {
+                RefreshCell(cell);
+            }
+        }
+    }
+
+    /// <summary>Cells the starting road occupies — kept soil by generation.</summary>
+    private static bool IsStartRoadCell(Vector2I cell) =>
+        cell.Y == 0 && cell.X >= -StartRoadHalfExtent && cell.X <= StartRoadHalfExtent;
+
     /// <summary>Starting layout: a single straight road along x through the origin.</summary>
     private void GenerateStartRoad()
     {
-        for (int x = -HalfExtent; x <= HalfExtent; x++)
+        for (int x = -StartRoadHalfExtent; x <= StartRoadHalfExtent; x++)
         {
             SetTile(new Vector2I(x, 0), TileType.Road);
         }

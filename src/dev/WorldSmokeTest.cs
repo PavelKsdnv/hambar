@@ -4,17 +4,19 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Headless smoke test for the world grid and machines: instances Main.tscn
-/// and asserts the starting road was generated with nothing else, then spawns
-/// a machine via menu key 9 and asserts it drives the road, and exercises the
-/// road-build tool (menu key 1: anchor click + place click → straight road
-/// with diagonal steps). Run with:
+/// Headless smoke test for the world grid and machines: instances Main.tscn and
+/// asserts the generated terrain (seeded, bounded, varied, deterministic) and
+/// the starting road, that terrain and placement are independent layers, then
+/// spawns a machine via menu key 9 and asserts it drives the road, and
+/// exercises the road-build tool (menu key 1: anchor click + place click →
+/// straight road with diagonal steps). Run with:
 /// godot --headless res://scenes/dev/WorldSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 /// </summary>
 public partial class WorldSmokeTest : Node
 {
     private WorldGrid _world = null!;
+    private GridMap _gridMap = null!;
     private RoadBuildTool _roadTool = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
@@ -25,6 +27,7 @@ public partial class WorldSmokeTest : Node
         Node main = GD.Load<PackedScene>("res://scenes/Main.tscn").Instantiate();
         AddChild(main);
         _world = main.GetNode<WorldGrid>("World");
+        _gridMap = _world.GetNode<GridMap>("GridMap");
         _roadTool = main.GetNode<RoadBuildTool>("RoadTool");
     }
 
@@ -33,14 +36,9 @@ public partial class WorldSmokeTest : Node
         _frame++;
         if (_frame == 5)
         {
-            var gridMap = _world.GetNode<GridMap>("GridMap");
-            // The starting road is the single row z = 0, x = -16..16 (33 cells).
-            Check("only the starting road was generated", gridMap.GetUsedCells().Count == 33);
-            Check("origin cell is road", _world.IsRoad(Vector2I.Zero));
-            Check("road spans to both ends", _world.IsRoad(new Vector2I(-16, 0))
-                && _world.IsRoad(new Vector2I(16, 0)));
-            Check("cell off the road is empty", _world.GetTile(new Vector2I(0, 1)) == TileType.Empty);
-            Check("no machines at start", GetTree().GetNodesInGroup("machines").Count == 0);
+            CheckTerrain();
+            CheckLayersAreIndependent();
+            CheckStartRoad();
 
             // Menu slot 9 spawns a machine.
             Input.ParseInputEvent(new InputEventAction { Action = "menu_9", Pressed = true });
@@ -98,6 +96,205 @@ public partial class WorldSmokeTest : Node
             GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
         }
+    }
+
+    /// <summary>
+    /// The generated terrain layer: bounded, varied (soil + rock + water),
+    /// fertility only on soil, and reproducible from the world seed.
+    /// </summary>
+    private void CheckTerrain()
+    {
+        int half = _world.MapSize / 2;
+        Check("map generated with an odd, non-empty extent",
+            _world.MapSize > 1 && _world.MapSize % 2 == 1);
+        Check("terrain fills every cell of the map",
+            _gridMap.GetUsedCells().Count == _world.CellCount);
+
+        // Bounds: in-bounds cells carry terrain, out-of-bounds ones are
+        // distinguishable without a second call.
+        Check("map corner is in bounds", _world.InBounds(new Vector2I(half, half))
+            && _world.GetTerrain(new Vector2I(half, half)) != TerrainType.OutOfBounds);
+        var beyond = new Vector2I(half + 1, 0);
+        Check("cell past the edge is out of bounds", !_world.InBounds(beyond)
+            && _world.GetTerrain(beyond) == TerrainType.OutOfBounds
+            && _world.GetFertility(beyond) == 0f);
+
+        int soil = 0, rock = 0, water = 0;
+        float minFertility = float.MaxValue, maxFertility = float.MinValue;
+        bool fertilityInRange = true, barrenGroundHasNoFertility = true;
+        for (int z = -half; z <= half; z++)
+        {
+            for (int x = -half; x <= half; x++)
+            {
+                var cell = new Vector2I(x, z);
+                float fertility = _world.GetFertility(cell);
+                fertilityInRange &= fertility is >= 0f and <= 1f;
+                switch (_world.GetTerrain(cell))
+                {
+                    case TerrainType.Soil:
+                        soil++;
+                        minFertility = Mathf.Min(minFertility, fertility);
+                        maxFertility = Mathf.Max(maxFertility, fertility);
+                        break;
+                    case TerrainType.Rock:
+                        rock++;
+                        barrenGroundHasNoFertility &= fertility == 0f;
+                        break;
+                    case TerrainType.Water:
+                        water++;
+                        barrenGroundHasNoFertility &= fertility == 0f;
+                        break;
+                    default:
+                        Check($"cell {cell} has terrain", false);
+                        return;
+                }
+            }
+        }
+
+        GD.Print($"terrain: {soil} soil, {rock} rock, {water} water "
+            + $"of {_world.CellCount} cells; fertility {minFertility:F3}..{maxFertility:F3}");
+        Check("rock cells exist", rock > 0);
+        Check("water cells exist", water > 0);
+        Check("most of the map is soil", soil > rock + water);
+        Check("fertility stays within 0..1", fertilityInRange);
+        Check("fertility varies across the map", maxFertility - minFertility > 0.2f);
+        Check("rock and water carry no fertility", barrenGroundHasNoFertility);
+
+        // The starting road has to sit on legal ground.
+        bool roadStripIsSoil = true;
+        for (int x = -16; x <= 16; x++)
+        {
+            roadStripIsSoil &= _world.IsSoil(new Vector2I(x, 0));
+        }
+        Check("the starting road strip is soil", roadStripIsSoil);
+
+        CheckSeedDeterminism();
+    }
+
+    /// <summary>
+    /// Same seed in, same map out — including after the world has generated a
+    /// different seed in between.
+    /// </summary>
+    private void CheckSeedDeterminism()
+    {
+        (TerrainType[] terrain, float[] fertility) first = Snapshot();
+
+        _world.GenerateTerrain();
+        (TerrainType[] terrain, float[] fertility) second = Snapshot();
+        Check("regenerating the same seed yields identical terrain",
+            SameTerrain(first.terrain, second.terrain));
+        Check("regenerating the same seed yields identical fertility",
+            SameFertility(first.fertility, second.fertility));
+
+        int seed = _world.WorldSeed;
+        _world.WorldSeed = seed + 1;
+        _world.GenerateTerrain();
+        (TerrainType[] terrain, float[] fertility) other = Snapshot();
+        Check("a different seed yields a different map",
+            !SameTerrain(first.terrain, other.terrain)
+            || !SameFertility(first.fertility, other.fertility));
+
+        _world.WorldSeed = seed;
+        _world.GenerateTerrain();
+        (TerrainType[] terrain, float[] fertility) again = Snapshot();
+        Check("returning to the seed restores the same terrain",
+            SameTerrain(first.terrain, again.terrain));
+        Check("returning to the seed restores the same fertility",
+            SameFertility(first.fertility, again.fertility));
+    }
+
+    /// <summary>
+    /// Terrain and placement are separate layers: building on a cell and then
+    /// clearing it leaves the terrain — and the terrain the view draws —
+    /// exactly as generated.
+    /// </summary>
+    private void CheckLayersAreIndependent()
+    {
+        var cell = new Vector2I(5, 5);
+        var mapCell = new Vector3I(cell.X, 0, cell.Y);
+        TerrainType terrain = _world.GetTerrain(cell);
+        float fertility = _world.GetFertility(cell);
+        int terrainItem = _gridMap.GetCellItem(mapCell);
+        Check("test cell starts unbuilt", _world.GetTile(cell) == TileType.Empty
+            && terrain != TerrainType.OutOfBounds
+            && terrainItem != GridMap.InvalidCellItem);
+
+        _world.SetTile(cell, TileType.Road);
+        Check("placing a road does not change the terrain under it",
+            _world.GetTerrain(cell) == terrain && _world.GetFertility(cell) == fertility);
+        Check("a placed road hides the terrain in the view",
+            _gridMap.GetCellItem(mapCell) != terrainItem);
+
+        _world.SetTile(cell, TileType.Empty);
+        Check("clearing the tile leaves the terrain intact",
+            _world.GetTerrain(cell) == terrain && _world.GetFertility(cell) == fertility);
+        Check("clearing the tile shows the terrain again",
+            _gridMap.GetCellItem(mapCell) == terrainItem);
+    }
+
+    /// <summary>The starting road, on top of the generated terrain.</summary>
+    private void CheckStartRoad()
+    {
+        // The starting road is the single row z = 0, x = -16..16 (33 cells).
+        Check("only the starting road was placed", _world.RoadCellCount == 33);
+        Check("origin cell is road", _world.IsRoad(Vector2I.Zero));
+        Check("road spans to both ends", _world.IsRoad(new Vector2I(-16, 0))
+            && _world.IsRoad(new Vector2I(16, 0)));
+        Check("cell off the road is empty", _world.GetTile(new Vector2I(0, 1)) == TileType.Empty);
+        Check("no machines at start", GetTree().GetNodesInGroup("machines").Count == 0);
+    }
+
+    private (TerrainType[] Terrain, float[] Fertility) Snapshot()
+    {
+        int half = _world.MapSize / 2;
+        var terrain = new TerrainType[_world.CellCount];
+        var fertility = new float[_world.CellCount];
+        int i = 0;
+        for (int z = -half; z <= half; z++)
+        {
+            for (int x = -half; x <= half; x++)
+            {
+                var cell = new Vector2I(x, z);
+                terrain[i] = _world.GetTerrain(cell);
+                fertility[i] = _world.GetFertility(cell);
+                i++;
+            }
+        }
+        return (terrain, fertility);
+    }
+
+    private static bool SameTerrain(TerrainType[] a, TerrainType[] b)
+    {
+        if (a.Length != b.Length)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.Length; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Bit-exact: the same seed runs the same noise through the same arithmetic,
+    // so anything less than equality would hide a determinism bug.
+    private static bool SameFertility(float[] a, float[] b)
+    {
+        if (a.Length != b.Length)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.Length; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void Check(string what, bool ok)

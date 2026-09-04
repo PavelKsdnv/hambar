@@ -1,10 +1,31 @@
-[gd_resource type="MeshLibrary" load_steps=5 format=3]
+[gd_resource type="MeshLibrary" load_steps=17 format=3]
 
 [sub_resource type="StandardMaterial3D" id="mat_road"]
 albedo_color = Color(0.32, 0.33, 0.35, 1)
 
 [sub_resource type="StandardMaterial3D" id="mat_field"]
 albedo_color = Color(0.45, 0.32, 0.2, 1)
+
+[sub_resource type="StandardMaterial3D" id="mat_rock"]
+albedo_color = Color(0.5, 0.49, 0.47, 1)
+roughness = 0.9
+
+[sub_resource type="StandardMaterial3D" id="mat_water"]
+albedo_color = Color(0.16, 0.34, 0.52, 1)
+metallic = 0.2
+roughness = 0.15
+
+[sub_resource type="StandardMaterial3D" id="mat_soil_0"]
+albedo_color = Color(0.63, 0.58, 0.38, 1)
+
+[sub_resource type="StandardMaterial3D" id="mat_soil_1"]
+albedo_color = Color(0.5, 0.56, 0.32, 1)
+
+[sub_resource type="StandardMaterial3D" id="mat_soil_2"]
+albedo_color = Color(0.36, 0.5, 0.26, 1)
+
+[sub_resource type="StandardMaterial3D" id="mat_soil_3"]
+albedo_color = Color(0.24, 0.42, 0.2, 1)
 
 [sub_resource type="BoxMesh" id="mesh_road"]
 material = SubResource("mat_road")
@@ -13,6 +34,30 @@ size = Vector3(2, 0.1, 2)
 [sub_resource type="BoxMesh" id="mesh_field"]
 material = SubResource("mat_field")
 size = Vector3(2, 0.2, 2)
+
+[sub_resource type="BoxMesh" id="mesh_rock"]
+material = SubResource("mat_rock")
+size = Vector3(2, 0.7, 2)
+
+[sub_resource type="BoxMesh" id="mesh_water"]
+material = SubResource("mat_water")
+size = Vector3(2, 0.04, 2)
+
+[sub_resource type="BoxMesh" id="mesh_soil_0"]
+material = SubResource("mat_soil_0")
+size = Vector3(2, 0.06, 2)
+
+[sub_resource type="BoxMesh" id="mesh_soil_1"]
+material = SubResource("mat_soil_1")
+size = Vector3(2, 0.06, 2)
+
+[sub_resource type="BoxMesh" id="mesh_soil_2"]
+material = SubResource("mat_soil_2")
+size = Vector3(2, 0.06, 2)
+
+[sub_resource type="BoxMesh" id="mesh_soil_3"]
+material = SubResource("mat_soil_3")
+size = Vector3(2, 0.06, 2)
 
 [resource]
 item/0/name = "Road"
@@ -23,3 +68,27 @@ item/1/name = "Field"
 item/1/mesh = SubResource("mesh_field")
 item/1/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
 item/1/shapes = []
+item/2/name = "Rock"
+item/2/mesh = SubResource("mesh_rock")
+item/2/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
+item/2/shapes = []
+item/3/name = "Water"
+item/3/mesh = SubResource("mesh_water")
+item/3/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.005, 0)
+item/3/shapes = []
+item/4/name = "Soil 0 (poor)"
+item/4/mesh = SubResource("mesh_soil_0")
+item/4/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03, 0)
+item/4/shapes = []
+item/5/name = "Soil 1"
+item/5/mesh = SubResource("mesh_soil_1")
+item/5/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03, 0)
+item/5/shapes = []
+item/6/name = "Soil 2"
+item/6/mesh = SubResource("mesh_soil_2")
+item/6/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03, 0)
+item/6/shapes = []
+item/7/name = "Soil 3 (rich)"
+item/7/mesh = SubResource("mesh_soil_3")
+item/7/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03, 0)
+item/7/shapes = []

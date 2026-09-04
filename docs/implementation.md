@@ -2,7 +2,7 @@
 
 What exists in the codebase today and how it fits together. Companion to
 `tech.md` (the decisions) — this documents how those decisions were realized.
-Last updated: 2026-07-06.
+Last updated: 2026-09-04.
 
 ## Building & running
 
@@ -71,13 +71,59 @@ are static grid tiles; machines are moving scene entities — deliberately *not*
 grid cells.
 
 **Data/view split.** `WorldGrid` (a `Node3D` named `World` in Main.tscn) owns
-the logical tile state in a `Dictionary<Vector2I, TileType>`; its child
-`GridMap` is presentation only. Game logic must go through `WorldGrid`
-(`GetTile`/`SetTile`/`IsRoad`/…) and never read the `GridMap` back —
-`SetTile` keeps the view in sync. This is the first step toward the tech.md
-rule that the sim is decoupled from rendering.
+the logical world state; its child `GridMap` is presentation only. Game logic
+must go through `WorldGrid` (`GetTile`/`SetTile`/`GetTerrain`/`IsRoad`/…) and
+never read the `GridMap` back — every mutator keeps the view in sync. This is
+the first step toward the tech.md rule that the sim is decoupled from
+rendering.
 
-- `TileType`: `Empty | Road | Field`.
+**Two layers, stored separately.** What the land *is* and what the player
+*built* are different things and never share storage:
+
+- **terrain** — `TerrainType` (`OutOfBounds | Soil | Rock | Water`) plus a
+  `float` fertility per cell. Generated from the world seed; the player never
+  edits it. Read with `GetTerrain(cell)` / `GetFertility(cell)` / `IsSoil(cell)`.
+- **placement** — `TileType` (`Empty | Road | Field`). The player owns it;
+  clearing a cell back to `Empty` leaves the terrain underneath untouched.
+
+`TerrainType.OutOfBounds` is the value `GetTerrain` returns off the map, so a
+caller can tell "not on the map" from any real terrain in one call;
+`InBounds(cell)` answers the same question directly and `GetFertility` returns
+0 out of bounds.
+
+**Terrain generation** (`GenerateTerrain`, called from `_Ready` before the
+start road):
+
+- The map is **bounded**: cells −`MapHalfExtent`..`MapHalfExtent` on both axes.
+  `MapHalfExtent = 48` → a 97×97 grid = 194 m across at 2 m cells, which fits
+  inside Main.tscn's 200×200 ground plane and is a little larger than what the
+  camera shows at maximum zoom-out.
+- **One seed** (`WorldSeed`, exported) drives everything. Two `FastNoiseLite`
+  fields derive from it: fertility (`Seed = WorldSeed`) and a rock/water mask
+  (`Seed = WorldSeed + 7919`), both SimplexSmooth + FBM. The mask reads like a
+  coarse elevation — below `WaterLevel` becomes water, above `RockLevel`
+  becomes rock, the rest soil — so, deliberately, water and rock never border
+  each other. Defaults give roughly 76 % soil / 14 % water / 10 % rock.
+- Fertility is the fertility noise remapped to 0..1, and is **0 on rock and
+  water**: it means "how good is this soil", and those cells have none.
+- Storage is **flat arrays** indexed by cell (`TerrainType[]`, `float[]`), not
+  a dictionary — every in-bounds cell has a value, and this is the first piece
+  of state laid out the way the M3 sim core wants all of it. The extent the
+  arrays were built with is cached in `_halfExtent`, so `MapHalfExtent`
+  changing at runtime can never index past the arrays.
+- `GenerateTerrain` is **deterministic and re-runnable**: same seed in, same
+  arrays out (bit-exact fertility), and it never touches the placement layer,
+  so regenerating leaves roads and fields where they were.
+- The starting road is **carved**: generation forces its strip (z = 0,
+  x = −16..16) to soil rather than biasing the noise, so the seed still owns
+  every other cell.
+
+**How the two layers render.** One `GridMap` draws both. `ViewItem(cell)`
+returns the placed tile's mesh item when the cell has one and the terrain's
+otherwise, so placement *hides* terrain visually without overwriting it, and
+clearing the tile brings the same terrain back. `SetTile` writes data then
+calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
+
 - Grid cells are **2 m** (`cell_size = (2, 1, 2)`, `cell_center_y = false` so
   tile origin is the ground plane). Cell↔world conversion goes through
   `CellToWorld`/`WorldToCell`.
@@ -99,11 +145,17 @@ rule that the sim is decoupled from rendering.
   Machines still *drive* such a road diagonally: the corner-cutting rule lets
   both the BFS and the smoothing pass run straight along the staircase.
 - **Start layout** (`GenerateStartRoad`, deterministic): a single straight
-  road along x through the origin (cells −16..16 at z = 0). Nothing else is
-  placed — fields and further roads will come from gameplay/build actions.
+  road along x through the origin (cells −16..16 at z = 0), on the soil strip
+  generation carved for it. Nothing else is placed — fields and further roads
+  will come from gameplay/build actions. Building outside `MapHalfExtent` is
+  still allowed (placement validation is M2); such cells are drawn too.
 - **Dev tiles** (`assets/dev/tile_library.tres`, a hand-written `MeshLibrary`):
-  road = flat gray box (item 0), field = slightly raised brown box (item 1).
-  Item ids are mirrored as constants in `WorldGrid`.
+  road = flat gray box (item 0), field = raised brown box (item 1), rock =
+  tall gray block (item 2), water = thin dark-blue slab sitting lower than
+  soil (item 3), and soil in **four fertility shades** (items 4–7, pale straw
+  → deep green) so the fertility field is legible in the iso view. Item ids
+  are mirrored as constants in `WorldGrid`; soil picks its item by
+  `SoilItemFirst + floor(fertility × 4)`.
 
 ## Machines (`src/world/Machine.cs`, `scenes/world/Machine.tscn`)
 
@@ -178,13 +230,21 @@ godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
   actions; `Input.ParseInputEvent(InputEventAction)` for event-driven ones,
   which is required to reach `_UnhandledInput`) and asserts the rig pans,
   rotates, and zooms.
-- **WorldSmokeTest** asserts exactly the starting road generated (33 road
-  cells, nothing else, no machines), then presses menu key 9 and asserts the
-  spawned machine has moved after ~3 s and is still on the road. It also
-  exercises the road-build tool: menu key 1 toggles it on/off, two `ClickCell`
-  calls place a diagonal road, `FindRoadPath` across it returns the
-  corner-cutting diagonal walk, and `SmoothRoadPath` collapses that to a
-  single straight segment.
+- **WorldSmokeTest** asserts the generated **terrain** (every in-bounds cell
+  has terrain and a GridMap item; cells past the edge report `OutOfBounds`;
+  rock, water and soil all exist; fertility stays in 0..1, varies, and is 0 on
+  rock/water; the start-road strip is soil), then **seed determinism**:
+  regenerating the same seed reproduces terrain and fertility bit-exactly,
+  a different seed produces a different map, and returning to the seed
+  restores the original. It then asserts the **layers are independent** —
+  placing a road leaves `GetTerrain`/`GetFertility` unchanged and only swaps
+  the GridMap item, and clearing it restores that item. After that: exactly
+  the starting road placed (33 road cells, no machines), menu key 9 spawns a
+  machine that has moved after ~3 s and is still on the road, and the
+  road-build tool works (menu key 1 toggles it on/off, two `ClickCell` calls
+  place a diagonal road, `FindRoadPath` across it returns the corner-cutting
+  diagonal walk, and `SmoothRoadPath` collapses that to a single straight
+  segment).
 
 For a visual check without a window grab, Godot's movie-maker mode renders
 frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
@@ -192,7 +252,11 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
 
 ## Not yet implemented (deliberate)
 
-- Fields have no behavior — "workable" starts when machines get jobs.
+- Fields have no behavior — "workable" starts when machines get jobs, and
+  fertility is generated but nothing reads it yet (crop growth is M4).
+- Terrain does not restrict building: roads and fields can be placed on rock,
+  water, or right off the map. Placement validation is M2 — `GetTerrain`,
+  `IsSoil` and `InBounds` are the hooks it will ask.
 - Player interaction is the keyboard menu plus the road-build tool; there is
   no other tile painting/building UI yet, and no build costs or validation
   (roads can be drawn anywhere, over fields included).
