@@ -506,8 +506,9 @@ public partial class WorldGrid : Node3D
             }
         }
 
-        // Placement outside the generated map is still allowed (build
-        // validation is a later milestone), so those cells need drawing too.
+        // SetTile itself places anywhere, including outside the generated map
+        // (legality is a build-tool concern, see PlacementRules), so those
+        // cells need drawing too.
         foreach (Vector2I cell in _tiles.Keys)
         {
             if (!InBounds(cell))

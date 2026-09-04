@@ -65,24 +65,27 @@ public partial class WorldSmokeTest : Node
             Check("menu key 1 activates the road tool", _roadTool.Active);
 
             // First click anchors, second click places a diagonal road
-            // (headless has no real cursor, so click the cells directly).
-            _roadTool.ClickCell(new Vector2I(3, 2));
-            Check("first click sets the anchor", _roadTool.Anchor == new Vector2I(3, 2));
-            _roadTool.ClickCell(new Vector2I(7, 6));
+            // (headless has no real cursor, so click the cells directly). The
+            // tool validates placement now, so this diagonal runs over cells
+            // this seed generates as empty soil; refusal itself is
+            // BuildSmokeTest's subject.
+            _roadTool.ClickCell(new Vector2I(2, 2));
+            Check("first click sets the anchor", _roadTool.Anchor == new Vector2I(2, 2));
+            _roadTool.ClickCell(new Vector2I(6, 6));
             Check("second click clears the anchor", _roadTool.Anchor == null);
             Check("second click keeps the tool active", _roadTool.Active);
             Check("road line endpoints were placed",
-                _world.IsRoad(new Vector2I(3, 2)) && _world.IsRoad(new Vector2I(7, 6)));
+                _world.IsRoad(new Vector2I(2, 2)) && _world.IsRoad(new Vector2I(6, 6)));
             // A diagonal is stair-stepped into 4-connected cells; the BFS may
             // cut those stair corners, so it walks the road in 4 diagonal
             // steps + the start cell = 5 path cells.
-            List<Vector2I>? diagonal = _world.FindRoadPath(new Vector2I(3, 2), new Vector2I(7, 6));
+            List<Vector2I>? diagonal = _world.FindRoadPath(new Vector2I(2, 2), new Vector2I(6, 6));
             Check("diagonal road is machine-traversable", diagonal is { Count: 5 });
             // String pulling then collapses it to one straight run.
             Check("diagonal path smooths to a single segment",
                 diagonal != null && _world.SmoothRoadPath(diagonal).Count == 2);
             Check("cell beside the new road is empty",
-                _world.GetTile(new Vector2I(5, 2)) == TileType.Empty);
+                _world.GetTile(new Vector2I(4, 2)) == TileType.Empty);
 
             Input.ParseInputEvent(new InputEventAction { Action = "menu_1", Pressed = true });
         }

@@ -13,7 +13,7 @@ public partial class MenuController : Node
     private const int SlotCount = 9;
 
     [Export] public WorldGrid? World { get; set; }
-    [Export] public RoadBuildTool? RoadTool { get; set; }
+    [Export] public BuildTool? RoadTool { get; set; }
     [Export] public CellInspector? Inspector { get; set; }
 
     public override void _UnhandledInput(InputEvent @event)

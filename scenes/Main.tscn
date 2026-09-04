@@ -5,7 +5,7 @@
 [ext_resource type="MeshLibrary" path="res://assets/dev/tile_library.tres" id="3_tiles"]
 [ext_resource type="PackedScene" path="res://scenes/world/Machine.tscn" id="4_machine"]
 [ext_resource type="Script" path="res://src/ui/MenuController.cs" id="5_menu"]
-[ext_resource type="Script" path="res://src/ui/RoadBuildTool.cs" id="6_roadtool"]
+[ext_resource type="Script" path="res://src/ui/build/RoadBuildTool.cs" id="6_roadtool"]
 [ext_resource type="Script" path="res://src/ui/CellInspector.cs" id="7_inspector"]
 
 [sub_resource type="Environment" id="env_main"]

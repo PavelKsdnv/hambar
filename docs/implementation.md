@@ -23,9 +23,10 @@ scenes/            .tscn scenes; Main.tscn is the entry point
 scenes/world/      scenes instanced by the world (Machine.tscn)
 scenes/dev/        headless smoke-test scenes (not part of the game)
 src/camera/        CameraRig.cs
-src/ui/            MenuController.cs (keyboard menu), RoadBuildTool.cs,
+src/ui/            MenuController.cs (keyboard menu),
                    CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
-src/world/         TileType.cs, WorldGrid.cs, Machine.cs
+src/ui/build/      BuildTool.cs (base for every placement tool), RoadBuildTool.cs
+src/world/         TileType.cs, WorldGrid.cs, PlacementRules.cs, Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
 
@@ -142,14 +143,17 @@ calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
   footprint stays 4-connected; the connector cell alternates sides on
   successive diagonal steps so the staircase stays centered on the true line —
   otherwise machines, which drive the center-to-center segment, would hug one
-  edge of the band) and `BuildRoadLine` (sets those cells to road).
+  edge of the band) and `BuildRoadLine` (sets those cells to road — the
+  unvalidated way to lay a road, for dev/scenario code; the player's road tool
+  goes through `BuildTool` instead).
   Machines still *drive* such a road diagonally: the corner-cutting rule lets
   both the BFS and the smoothing pass run straight along the staircase.
 - **Start layout** (`GenerateStartRoad`, deterministic): a single straight
   road along x through the origin (cells −16..16 at z = 0), on the soil strip
   generation carved for it. Nothing else is placed — fields and further roads
-  will come from gameplay/build actions. Building outside `MapHalfExtent` is
-  still allowed (placement validation is M2); such cells are drawn too.
+  will come from gameplay/build actions. `SetTile` itself still writes outside
+  `MapHalfExtent` (legality is a tool-level concern, see the build tools
+  below); such cells are drawn too.
 - **Dev tiles** (`assets/dev/tile_library.tres`, a hand-written `MeshLibrary`):
   road = flat gray box (item 0), field = raised brown box (item 1), rock =
   tall gray block (item 2), water = thin dark-blue slab sitting lower than
@@ -191,25 +195,79 @@ A minimal command menu on the number keys: actions `menu_1`..`menu_9` in
 `project.godot` map keys 1–9 to slots, handled in `_UnhandledInput` on the
 `Menu` node in Main.tscn. **1** toggles the road-build tool, **9** calls
 `WorldGrid.SpawnMachine()`; the other slots log "unassigned". The `World` and
-`RoadTool` references are node `[Export]`s wired in the scene.
+`RoadTool` references are node `[Export]`s wired in the scene — `RoadTool` is
+typed as the `BuildTool` base, so a slot (or the M2 palette) can point at any
+build tool without touching the menu.
 
-## Road-build tool (`src/ui/RoadBuildTool.cs`)
+## Build tools (`src/ui/build/`, `src/world/PlacementRules.cs`)
 
-The first mouse-driven build action. A `RoadTool` node in Main.tscn; menu
-key 1 toggles it. While active:
+Every mouse-driven placement tool sits on one base, `BuildTool` (M2's
+foundation): hover highlight, ghost preview, validation that refuses an
+illegal placement *before* the click, and the anchor → preview → place →
+cancel interaction. `RoadBuildTool` is the first subclass and is 30 lines,
+most of them comment — copying it is how the next tool gets written.
 
-- A **blinking square** (unshaded translucent `PlaneMesh`, visibility cycled
-  at 0.5 s) highlights the hovered cell, resolved through the shared
-  `CellPicker` (below).
-- **First left click** anchors the road start; a preview line (a `MultiMesh`
-  of the same squares over `WorldGrid.LineCells`) follows the cursor.
-- **Second left click** places the road via `WorldGrid.BuildRoadLine` and
-  re-arms the tool for the next road.
-- **Right click / Esc** cancels the pending anchor first, then deactivates.
+**What a subclass supplies** (the whole contract):
 
-Highlights sit at `Machine.DeckHeight + 0.05` so they never z-fight the road
-deck. `ClickCell` (the anchor/place step) and `PickCell(screenPosition)` are
-public so the headless smoke test can drive the tool without a real cursor.
+| Member | Meaning |
+|---|---|
+| `TileType PlacedTile` | what the tool writes; `NoOverlap` treats a cell already holding it as a no-op |
+| `PlacementRule Rules` | the legality rules this tool opts into |
+| `IReadOnlyList<Vector2I> Footprint(anchor, cell)` | cells a drag covers (roads: `WorldGrid.LineCells`) |
+| `void Apply(PlacementPlan)` *(virtual)* | writes the placement; the default stamps `PlacedTile` over every cell |
+| `bool NeedsAnchor` *(virtual, true)* | false for tools that place on a single click, which then ghost as soon as the cursor moves |
+
+**The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
+re-coding a check inside a tool):
+
+- `BuildableTerrain` — soil only; rock, water and off-map cells are refused
+  (`OffMap` is a separate refusal so the message can differ).
+- `NoOverlap` — the cell must not hold a *different* placement. Placing what
+  is already there stays legal, which is what lets a road be branched off the
+  existing network.
+- `TouchesRoad` — a *footprint-level* rule: some cell of the placement must
+  share an edge with a road cell **outside** the footprint, so a placement can
+  never satisfy its own road requirement. No tool opts in yet (the M2
+  structure tool will); `BuildSmokeTest` exercises it through
+  `PlacementRules.Check` directly so it stays proven until then.
+
+`PlacementRules.Check(world, cells, rules, placing)` returns a
+`PlacementPlan`: the cells, a parallel array of per-cell `PlacementRefusal`s,
+and the one refusal that describes the whole placement. **Partial legality is
+all-or-nothing** — one illegal cell refuses the entire drag, and nothing lands
+on "the legal part" of it. The per-cell verdicts exist only so the ghost can
+point at the cells that caused the refusal. `PlacementRules.Explain(refusal)`
+gives the player-facing wording (a build-cost/HUD issue can reuse it).
+
+**What the player sees.** The blinking hover square is yellow
+(`BuildTool.CursorLegal`) or red (`CursorRefused`) by the verdict on the
+placement under the cursor. Once anchored, a `MultiMesh` of the same squares
+ghosts the footprint with **per-instance colours** (`UseColors`, white albedo
+with `VertexColorUseAsAlbedo`): `GhostLegal` yellow when the whole placement
+is allowed, otherwise `GhostIllegalCell` on the offending cells and
+`GhostRefused` on the rest — a refused drag never shows a legal-coloured cell,
+because none of it is going to be built. Highlights sit at
+`Machine.DeckHeight + 0.05` so they never z-fight the road deck.
+
+**Interaction.** First left click anchors (and is itself validated: you cannot
+anchor on rock), second left click places and re-arms. A refused click writes
+nothing *and keeps the anchor*, so the player just re-aims. Right click / Esc
+drops the anchor first and leaves the tool second.
+
+**Driving a tool without a cursor.** Every state-changing entry point is
+public and cell-driven — `SetActive`/`Toggle`, `HoverAt(cell)`,
+`ClickCell(cell)` (returns whether the click was accepted), `Cancel()`,
+`PlanFor(cell)` — and the preview can be read back through `Preview`,
+`PreviewLegal`, `GhostCellCount`, `GhostColor(i)` and `CursorColor`. That is
+how `BuildSmokeTest` asserts what the player would see. `GhostColor` reads the
+tints the tool handed to the mesh, not the mesh itself: under `--headless` the
+dummy renderer keeps no per-instance colours and `GetInstanceColor` answers
+black. `PickCell(screenPosition)` still exposes the shared picker.
+
+Note that a tool's `_Process` re-hovers from the real cursor every frame, so a
+headless driver must call `HoverAt` in the same frame as the assertion that
+depends on it — or `SetProcess(false)` to pin the hover, the way
+`ScreenshotTest` pins the hover readout.
 
 Gotcha (hand-written .tscn): a Node-typed export serialized as
 `World = NodePath("../World")` only resolves to the actual node if the
@@ -275,6 +333,7 @@ Headless end-to-end checks; each instances `Main.tscn`, drives it for a few
 ```
 godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn
 godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
+godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 ```
 
 - **CameraSmokeTest** feeds synthetic input (`Input.ActionPress` for held
@@ -293,7 +352,9 @@ godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
   the starting road placed (33 road cells, no machines), menu key 9 spawns a
   machine that has moved after ~3 s and is still on the road, and the
   road-build tool works (menu key 1 toggles it on/off, two `ClickCell` calls
-  place a diagonal road, `FindRoadPath` across it returns the corner-cutting
+  place a diagonal road — over cells this seed generates as clear soil, since
+  the tool validates placement now; refusal itself is `BuildSmokeTest`'s
+  subject — `FindRoadPath` across it returns the corner-cutting
   diagonal walk, and `SmoothRoadPath` collapses that to a single straight
   segment). Finally the **hover readout**: headless has no cursor, so instead
   of moving a mouse the test projects a known cell center to its pixel
@@ -304,6 +365,49 @@ godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
   mirrors the inspector's text, that the readout names all four facts for the
   origin, that an off-map pixel still resolves to its real coordinates and
   reads "off the map", and that menu key 2 switches the readout off and on.
+- **BuildSmokeTest** is where build mode (M2) is asserted, and where the rest
+  of M2 adds its checks: the `BuildTool` base, `PlacementRules`, and the ghost.
+  It drives the road tool through the public cell API — menu key 1 arms it,
+  `HoverAt`/`ClickCell`/`Cancel` do the rest — and covers **place** (anchor,
+  all-legal ghost over the whole line, second click writes exactly that line,
+  road-over-road stays legal), **refuse** (rock under the cursor tints the
+  hover square red and cannot even be anchored; a drag into water ghosts one
+  offending cell and no legal-coloured cell, the click is rejected, *nothing*
+  of the line is built and the anchor survives; an occupied cell and an
+  off-map cell each refuse with their own reason; the road-access rule is
+  checked straight through `PlacementRules`), and **cancel** (Esc and right
+  click each drop the anchor first and leave the tool second, clearing ghost
+  and preview).
+  It picks its cells by **searching the generated terrain at runtime**
+  (nearest rock, a clear soil run, a soil run ending in water) instead of
+  hard-coding coordinates a seed change would invalidate — reuse those helpers
+  rather than writing literal cells into new assertions.
+
+### Canonical views (`scenes/dev/ScreenshotTest.tscn`)
+
+The visual counterpart to the smoke tests: it renders the canonical views to
+PNG so a human — or an agent — can look at what the game actually draws.
+**Must run windowed** (`--headless` is the dummy rasterizer: no framebuffer to
+read back, and the run hangs), output dir as a user arg:
+
+```
+godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>
+```
+
+`01-start` (default pose), `02-ghost-legal` / `03-ghost-refused` (the build
+ghost in both verdicts), `04-rotated`, `05-zoomed-out`, `06-overview`
+(detached diagnostic camera), `07-readout` (the hover readout). Each `PASS`
+line captions what the frame is meant to show — the ghost views list their
+cells and per-cell refusals, so the caption, not the pixel colour, is what
+says which cell killed a drag.
+
+Views settle by **time**, not frame count (the rig smooths on `delta`, so a
+frame count converges differently on a fast machine). Anything driven by the
+cursor is pinned instead: a screenshot run has no mouse, so the readout and
+the build tool get `SetProcess(false)` and are fed an explicit cell. The
+ghost views find their drag by asking the tool over a window around the origin
+until a legal and a refused verdict each turn up, so a seed change cannot
+quietly make them two pictures of the same thing.
 
 For a visual check without a window grab, Godot's movie-maker mode renders
 frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
@@ -313,12 +417,15 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
 
 - Fields have no behavior — "workable" starts when machines get jobs, and
   fertility is generated but nothing reads it yet (crop growth is M4).
-- Terrain does not restrict building: roads and fields can be placed on rock,
-  water, or right off the map. Placement validation is M2 — `GetTerrain`,
-  `IsSoil` and `InBounds` are the hooks it will ask.
-- Player interaction is the keyboard menu plus the road-build tool; there is
-  no other tile painting/building UI yet, and no build costs or validation
-  (roads can be drawn anywhere, over fields included).
+- Validation lives in the **tools**, not in the data layer: `WorldGrid.SetTile`
+  still writes anywhere (including off the map), which is what start layout,
+  dev code and tests want. Anything the *player* places goes through
+  `BuildTool`, and therefore through `PlacementRules`.
+- Player interaction is the keyboard menu plus the road-build tool. The other
+  M2 tools — field rectangles, structures, bulldoze — and the build palette
+  and build costs are not written yet; they are meant to be subclasses of
+  `BuildTool` (plus, for bulldoze, a rule of its own) and assertions in
+  `BuildSmokeTest`.
 - The simulation still lives in Godot nodes; the standalone deterministic sim
   core (ECS-like layout, save/replay) comes when there's real sim state to own.
 - Flow fields: BFS per machine is fine at this scale; revisit when mover count
