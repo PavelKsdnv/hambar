@@ -13,15 +13,17 @@ namespace Arable;
 /// godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 ///
-/// Three tools are covered, in that order: the road tool first, then the field
+/// Four tools are covered, in that order: the road tool first, then the field
 /// tool — which therefore validates against a world that already holds this
 /// test's roads, and is also where the "only one tool armed at a time" rule is
-/// proven — and last the structure tool, whose must-touch-a-road rule only
-/// means anything once there is a road network to touch. The rest of M2
-/// (bulldoze, costs, the palette) adds its assertions the same way: give each
-/// new tool a section like <see cref="CheckLegalPlacement"/> and reuse the
-/// cell-finding helpers at the bottom, which look terrain up at runtime
-/// instead of hard-coding coordinates that a seed change would invalidate.
+/// proven — then the structure tool, whose must-touch-a-road rule only means
+/// anything once there is a road network to touch, and last the bulldozer,
+/// which needs one of each of those on the map before it can take them off
+/// again. The rest of M2 (costs, the palette) adds its assertions the same way:
+/// give each new tool a section like <see cref="CheckLegalPlacement"/> and
+/// reuse the cell-finding helpers at the bottom, which look terrain up at
+/// runtime instead of hard-coding coordinates that a seed change would
+/// invalidate.
 /// </summary>
 public partial class BuildSmokeTest : Node
 {
@@ -33,6 +35,7 @@ public partial class BuildSmokeTest : Node
     private RoadBuildTool _tool = null!;
     private FieldBuildTool _fieldTool = null!;
     private StructureBuildTool _structureTool = null!;
+    private BulldozeTool _bulldozeTool = null!;
     private CellInspector _inspector = null!;
     private int _frame;
     private bool _failed;
@@ -62,6 +65,14 @@ public partial class BuildSmokeTest : Node
     private Structure? _structure;
     private Structure? _secondStructure;
 
+    // The terrain the bulldoze section builds on, remembered cell by cell
+    // *before* anything is placed on it — the headline the whole tool has to
+    // survive: clearing a placement must leave the ground it stood on exactly
+    // as it was found (see RememberTerrain / TerrainUnchanged).
+    private readonly List<Vector2I> _rememberedCells = new();
+    private readonly List<TerrainType> _rememberedTerrain = new();
+    private readonly List<float> _rememberedFertility = new();
+
     public override void _Ready()
     {
         Node main = GD.Load<PackedScene>("res://scenes/Main.tscn").Instantiate();
@@ -70,6 +81,7 @@ public partial class BuildSmokeTest : Node
         _tool = main.GetNode<RoadBuildTool>("RoadTool");
         _fieldTool = main.GetNode<FieldBuildTool>("FieldTool");
         _structureTool = main.GetNode<StructureBuildTool>("StructureTool");
+        _bulldozeTool = main.GetNode<BulldozeTool>("BulldozeTool");
         _inspector = main.GetNode<CellInspector>("CellInspector");
     }
 
@@ -171,6 +183,22 @@ public partial class BuildSmokeTest : Node
             CheckStructureOnOccupiedGroundIsRefused();
             CheckClearingDemolishesAStructure();
 
+            // Menu slot 5 arms the bulldozer — the player's path, once more.
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_5", Pressed = true });
+        }
+        else if (_frame == 45)
+        {
+            CheckBulldozeToolArmed();
+            CheckBulldozeClearsARoad();
+            CheckBulldozeClearsAField();
+            CheckBulldozeClearsAStructure();
+            CheckTerrainSurvivedTheBulldozer();
+            CheckBulldozeShrinksAndDropsAField();
+            CheckBulldozeTakesAWholeStructure();
+            CheckBulldozeSkipsEmptyGround();
+            CheckNothingToClearIsRefused();
+            CheckRefundSeam();
+
             GD.Print(_failed ? "BUILD SMOKE TEST FAILED" : "BUILD SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
         }
@@ -188,6 +216,10 @@ public partial class BuildSmokeTest : Node
         Check("the field tool is wired to the world", _fieldTool.World == _world);
         Check("the structure tool starts inactive too", !_structureTool.Active);
         Check("the structure tool is wired to the world", _structureTool.World == _world);
+        Check("the bulldozer starts inactive too", !_bulldozeTool.Active);
+        Check("the bulldozer is wired to the world", _bulldozeTool.World == _world);
+        Check("the bulldozer has removed nothing before it is used",
+            _bulldozeTool.Removals.Count == 0 && _bulldozeTool.RefundTotal == 0);
         Check("no field is registered before one is marked",
             _world.Fields.Count == 0 && _world.FieldCellCount == 0);
         Check("no structure is registered before one is placed",
@@ -356,8 +388,9 @@ public partial class BuildSmokeTest : Node
         Check("the disarmed tool clears its preview", _tool.Preview == null);
         Check("the disarmed tool drops any anchor", _tool.Anchor == null);
         Check("the structure tool is not armed either", !_structureTool.Active);
+        Check("the bulldozer is not armed either", !_bulldozeTool.Active);
         Check("every tool joined the build-tool group",
-            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 3);
+            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 4);
     }
 
     /// <summary>
@@ -925,6 +958,482 @@ public partial class BuildSmokeTest : Node
             && _world.GetStructure(_secondStructure.Id) == _secondStructure);
     }
 
+    // --- bulldoze ----------------------------------------------------------
+
+    /// <summary>
+    /// The bulldozer comes last, because it needs one of everything on the map
+    /// before it can take anything off again. Arming it re-proves the
+    /// tool-group rule with a fourth member.
+    /// </summary>
+    private void CheckBulldozeToolArmed()
+    {
+        Check("menu key 5 activates the bulldozer", _bulldozeTool.Active);
+        Check("arming the bulldozer disarms the structure tool", !_structureTool.Active);
+        Check("arming the bulldozer leaves the road and field tools disarmed",
+            !_tool.Active && !_fieldTool.Active);
+        Check("the bulldozer takes no anchor from being armed",
+            _bulldozeTool.Anchor == null);
+        Check("nothing has gone through the refund seam yet",
+            _bulldozeTool.Removals.Count == 0 && _bulldozeTool.RefundTotal == 0);
+    }
+
+    /// <summary>
+    /// A road, laid with the road tool and taken away with the bulldozer. The
+    /// whole drag previews legal, every cell of it is drawn legal, and the
+    /// second click leaves empty cells behind — one refund-seam entry per cell,
+    /// because a road is nothing but its cells.
+    /// </summary>
+    private void CheckBulldozeClearsARoad()
+    {
+        Vector2I? run = FindCell(cell => IsFreeSoilLine(cell, cell + new Vector2I(2, 0)));
+        Check("found clear soil to lay a road for the bulldozer", run != null);
+        if (run is not { } from)
+        {
+            return;
+        }
+
+        Vector2I to = from + new Vector2I(2, 0);
+        List<Vector2I> cells = WorldGrid.RectCells(from, to);
+        RememberTerrain(cells);
+
+        Check("the road for the bulldozer goes down", Drag(_tool, from, to));
+        Check("it is road before the bulldozer touches it", AllRoad(from, to));
+
+        _bulldozeTool.SetActive(true);
+        int roadsBefore = _world.RoadCellCount;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        _bulldozeTool.HoverAt(from);
+        Check("a cell holding a road previews as clearable", _bulldozeTool.PreviewLegal);
+        Check("the hover square reads legal over something removable",
+            _bulldozeTool.CursorColor.IsEqualApprox(BuildTool.CursorLegal));
+
+        Check("clicking a built cell anchors the bulldoze drag",
+            _bulldozeTool.ClickCell(from));
+        _bulldozeTool.HoverAt(to);
+        Check("the ghost covers the whole pending rectangle",
+            _bulldozeTool.GhostCellCount == cells.Count);
+        Check("every cell of an all-built drag is drawn legal",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == cells.Count);
+        Check("the preview itself removes nothing", _world.RoadCellCount == roadsBefore);
+
+        Check("the second click clears the road", _bulldozeTool.ClickCell(to));
+        Check("every cell of the road is empty again", AllTile(cells, TileType.Empty));
+        Check("exactly those road cells were taken",
+            _world.RoadCellCount == roadsBefore - cells.Count);
+        Check("clearing keeps the bulldozer armed for the next drag", _bulldozeTool.Active);
+        Check("clearing clears the ghost", _bulldozeTool.GhostCellCount == 0);
+        Check("the cleared cell now previews as nothing to clear",
+            _bulldozeTool.PlanFor(from).Refusal == PlacementRefusal.NothingToClear);
+        Check("terrain and fertility under the bulldozed road are unchanged",
+            TerrainUnchanged(cells) && FertilityUnchanged(cells));
+        Check("each road cell is its own removal",
+            _bulldozeTool.Removals.Count == removalsBefore + cells.Count);
+        Check("the refund seam was told it was road, one cell of it",
+            LastRemoval()?.Tile == TileType.Road && LastRemoval()?.CellCount == 1);
+    }
+
+    /// <summary>
+    /// A field, marked with the field tool and bulldozed whole: the tiles go,
+    /// and the entity is dropped with its last cell. Each cell is its own
+    /// removal and names the field it was taken out of — what a per-cell refund
+    /// would need to price.
+    /// </summary>
+    private void CheckBulldozeClearsAField()
+    {
+        Vector2I? block = FindCell(cell => IsFreeSoilRect(cell, cell + Vector2I.One));
+        Check("found a clear soil block to mark a field for the bulldozer",
+            block != null);
+        if (block is not { } from)
+        {
+            return;
+        }
+
+        Vector2I to = from + Vector2I.One;
+        List<Vector2I> cells = WorldGrid.RectCells(from, to);
+        RememberTerrain(cells);
+
+        Check("the field for the bulldozer is marked", Drag(_fieldTool, from, to));
+        Field? marked = _world.GetField(from);
+        Check("it is a field before the bulldozer touches it",
+            marked != null && AllTile(cells, TileType.Field));
+        if (marked is not { } field)
+        {
+            return;
+        }
+
+        _bulldozeTool.SetActive(true);
+        int fieldsBefore = _world.Fields.Count;
+        int fieldCellsBefore = _world.FieldCellCount;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        Check("the bulldoze drag anchors on a field cell", _bulldozeTool.ClickCell(from));
+        _bulldozeTool.HoverAt(to);
+        Check("the ghost covers the whole field rectangle",
+            _bulldozeTool.GhostCellCount == cells.Count);
+        Check("the second click clears the field", _bulldozeTool.ClickCell(to));
+
+        Check("every cell of the field is empty again", AllTile(cells, TileType.Empty));
+        Check("the field is gone from the registry",
+            !WorldHasField(field) && _world.Fields.Count == fieldsBefore - 1);
+        Check("the world lost exactly that field's cells",
+            _world.FieldCellCount == fieldCellsBefore - cells.Count);
+        Check("no cell of it addresses a field any more", _world.GetField(from) == null);
+        Check("terrain and fertility under the bulldozed field are unchanged",
+            TerrainUnchanged(cells) && FertilityUnchanged(cells));
+        Check("each field cell is its own removal",
+            _bulldozeTool.Removals.Count == removalsBefore + cells.Count);
+        Check("the refund seam was told which field it took from",
+            LastRemoval()?.Tile == TileType.Field && LastRemoval()?.Field == field);
+    }
+
+    /// <summary>
+    /// A building, placed with the structure tool and bulldozed away: tile,
+    /// cell lookup, registry entry and id all gone, and one removal — a
+    /// building is priced as a building, not per cell.
+    /// </summary>
+    private void CheckBulldozeClearsAStructure()
+    {
+        Vector2I? found = FindCell(cell => IsFreeSoil(cell) && TouchesRoad(cell));
+        Check("found clear soil beside a road for the bulldozer's building",
+            found != null);
+        if (found is not { } cell)
+        {
+            return;
+        }
+
+        RememberTerrain([cell]);
+        _structureTool.SetActive(true);
+        Check("the building for the bulldozer goes down", _structureTool.ClickCell(cell));
+        Structure? placed = _world.GetStructure(cell);
+        Check("it is a building before the bulldozer touches it", placed != null);
+        if (placed is not { } structure)
+        {
+            return;
+        }
+
+        int id = structure.Id;
+        _bulldozeTool.SetActive(true);
+        int structuresBefore = _world.Structures.Count;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        Check("the bulldoze drag anchors on the building", _bulldozeTool.ClickCell(cell));
+        Check("a drag that never left its cell clears just that cell",
+            _bulldozeTool.ClickCell(cell));
+        Check("the building's cell is empty again", _world.GetTile(cell) == TileType.Empty);
+        Check("the cell addresses no building any more", _world.GetStructure(cell) == null);
+        Check("the building is gone from the registry",
+            _world.Structures.Count == structuresBefore - 1);
+        Check("its id resolves to nothing once the bulldozer has been",
+            _world.GetStructure(id) == null);
+        Check("terrain and fertility under the bulldozed building are unchanged",
+            TerrainUnchanged([cell]) && FertilityUnchanged([cell]));
+        Check("a building is one removal", _bulldozeTool.Removals.Count == removalsBefore + 1);
+        Check("the refund seam was told which building it took",
+            LastRemoval()?.Tile == TileType.Structure && LastRemoval()?.Structure == structure);
+    }
+
+    /// <summary>
+    /// The headline, over every cell the bulldozer has worked on so far: the
+    /// terrain layer is read *before* anything is placed on it and compared
+    /// after everything has been taken off again — type and fertility both.
+    /// Clearing a placement uncovers the ground it was hiding; it never edits
+    /// it.
+    /// </summary>
+    private void CheckTerrainSurvivedTheBulldozer()
+    {
+        Check("the bulldoze checks remembered ground to compare against",
+            _rememberedCells.Count >= 8);
+        Check("all of it was remembered as soil, so the comparison is a real one",
+            RememberedCellsWithTerrain(TerrainType.Soil) == _rememberedCells.Count);
+        Check("some of it carries fertility, so that comparison means something too",
+            RememberedFertileCells() > 0);
+        Check("terrain type under everything bulldozed so far is unchanged",
+            TerrainUnchanged(_rememberedCells));
+        Check("fertility under everything bulldozed so far is unchanged",
+            FertilityUnchanged(_rememberedCells));
+        Check("and none of what was built on it is left",
+            AllTile(_rememberedCells, TileType.Empty));
+    }
+
+    /// <summary>
+    /// A field shrinks under the bulldozer and only disappears with its last
+    /// cell — the asymmetry with a building, from the player's side: take a
+    /// bite out of a field and what is left is still that field, under the same
+    /// name. The drag that finishes it off runs back across the bitten cell, so
+    /// it is also a mixed drag: already-empty ground in the middle of a
+    /// removal changes nothing.
+    /// </summary>
+    private void CheckBulldozeShrinksAndDropsAField()
+    {
+        Vector2I? strip = FindCell(cell => IsFreeSoilRect(cell, cell + new Vector2I(2, 0)));
+        Check("found a clear soil strip to mark a field to bite into", strip != null);
+        if (strip is not { } from)
+        {
+            return;
+        }
+
+        Vector2I to = from + new Vector2I(2, 0);
+        Vector2I middle = from + Vector2I.Right;
+        List<Vector2I> cells = WorldGrid.RectCells(from, to);
+        RememberTerrain(cells);
+
+        Check("the field to bite into is marked", Drag(_fieldTool, from, to));
+        Field? marked = _world.GetField(from);
+        Check("the strip is one field", marked != null && marked.CellCount == cells.Count);
+        if (marked is not { } field)
+        {
+            return;
+        }
+
+        _bulldozeTool.SetActive(true);
+        int fieldsBefore = _world.Fields.Count;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        Check("a one-cell bulldoze anchors in the middle of the field",
+            _bulldozeTool.ClickCell(middle));
+        Check("the second click takes just that cell", _bulldozeTool.ClickCell(middle));
+        Check("the bitten cell is empty", _world.GetTile(middle) == TileType.Empty);
+        Check("the field shrank instead of disappearing",
+            field.CellCount == cells.Count - 1 && WorldHasField(field));
+        Check("the rest of the field still addresses the same entity",
+            _world.GetField(from) == field && _world.GetField(to) == field);
+        Check("the bitten cell belongs to no field", _world.GetField(middle) == null);
+        Check("the world still lists it", _world.Fields.Count == fieldsBefore);
+        Check("one cell taken is one removal, and it names its field",
+            _bulldozeTool.Removals.Count == removalsBefore + 1
+            && LastRemoval()?.Field == field && LastRemoval()?.CellCount == 1);
+
+        // The finishing drag runs the length of the strip, straight across the
+        // cell that is already gone.
+        Check("the finishing drag anchors on what is left", _bulldozeTool.ClickCell(from));
+        _bulldozeTool.HoverAt(to);
+        Check("the drag across the bitten cell is still legal", _bulldozeTool.PreviewLegal);
+        Check("the ghost skips the cell that is already empty",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == cells.Count - 1
+            && CountGhost(_bulldozeTool, BuildTool.GhostRefused) == 1);
+        Check("the second click clears the rest", _bulldozeTool.ClickCell(to));
+        Check("a field that lost its last cell is gone",
+            !WorldHasField(field) && _world.Fields.Count == fieldsBefore - 1);
+        Check("the whole strip is empty", AllTile(cells, TileType.Empty));
+        Check("the already-empty cell was not removed twice",
+            _bulldozeTool.Removals.Count == removalsBefore + cells.Count);
+        Check("terrain and fertility under the whole strip are unchanged",
+            TerrainUnchanged(cells) && FertilityUnchanged(cells));
+    }
+
+    /// <summary>
+    /// Where a building parts company with a field: clipping <b>one edge</b> of
+    /// a 2x2 takes the whole building — tile, footprint, registry entry and id
+    /// — because half a mill is not a mill. The building is placed through
+    /// <see cref="WorldGrid.PlaceStructure"/>, the dev entry point (the way
+    /// <see cref="WorldGrid.MarkField"/> and <see cref="WorldGrid.BuildRoadLine"/>
+    /// are), because the tool still only offers 1x1 footprints and a 1x1 cannot
+    /// be clipped.
+    ///
+    /// The drag deliberately covers two of the four cells: the second one is
+    /// already gone by the time the removal reaches it, so the building goes
+    /// through the refund seam exactly once.
+    /// </summary>
+    private void CheckBulldozeTakesAWholeStructure()
+    {
+        Vector2I? block = FindCell(cell => IsFreeSoilRect(cell, cell + Vector2I.One));
+        Check("found a clear soil block for a 2x2 building", block != null);
+        if (block is not { } origin)
+        {
+            return;
+        }
+
+        List<Vector2I> footprint = WorldGrid.RectCells(origin, origin + Vector2I.One);
+        RememberTerrain(footprint);
+        Structure? placed = _world.PlaceStructure(footprint);
+        Check("the 2x2 building is registered",
+            placed != null && _world.GetStructure(origin) == placed);
+        if (placed is not { } building)
+        {
+            return;
+        }
+
+        int id = building.Id;
+        Check("it covers four cells",
+            building.CellCount == 4 && AllTile(footprint, TileType.Structure));
+
+        _bulldozeTool.SetActive(true);
+        int structuresBefore = _world.Structures.Count;
+        int structureCellsBefore = _world.StructureCellCount;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        Vector2I clipTo = origin + Vector2I.Down;
+        Check("the clipping drag anchors on a corner of the building",
+            _bulldozeTool.ClickCell(origin));
+        _bulldozeTool.HoverAt(clipTo);
+        Check("the clipping drag covers two of its four cells",
+            _bulldozeTool.GhostCellCount == 2);
+        Check("both clipped cells are drawn legal",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == 2);
+        Check("the second click clips the building", _bulldozeTool.ClickCell(clipTo));
+
+        Check("clipping a building takes its whole footprint",
+            AllTile(footprint, TileType.Empty));
+        Check("no cell of it addresses a building any more",
+            _world.GetStructure(origin) == null
+            && _world.GetStructure(origin + Vector2I.One) == null);
+        Check("the building is gone from the registry",
+            _world.Structures.Count == structuresBefore - 1);
+        Check("its id resolves to nothing", _world.GetStructure(id) == null);
+        Check("the world lost all four of its cells",
+            _world.StructureCellCount == structureCellsBefore - footprint.Count);
+        Check("a clipped building is one removal, not one per cell clipped",
+            _bulldozeTool.Removals.Count == removalsBefore + 1);
+        Check("the removal carries the whole footprint that went, not the drag",
+            LastRemoval()?.CellCount == footprint.Count
+            && LastRemoval()?.Structure == building);
+        Check("terrain and fertility under the whole footprint are unchanged",
+            TerrainUnchanged(footprint) && FertilityUnchanged(footprint));
+    }
+
+    /// <summary>
+    /// The deliberate difference from every building tool: a bulldoze drag over
+    /// a region that is only <i>partly</i> built is not refused. It clears what
+    /// is there and skips what is not — dragging across a farmyard crosses
+    /// empty ground as a matter of course — and the ghost says so before the
+    /// click, drawing only the cells it will actually take in the legal colour.
+    /// </summary>
+    private void CheckBulldozeSkipsEmptyGround()
+    {
+        Vector2I? block = FindCell(cell => IsFreeSoilRect(cell, cell + new Vector2I(2, 1)));
+        Check("found a clear soil block for the mixed drag", block != null);
+        if (block is not { } origin)
+        {
+            return;
+        }
+
+        Vector2I roadEnd = origin + new Vector2I(2, 0);
+        Vector2I far = origin + new Vector2I(2, 1);
+        List<Vector2I> road = WorldGrid.RectCells(origin, roadEnd);
+        List<Vector2I> bare = WorldGrid.RectCells(origin + Vector2I.Down, far);
+        _world.BuildRoadLine(origin, roadEnd);
+        Check("the region is half built and half bare",
+            AllTile(road, TileType.Road) && AllTile(bare, TileType.Empty));
+
+        _bulldozeTool.SetActive(true);
+        int roadsBefore = _world.RoadCellCount;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+
+        Check("the mixed drag anchors on the built half", _bulldozeTool.ClickCell(origin));
+        _bulldozeTool.HoverAt(far);
+        Check("a partly empty drag is not refused", _bulldozeTool.PreviewLegal);
+        Check("the ghost covers the whole rectangle",
+            _bulldozeTool.GhostCellCount == road.Count + bare.Count);
+        Check("the ghost draws only the cells it will take as legal",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == road.Count);
+        Check("the ghost dims the cells it will skip",
+            CountGhost(_bulldozeTool, BuildTool.GhostRefused) == bare.Count);
+        Check("no cell of a removal drag is blamed as an offender",
+            CountGhost(_bulldozeTool, BuildTool.GhostIllegalCell) == 0);
+        Check("the skipped cells say why they are skipped",
+            _bulldozeTool.Preview?.CellRefusals[road.Count] == PlacementRefusal.NothingToClear);
+
+        Check("the second click clears the mixed drag", _bulldozeTool.ClickCell(far));
+        Check("the built half is gone", AllTile(road, TileType.Empty));
+        Check("exactly the built cells were taken",
+            _world.RoadCellCount == roadsBefore - road.Count);
+        Check("the bare half was skipped, not turned into anything",
+            AllTile(bare, TileType.Empty));
+        Check("only the cells that held something reached the refund seam",
+            _bulldozeTool.Removals.Count == removalsBefore + road.Count);
+    }
+
+    /// <summary>
+    /// What a bulldozer <i>can</i> be refused for, which is two things: a cell
+    /// with nothing on it, and the map edge. Note what is not a reason — rock
+    /// refuses a build, but bare rock is refused here for holding nothing, not
+    /// for being rock. The building rules describe what may go down; none of
+    /// them describes what may come off, which is why this tool has its own
+    /// pair (<see cref="PlacementRule.InBounds"/>,
+    /// <see cref="PlacementRule.OccupiedCell"/>).
+    /// </summary>
+    private void CheckNothingToClearIsRefused()
+    {
+        Vector2I? free = FindCell(IsFreeSoil);
+        Check("found empty soil for the bulldozer to refuse", free != null);
+        if (free is not { } empty)
+        {
+            return;
+        }
+
+        int removalsBefore = _bulldozeTool.Removals.Count;
+        _bulldozeTool.SetActive(true);
+        _bulldozeTool.HoverAt(empty);
+        Check("empty ground previews as refused", !_bulldozeTool.PreviewLegal);
+        Check("the refusal says there is nothing to clear",
+            _bulldozeTool.Preview?.Refusal == PlacementRefusal.NothingToClear);
+        Check("the wording is the bulldozer's own",
+            PlacementRules.Explain(PlacementRefusal.NothingToClear) == "nothing here to clear");
+        Check("the hover square reads refused over empty ground",
+            _bulldozeTool.CursorColor.IsEqualApprox(BuildTool.CursorRefused));
+        Check("a click on empty ground is rejected", !_bulldozeTool.ClickCell(empty));
+        Check("a refused bulldoze click does not even anchor",
+            _bulldozeTool.Anchor == null);
+        Check("empty ground stayed empty", _world.GetTile(empty) == TileType.Empty);
+
+        Check("bare rock is refused for holding nothing, not for being rock",
+            _bulldozeTool.PlanFor(_rock).Refusal == PlacementRefusal.NothingToClear);
+        Check("the click on bare rock is rejected", !_bulldozeTool.ClickCell(_rock));
+        Check("the rock is still rock", _world.GetTerrain(_rock) == TerrainType.Rock);
+
+        Check("a cell past the map edge is refused",
+            _bulldozeTool.PlanFor(_offMap).Refusal == PlacementRefusal.OffMap);
+        Check("the click past the map edge is rejected", !_bulldozeTool.ClickCell(_offMap));
+
+        Check("no refused click reached the refund seam",
+            _bulldozeTool.Removals.Count == removalsBefore);
+    }
+
+    /// <summary>
+    /// The seam itself: every removal went through it exactly once, each one
+    /// describing what came off, how much ground it held and where — the
+    /// information a real refund rule needs. What it pays is still zero, and
+    /// deliberately so: pricing is M7's, and <c>BulldozeTool.RefundFor</c> is the
+    /// one place it changes.
+    /// </summary>
+    private void CheckRefundSeam()
+    {
+        IReadOnlyList<Removal> removals = _bulldozeTool.Removals;
+        Check("the bulldozer put its removals through the seam", removals.Count > 0);
+
+        bool described = true;
+        int roads = 0, fields = 0, structures = 0;
+        foreach (Removal removed in removals)
+        {
+            described &= removed.Tile != TileType.Empty
+                && removed.CellCount > 0
+                && Covers(removed.Cells, removed.Cell)
+                && !string.IsNullOrEmpty(removed.Name);
+            switch (removed.Tile)
+            {
+                case TileType.Road:
+                    roads++;
+                    described &= removed.Field == null && removed.Structure == null;
+                    break;
+                case TileType.Field:
+                    fields++;
+                    described &= removed.Field != null && removed.Structure == null;
+                    break;
+                case TileType.Structure:
+                    structures++;
+                    described &= removed.Structure != null && removed.Field == null;
+                    break;
+            }
+        }
+
+        Check("each removal names what came off, where, and how much ground", described);
+        Check("the seam saw all three kinds of thing the player can build",
+            roads > 0 && fields > 0 && structures > 0);
+        Check("nothing is refunded yet - the seam is an M7 stub",
+            _bulldozeTool.RefundTotal == 0);
+    }
+
     /// <summary>Cells the tool's ghost currently draws in that colour.</summary>
     private static int CountGhost(BuildTool tool, Color color)
     {
@@ -988,6 +1497,119 @@ public partial class BuildSmokeTest : Node
         }
         return false;
     }
+
+    /// <summary>Whether the list holds that cell.</summary>
+    private static bool Covers(IReadOnlyList<Vector2I> cells, Vector2I cell)
+    {
+        foreach (Vector2I candidate in cells)
+        {
+            if (candidate == cell)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Arms a drag tool and runs one whole placement through it: anchor, hover
+    /// the far corner, commit. Arming disarms whatever was armed before, so a
+    /// bulldoze check that places something has to re-arm the bulldozer after.
+    /// </summary>
+    private static bool Drag(BuildTool tool, Vector2I from, Vector2I to)
+    {
+        tool.SetActive(true);
+        if (!tool.ClickCell(from))
+        {
+            return false;
+        }
+        tool.HoverAt(to);
+        return tool.ClickCell(to);
+    }
+
+    /// <summary>
+    /// Records the terrain under cells *before* anything is built on them, so
+    /// the bulldoze checks can compare against what the ground actually was
+    /// rather than against what it reads as afterwards.
+    /// </summary>
+    private void RememberTerrain(IReadOnlyList<Vector2I> cells)
+    {
+        foreach (Vector2I cell in cells)
+        {
+            _rememberedCells.Add(cell);
+            _rememberedTerrain.Add(_world.GetTerrain(cell));
+            _rememberedFertility.Add(_world.GetFertility(cell));
+        }
+    }
+
+    /// <summary>
+    /// Whether every one of those cells still reads the terrain type it was
+    /// remembered with. A cell that was never remembered fails, so a check
+    /// cannot pass by comparing nothing.
+    /// </summary>
+    private bool TerrainUnchanged(IReadOnlyList<Vector2I> cells)
+    {
+        foreach (Vector2I cell in cells)
+        {
+            int i = _rememberedCells.IndexOf(cell);
+            if (i < 0 || _world.GetTerrain(cell) != _rememberedTerrain[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The same for fertility, compared exactly: nothing in the placement layer
+    /// is allowed to nudge it, so "close enough" would be the wrong test.
+    /// </summary>
+    private bool FertilityUnchanged(IReadOnlyList<Vector2I> cells)
+    {
+        foreach (Vector2I cell in cells)
+        {
+            int i = _rememberedCells.IndexOf(cell);
+            if (i < 0 || _world.GetFertility(cell) != _rememberedFertility[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>How many remembered cells were that terrain when they were read.</summary>
+    private int RememberedCellsWithTerrain(TerrainType terrain)
+    {
+        int count = 0;
+        foreach (TerrainType remembered in _rememberedTerrain)
+        {
+            if (remembered == terrain)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /// <summary>How many remembered cells had fertility on them to lose.</summary>
+    private int RememberedFertileCells()
+    {
+        int count = 0;
+        foreach (float fertility in _rememberedFertility)
+        {
+            if (fertility > 0f)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /// <summary>The last thing the bulldozer put through the refund seam.</summary>
+    private Removal? LastRemoval() =>
+        _bulldozeTool.Removals.Count > 0
+            ? _bulldozeTool.Removals[^1]
+            : null;
 
     /// <summary>Same cells in the same order — footprints are order-defined.</summary>
     private static bool SameCells(IReadOnlyList<Vector2I> a, IReadOnlyList<Vector2I> b)

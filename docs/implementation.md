@@ -26,9 +26,9 @@ src/camera/        CameraRig.cs
 src/ui/            MenuController.cs (keyboard menu),
                    CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
 src/ui/build/      BuildTool.cs (base for every placement tool), RoadBuildTool.cs,
-                   FieldBuildTool.cs, StructureBuildTool.cs
+                   FieldBuildTool.cs, StructureBuildTool.cs, BulldozeTool.cs
 src/world/         TileType.cs, WorldGrid.cs, PlacementRules.cs, Field.cs,
-                   Structure.cs, Machine.cs
+                   Structure.cs, Removal.cs, Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
 
@@ -171,6 +171,15 @@ calls `RefreshCell`; `GenerateTerrain` ends with `RedrawAllCells`.
   `StructureCellCount`. `SetTile` keeps this side in step too, but with the
   opposite rule to fields: overwriting *any* cell of a building demolishes the
   whole building (see **Structures** below).
+- Clearing: `Clear(cell)` is the one removal path — it takes whatever the
+  player placed off the cell (through `SetTile`, so both registries keep their
+  own rule) and returns a `Removal` describing what came off, or null when the
+  cell held nothing. It reports rather than counts because a removal is not a
+  cell: a road or field cell is one cell, a building is its whole footprint.
+  That "or null" is load-bearing — clearing a second cell of a building that
+  is already gone answers null, which is what stops one building being
+  refunded once per cell a drag clipped. See **Bulldozing** below, and the
+  note in `Clear` about roads being removed under M5's vehicles.
 - **Start layout** (`GenerateStartRoad`, deterministic): a single straight
   road along x through the origin (cells −16..16 at z = 0), on the soil strip
   generation carved for it. Nothing else is placed — fields and further roads
@@ -220,8 +229,9 @@ for now, varied per instance by exported `Speed`, `TurnSpeed`, `BodyColor`.
 A minimal command menu on the number keys: actions `menu_1`..`menu_9` in
 `project.godot` map keys 1–9 to slots, handled in `_UnhandledInput` on the
 `Menu` node in Main.tscn. **1** toggles the road-build tool, **2** the hover
-readout, **3** the field-marking tool, **4** the structure tool, **9** calls
-`WorldGrid.SpawnMachine()`; the other slots log "unassigned". The `World`, `Inspector` and tool references
+readout, **3** the field-marking tool, **4** the structure tool, **5** the
+bulldozer, **9** calls `WorldGrid.SpawnMachine()`; the other slots log
+"unassigned". The `World`, `Inspector` and tool references
 are node `[Export]`s wired in the scene — the tool slots are typed as the
 `BuildTool` base, so a slot (or the M2 palette) can point at any build tool
 without touching the menu. The menu never has to *disarm* anything either:
@@ -234,7 +244,9 @@ foundation): hover highlight, ghost preview, validation that refuses an
 illegal placement *before* the click, and the anchor → preview → place →
 cancel interaction. `RoadBuildTool` was the first subclass and is 30 lines,
 most of them comment — copying it is how the next tool gets written, and
-`FieldBuildTool` is that copy plus one override.
+`FieldBuildTool` is that copy plus one override. `BulldozeTool` is the one
+subclass that is not a copy of any of them: it removes instead of placing, and
+**Bulldozing** below is the account of what that inverts.
 
 **What a subclass supplies** (the whole contract):
 
@@ -245,15 +257,17 @@ most of them comment — copying it is how the next tool gets written, and
 | `IReadOnlyList<Vector2I> Footprint(anchor, cell)` | cells a drag covers (roads: `WorldGrid.LineCells`, a line; fields: `WorldGrid.RectCells`, a filled rectangle) |
 | `void Apply(PlacementPlan)` *(virtual)* | writes the placement; the default stamps `PlacedTile` over every cell |
 | `bool NeedsAnchor` *(virtual, true)* | false for tools that place on a single click, which then ghost as soon as the cursor moves |
+| `FootprintPolicy Policy` *(virtual, `EveryCell`)* | how the per-cell verdicts add up over a footprint: all-or-nothing for a build, `AnyCell` for the bulldozer |
+| `Color GhostColorFor(plan, i)` *(virtual)* | how the ghost paints cell `i`; overridden only where a legal plan does not act on every cell |
 
-**The tools that fill it in** (one row per subclass; the remaining M2 tool —
-bulldoze — adds its row here):
+**The tools that fill it in** (one row per subclass):
 
 | Tool | Menu key | Places | Rules | Footprint | `Apply` |
 |---|---|---|---|---|---|
 | `RoadBuildTool` | **1** | `Road` | `BuildableTerrain` + `NoOverlap` | `LineCells` — a stair-stepped line | default (stamps tiles) |
 | `FieldBuildTool` | **3** | `Field` | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
 | `StructureBuildTool` | **4** | `Structure` | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
+| `BulldozeTool` | **5** | nothing — it *removes* | `InBounds` + `OccupiedCell`, and `Policy` = `AnyCell` | `RectCells`, like the field tool | overridden: `WorldGrid.Clear` per cell, each removal through the refund seam |
 
 **The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
 re-coding a check inside a tool):
@@ -270,6 +284,18 @@ re-coding a check inside a tool):
   (below), so a second rectangle covering the first would leave two entities
   claiming the same ground. Either rule refuses with `Occupied`; a tool that
   sets both gets `VacantCell`, the stricter one.
+- `InBounds` — the cell must be on the map, and nothing else.
+  `BuildableTerrain` is its stricter form (on the map *and* soil), so a tool
+  sets one or the other. It exists for the bulldozer, whose business the
+  terrain kind is not: the map edge still bounds where the player works, but
+  what may be *taken off* a cell has nothing to do with what could be built
+  there.
+- `OccupiedCell` — the cell must hold **something**: the exact inverse of
+  `VacantCell`, refusing with `NothingToClear` ("nothing here to clear"). It
+  is the whole of a removal's per-cell legality — a cell is never
+  un-bulldozable for what it holds, only for holding nothing. Mutually
+  exclusive with `VacantCell`/`NoOverlap`; a tool wants the cell free or wants
+  it taken, never both.
 - `TouchesRoad` — a *footprint-level* rule: some cell of the placement must
   share an edge with a road cell **outside** the footprint, so a placement can
   never satisfy its own road requirement. Adjacency is 4-neighbour — a road
@@ -279,13 +305,25 @@ re-coding a check inside a tool):
   individual cell — every per-cell verdict is `None`, so the ghost dims the
   whole placement (`GhostRefused`) instead of marking an offender.
 
-`PlacementRules.Check(world, cells, rules, placing)` returns a
+`PlacementRules.Check(world, cells, rules, placing, policy)` returns a
 `PlacementPlan`: the cells, a parallel array of per-cell `PlacementRefusal`s,
-and the one refusal that describes the whole placement. **Partial legality is
-all-or-nothing** — one illegal cell refuses the entire drag, and nothing lands
-on "the legal part" of it. The per-cell verdicts exist only so the ghost can
-point at the cells that caused the refusal. `PlacementRules.Explain(refusal)`
-gives the player-facing wording (a build-cost/HUD issue can reuse it).
+and the one refusal that describes the whole placement. How those add up is
+the `FootprintPolicy`, and there are exactly two — because building and
+clearing genuinely want opposite answers about a mixed region, not because a
+tool might prefer one:
+
+- `EveryCell` (the default, every building tool): **partial legality is
+  all-or-nothing** — one illegal cell refuses the entire drag, and nothing
+  lands on "the legal part" of it. A half road, or a field with a bite out of
+  it, is not what the player asked for. The per-cell verdicts exist only so
+  the ghost can point at the cells that caused the refusal.
+- `AnyCell` (the bulldozer, and only it): one passing cell is enough and the
+  failing ones are skipped; the drag is refused only when there is nothing in
+  it at all to remove. See **Bulldozing** for why that inversion is the right
+  answer there and how the ghost keeps it honest.
+
+`PlacementRules.Explain(refusal)` gives the player-facing wording (a
+build-cost/HUD issue can reuse it).
 
 **What the player sees.** The blinking hover square is yellow
 (`BuildTool.CursorLegal`) or red (`CursorRefused`) by the verdict on the
@@ -294,13 +332,16 @@ ghosts the footprint with **per-instance colours** (`UseColors`, white albedo
 with `VertexColorUseAsAlbedo`): `GhostLegal` yellow when the whole placement
 is allowed, otherwise `GhostIllegalCell` on the offending cells and
 `GhostRefused` on the rest — a refused drag never shows a legal-coloured cell,
-because none of it is going to be built. Highlights sit at
-`Machine.DeckHeight + 0.05` so they never z-fight the road deck.
+because none of it is going to be built. The one thing the ghost promises is
+that a legal-coloured cell is a cell something will happen to, which is why
+`GhostColorFor` is virtual: under `AnyCell` a legal plan still contains cells
+it will skip, and the bulldozer paints those `GhostRefused` instead. Highlights
+sit at `Machine.DeckHeight + 0.05` so they never z-fight the road deck.
 
 **Interaction.** First left click anchors (and is itself validated: you cannot
-anchor on rock, or on a cell a field already owns), second left click places
-and re-arms. A refused click writes nothing *and keeps the anchor*, so the
-player just re-aims. Right click / Esc drops the anchor first and leaves the
+anchor on rock, on a cell a field already owns, or — bulldozing — on a cell
+with nothing on it), second left click places and re-arms. A refused click
+writes nothing *and keeps the anchor*, so the player just re-aims. Right click / Esc drops the anchor first and leaves the
 tool second. A tool with `NeedsAnchor` = false — the structure tool — skips the
 anchor entirely: it ghosts the cell under the cursor the moment it is armed and
 places on the first click.
@@ -430,12 +471,82 @@ are M5's problem, when there is delivery to fail.
 the way `MarkField` and `BuildRoadLine` are: it clears whatever held the cells
 rather than refusing.
 
+### Bulldozing (`src/ui/build/BulldozeTool.cs`, `src/world/Removal.cs`)
+
+> **Anything the player placed can be taken back off, and the terrain under it
+> is never touched.** Drag a rectangle with the bulldozer (menu key **5**) and
+> every road, field cell and building inside it comes off; the ground that was
+> hidden under it comes back exactly as it was, fertility and all, because the
+> two layers were never stored together.
+
+`BulldozeTool` is the fourth `BuildTool` and the first that removes rather than
+places, which is why it is the only one that had to bend the base instead of
+just filling in the contract.
+
+**Legality is inverted, so it gets its own rules.** None of the building rules
+describe a removal. `BuildableTerrain` asks whether soil could be built on —
+irrelevant to whether something can be taken off it — and `VacantCell` demands
+the exact opposite of what this tool is for. Bending either into shape would
+have made both rules mean two things. So the bulldozer opts into the two rules
+that *do* describe removal, `InBounds` and `OccupiedCell`, and there is no
+third one: **what a cell holds never makes it un-removable.** The two things
+it can be refused for are the map edge (`OffMap`, the same bound every tool
+works inside) and an empty cell (`NothingToClear`). Bare rock is refused for
+holding nothing, *not* for being rock — that difference is asserted in
+`BuildSmokeTest`, because it is the whole point of not reusing
+`BuildableTerrain`.
+
+**A mixed drag clears what is there and skips what is not.** Building is
+all-or-nothing; for removal that would be an unusable tool — clearing a
+farmyard means dragging over the gaps between its buildings, and one empty
+cell would refuse the lot. So the bulldozer is the one user of
+`FootprintPolicy.AnyCell`: the drag is refused only when there is nothing in
+it at all. The ghost is what keeps that honest — it draws the cells that will
+actually be cleared in the legal colour and dims the rest, so what the player
+sees before the click is exactly what the click does. The same rule applies to
+the *anchoring* click, which is the one cell under the cursor: a drag still has
+to start on something removable. That is a deliberate consequence rather than a
+special case, and it is the piece to revisit first if bulldozing ever feels
+fiddly in play.
+
+**Field shrinks, building goes whole — as the player experiences it.** Both
+registries' removal rules (see **Fields** and **Structures**) reach the player
+through this one tool, and they differ: take a bite out of a field and what is
+left is still that field, under the same name, until the last cell goes and it
+is dropped; clip *any* single cell of a building and the whole building goes,
+because half a mill is not a mill. A drag that catches one corner of a 2×2
+therefore removes all four cells. The tool implements neither rule — every cell
+goes through `WorldGrid.Clear`, which goes through `SetTile`, where both rules
+already lived.
+
+**The refund seam is an M7 stub.** Every removal passes through exactly one
+function, `BulldozeTool.RefundFor(Removal)`, which is where a price will be
+put on it (`Apply` credits what it returns, on the line after the call — the
+line the money counter takes over). It pays **nothing** today, deliberately rather than unfinished: nothing
+has a build cost yet, so no fraction of one exists to give back, and the refund
+*economics* — what fraction, whether it varies by building, whether a bulldozed
+field returns anything — are M7's to design and are explicitly not designed
+here. What the seam does carry is everything a real rule needs: `Removal` names
+the tile kind, the entity (`Field` or `Structure`, kept as the object so a
+building can be priced by *what* it is once the roster exists), the cells that
+were actually freed, and the cell the player hit. The money counter that comes
+next credits the amount; neither the signature nor its callers have to move for
+it. `BulldozeTool.Removals` is the ledger of what went through the seam, in
+order — one entry per *removal*, not per cleared cell, which is why clipping
+two cells of the same building refunds it once.
+
+**Roads under vehicles are a real case, from M5.** A road cell can be cleared
+out from under a machine that is driving over it, or that has it in a route it
+already computed. Nothing prevents or re-validates that today — machines walk
+random road paths and would simply fail to path next time — and it is left
+open rather than assumed away: the note lives on `WorldGrid.Clear`, where
+whoever writes M5's vehicles will be standing.
+
 ## Cell picking (`src/ui/CellPicker.cs`)
 
 One implementation of "which cell is under that pixel", shared by every
-mouse-driven tool — the road, field and structure tools and the hover readout
-today, bulldoze next — so the answer can never drift between them. A static
-class, not a node: it holds no state.
+mouse-driven tool — all four build tools and the hover readout — so the answer
+can never drift between them. A static class, not a node: it holds no state.
 
 The camera ray for a screen position is intersected with the ground plane at
 y = 0 **analytically** (`Plane.IntersectsRay`), then handed to
@@ -525,7 +636,7 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   reads "off the map", and that menu key 2 switches the readout off and on.
 - **BuildSmokeTest** is where build mode (M2) is asserted, and where the rest
   of M2 adds its checks: the `BuildTool` base, `PlacementRules`, the ghost, and
-  each tool in turn.
+  each tool in turn (364 assertions today).
   The **road tool** goes first, driven through the public cell API — menu key 1
   arms it, `HoverAt`/`ClickCell`/`Cancel` do the rest — covering **place**
   (anchor, all-legal ghost over the whole line, second click writes exactly
@@ -572,13 +683,38 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   talking). Finally, clearing the cell demolishes the building — tile, cell
   lookup, registry entry and id all gone, terrain intact, the other building
   untouched.
+  The **bulldozer** comes last of all, because it needs one of everything on
+  the map before it can take anything off again; menu key 5 arms it and
+  disarms the structure tool (the group rule, now with four members). It
+  places a road, a field and a building **through their own tools** and then
+  bulldozes each away, and the headline runs underneath all three: the terrain
+  type and fertility of every cell are read *before* anything is built on them
+  and compared again once everything has been cleared — exact float
+  comparison, and the check fails on a cell it never remembered, so it cannot
+  pass by comparing nothing. Then the two registry rules as the player meets
+  them: a field bitten in the middle shrinks and keeps its identity, and is
+  dropped only when the finishing drag takes its last cell, while a 2×2
+  building (placed through `PlaceStructure`, since the tool only offers 1×1)
+  clipped along one edge loses its whole footprint and its id. The mixed drag
+  is asserted in both directions — a rectangle half road and half bare ground
+  previews **legal**, ghosts exactly the cells it will take as legal and dims
+  the rest, blames no cell, and clears only the built half — and so are the two
+  refusals a bulldozer has: empty ground *and bare rock* both answer
+  `NothingToClear` (the terrain is not the reason), off the map answers
+  `OffMap`, and no refused click reaches the refund seam. The seam itself is
+  asserted as a seam: one entry per removal (a clipped building appears once,
+  and a cell already cleared inside the same drag does not appear at all), each
+  naming its kind, its entity, the cells actually freed and where the player
+  hit it, across all three kinds — and a total refund of zero, the M7 stub
+  doing exactly what it says.
   It picks its cells by **searching the generated terrain at runtime**
   (nearest rock, a clear soil run, a soil run ending in water, a clear soil
-  block for the rectangles, a strip running into rough ground) instead of
-  hard-coding coordinates a seed change would invalidate — reuse those helpers
-  rather than writing literal cells into new assertions. The field section
-  searches at the point of use, because by then the test's own roads and fields
-  are on the map and "clear soil" has to mean clear *now*.
+  block for the rectangles, a strip running into rough ground, free soil
+  beside the road network) instead of hard-coding coordinates a seed change
+  would invalidate — reuse those helpers rather than writing literal cells into
+  new assertions. The field, structure and bulldoze sections search at the
+  point of use, because by then the test's own roads, fields and buildings are
+  on the map and "clear soil" has to mean clear *now*.
 
 ### Canonical views (`scenes/dev/ScreenshotTest.tscn`)
 
@@ -596,8 +732,9 @@ ghost in both verdicts), `04-field-ghost` / `05-field-marked` (a field
 rectangle previewed mid-drag, then the same rectangle committed),
 `06-structure-refused` / `07-structure-placed` (the must-touch-a-road rule
 refused before the click, then a building standing beside the road),
-`08-rotated`, `09-zoomed-out`, `10-overview` (detached diagnostic camera),
-`11-readout` (the hover readout). Each `PASS` line captions what the frame is
+`08-bulldoze-mixed` (the one ghost painted per cell: a drag that is legal
+overall while dimming the cells it will skip), `09-rotated`, `10-zoomed-out`,
+`11-overview` (detached diagnostic camera), `12-readout` (the hover readout). Each `PASS` line captions what the frame is
 meant to show — the ghost views list their cells and per-cell refusals, so the
 caption, not the pixel colour, is what says which cell killed a drag.
 
@@ -606,7 +743,8 @@ tool itself rather than hard-coding cells, for the same reason
 `BuildSmokeTest` does: a seed change must not quietly turn a view into a
 picture of something else. `04-field-ghost` leaves its field on the map on
 purpose, and `07-structure-placed` its building, so the rotated, zoomed and
-overview shots carry both too.
+overview shots carry both too. `08-bulldoze-mixed` only ever hovers its drag —
+committing it would take the start road out of every view that follows.
 
 Views settle by **time**, not frame count (the rig smooths on `delta`, so a
 frame count converges differently on a fast machine). Anything driven by the
@@ -629,16 +767,23 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
   a `Structure` is an identified building that occupies ground and must touch a
   road. The roster and what buildings *do* is M5 (silo) and M6 (cleaner, mill,
   bakery); multi-tile footprints are unwritten but not designed out (see
-  **Structures**); nothing re-checks road access when the road under a
-  building's neighbour is bulldozed later.
+  **Structures**) — `PlaceStructure` already takes any footprint, which is how
+  `BuildSmokeTest` gets a 2×2 to clip; nothing re-checks road access when the
+  road beside a building is bulldozed away later.
 - Validation lives in the **tools**, not in the data layer: `WorldGrid.SetTile`
   still writes anywhere (including off the map), which is what start layout,
   dev code and tests want. Anything the *player* places goes through
   `BuildTool`, and therefore through `PlacementRules`.
-- Player interaction is the keyboard menu plus the road, field and structure
-  tools. The remaining M2 tool — bulldoze — and the build palette and build
-  costs are not written yet; they are meant to be subclasses of `BuildTool`
-  (plus, for bulldoze, a rule of its own) and assertions in `BuildSmokeTest`.
+- Player interaction is the keyboard menu plus the road, field, structure and
+  bulldoze tools. The build palette and build costs are not written yet; they
+  are meant to be more `BuildTool` subclasses and assertions in
+  `BuildSmokeTest`.
+- Removing something refunds **nothing**, on purpose: `BulldozeTool.RefundFor`
+  has the shape of a refund and none of the economics, which are M7's — and
+  nothing has a build cost to give a fraction of yet anyway.
+- Nothing stops a road being bulldozed out from under a machine that is driving
+  it or has it in a route. That is a real case from M5, not an impossible one;
+  the note sits on `WorldGrid.Clear`.
 - The simulation still lives in Godot nodes; the standalone deterministic sim
   core (ECS-like layout, save/replay) comes when there's real sim state to own.
 - Flow fields: BFS per machine is fine at this scale; revisit when mover count

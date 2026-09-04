@@ -103,10 +103,13 @@ public partial class ScreenshotTest : Node
         // with real height on it.
         await ShowStructure(main, rig);
 
+        // The bulldozer's mixed drag, the one ghost that paints per cell.
+        await ShowBulldozeGhost(main, rig);
+
         // One 90° step: catches a rotation that skews or flips the world.
         SendAction("camera_rotate_left");
         await Settle(SettleSeconds);
-        Capture("08-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
+        Capture("09-rotated", $"after one rotate-left, yaw {rig.RotationDegrees.Y:0.0}°");
 
         // As far out as the rig allows — the "does it read at farm scale" view.
         for (int i = 0; i < ZoomOutSteps; i++)
@@ -115,20 +118,20 @@ public partial class ScreenshotTest : Node
         }
 
         await Settle(SettleSeconds);
-        Capture("09-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
+        Capture("10-zoomed-out", $"player zoom limit, ortho size {camera.Size:0.0}");
 
         // Diagnostic only: a detached camera beyond the rig's ZoomMax, so the
         // whole world is in frame even when the player could never see it.
         AddOverviewCamera(main);
         await Settle(0.2f);
-        Capture("10-overview", "detached diagnostic camera, whole world");
+        Capture("11-overview", "detached diagnostic camera, whole world");
 
         // The hover readout, which no other view can show. Driven by an
         // explicit pixel with _Process switched off, so it names a known cell
         // instead of following a cursor this run does not have.
         camera.MakeCurrent();
         string readout = await ShowReadout(main);
-        Capture("11-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
+        Capture("12-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
 
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
@@ -384,6 +387,97 @@ public partial class ScreenshotTest : Node
         GD.Print($"FAIL: {name} — no cell within {SearchRadius} of the origin "
             + $"gave verdict {want}");
         _failed = true;
+    }
+
+    /// <summary>
+    /// Captures the bulldozer hovering a <i>mixed</i> drag — one covering both
+    /// cells that hold something and cells that do not. That is the only ghost
+    /// in the game painted per cell rather than per verdict: under
+    /// <see cref="FootprintPolicy.AnyCell"/> the drag as a whole is legal while
+    /// some of its cells will be skipped, and the picture is the claim that the
+    /// ghost says so instead of promising to clear all of it.
+    ///
+    /// The drag is only ever hovered, never clicked: committing it would take
+    /// the start road out of every view that follows.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowBulldozeGhost(Node main, CameraRig rig)
+    {
+        const int SearchRadius = 10;
+
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var tool = main.GetNodeOrNull<BuildTool>("BulldozeTool");
+        if (world == null || tool == null)
+        {
+            GD.Print("FAIL: bulldoze ghost — no World or BulldozeTool in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        Vector3 home = rig.Position;
+        tool.SetProcess(false);
+
+        for (int radius = 1; radius <= SearchRadius; radius++)
+        {
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dz)) != radius)
+                    {
+                        continue;
+                    }
+
+                    var from = new Vector2I(dx, dz);
+                    var to = new Vector2I(dx + 2, dz + 2);
+                    tool.SetActive(true);   // re-arm: also drops the old anchor
+                    if (!tool.ClickCell(from))
+                    {
+                        continue;
+                    }
+
+                    tool.HoverAt(to);
+                    // Mixed means both kinds present: legal overall, yet with
+                    // cells the click will pass over.
+                    if (tool.Preview is not { Legal: true } plan
+                        || CountLegalCells(plan) is var kept
+                        && (kept == 0 || kept == plan.Count))
+                    {
+                        continue;
+                    }
+
+                    rig.Position = world.CellToWorld((from + to) / 2);
+                    await Settle(0.3f);
+                    Capture("08-bulldoze-mixed",
+                        $"bulldoze drag, {kept} of {plan.Count} cells hold something "
+                        + $"— {from} to {to}, {Describe(plan)}");
+
+                    tool.SetActive(false);
+                    tool.SetProcess(true);
+                    rig.Position = home;
+                    return;
+                }
+            }
+        }
+
+        GD.Print($"FAIL: 08-bulldoze-mixed — no mixed drag within {SearchRadius} of the origin");
+        _failed = true;
+        tool.SetActive(false);
+        tool.SetProcess(true);
+        rig.Position = home;
+    }
+
+    /// <summary>How many cells of the plan the tool would actually act on.</summary>
+    private static int CountLegalCells(PlacementPlan plan)
+    {
+        int legal = 0;
+        for (int i = 0; i < plan.Count; i++)
+        {
+            if (plan.CellLegal(i))
+            {
+                legal++;
+            }
+        }
+        return legal;
     }
 
     /// <summary>

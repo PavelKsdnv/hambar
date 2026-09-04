@@ -41,6 +41,26 @@ public enum PlacementRule
     /// claiming it, so a new rectangle has to start on free ground.
     /// </summary>
     VacantCell = 1 << 3,
+
+    /// <summary>
+    /// The cell must be on the map, and nothing more — the weakest terrain
+    /// rule there is. <see cref="BuildableTerrain"/> is its stricter form (on
+    /// the map <i>and</i> soil), so a tool sets one or the other, never both.
+    /// It exists for the bulldozer: the map edge still bounds where it may
+    /// work, but "is this soil?" is not its business — what it may take off a
+    /// cell has nothing to do with what could be built there.
+    /// </summary>
+    InBounds = 1 << 4,
+
+    /// <summary>
+    /// The cell must hold <i>something</i> — the exact inverse of
+    /// <see cref="VacantCell"/>, and the rule the bulldozer is built on: an
+    /// empty cell has nothing to clear, which is the one thing a removal can
+    /// be refused for. Mutually exclusive with <see cref="VacantCell"/> and
+    /// <see cref="NoOverlap"/>: a tool either wants the cell free or wants it
+    /// taken, never both.
+    /// </summary>
+    OccupiedCell = 1 << 5,
 }
 
 /// <summary>Why a cell, or a whole placement, was refused.</summary>
@@ -50,10 +70,43 @@ public enum PlacementRefusal
     OffMap,
     UnbuildableTerrain,
     Occupied,
+
+    /// <summary>
+    /// The mirror of <see cref="Occupied"/>, and a removal's own refusal: the
+    /// cell holds nothing the player put there, so there is nothing to take
+    /// off it (<see cref="PlacementRule.OccupiedCell"/>).
+    /// </summary>
+    NothingToClear,
+
     NoRoadAccess,
 
     /// <summary>Nothing to place: an empty footprint, or no world to place in.</summary>
     NothingToPlace,
+}
+
+/// <summary>
+/// How the per-cell verdicts on a footprint add up to the verdict on the whole
+/// thing. Two policies, because building and clearing genuinely want opposite
+/// answers on a mixed region — not because a tool might like one better.
+/// </summary>
+public enum FootprintPolicy
+{
+    /// <summary>
+    /// <b>Every cell must pass.</b> One illegal cell refuses the whole
+    /// placement and nothing lands on "the legal part" of the drag — a half
+    /// road or a field with a bite out of it is not what the player asked for.
+    /// Every building tool uses this.
+    /// </summary>
+    EveryCell,
+
+    /// <summary>
+    /// <b>One passing cell is enough</b>, and the cells that fail are simply
+    /// skipped. The bulldozer's policy: a drag across a farm crosses empty
+    /// ground as a matter of course, so refusing the whole region over it
+    /// would make the tool unusable. The drag is refused only when there is
+    /// nothing at all in it to remove.
+    /// </summary>
+    AnyCell,
 }
 
 /// <summary>
@@ -122,14 +175,23 @@ public static class PlacementRules
     /// The verdict on placing <paramref name="placing"/> over
     /// <paramref name="cells"/> under <paramref name="rules"/>.
     ///
-    /// <b>Partial legality is all-or-nothing:</b> if any single cell of a
+    /// <b>Partial legality is all-or-nothing</b> under the default
+    /// <see cref="FootprintPolicy.EveryCell"/>: if any single cell of a
     /// multi-cell placement is illegal, the whole placement is refused — no
-    /// build ever lands on "the legal part" of a drag. The per-cell verdicts
-    /// survive in <see cref="PlacementPlan.CellRefusals"/> only so the ghost
-    /// can point at the cells that caused the refusal.
+    /// build ever lands on "the legal part" of a drag. Removal inverts that
+    /// with <see cref="FootprintPolicy.AnyCell"/>, where the failing cells are
+    /// skipped instead. Either way the per-cell verdicts survive in
+    /// <see cref="PlacementPlan.CellRefusals"/>, so the ghost can point at the
+    /// cells that caused the refusal — or, under
+    /// <see cref="FootprintPolicy.AnyCell"/>, at the cells nothing will happen
+    /// to.
     /// </summary>
     public static PlacementPlan Check(
-        WorldGrid? world, IReadOnlyList<Vector2I> cells, PlacementRule rules, TileType placing)
+        WorldGrid? world,
+        IReadOnlyList<Vector2I> cells,
+        PlacementRule rules,
+        TileType placing,
+        FootprintPolicy policy = FootprintPolicy.EveryCell)
     {
         if (world == null || cells.Count == 0)
         {
@@ -137,15 +199,28 @@ public static class PlacementRules
         }
 
         var refusals = new PlacementRefusal[cells.Count];
-        PlacementRefusal verdict = PlacementRefusal.None;
+        PlacementRefusal firstRefusal = PlacementRefusal.None;
+        int legalCells = 0;
         for (int i = 0; i < cells.Count; i++)
         {
             refusals[i] = CheckCell(world, cells[i], rules, placing);
-            if (verdict == PlacementRefusal.None)
+            if (refusals[i] == PlacementRefusal.None)
             {
-                verdict = refusals[i];
+                legalCells++;
+            }
+            else if (firstRefusal == PlacementRefusal.None)
+            {
+                firstRefusal = refusals[i];
             }
         }
+
+        // The two policies read the same per-cell verdicts in opposite
+        // directions: a build wants no refusal anywhere, a removal wants at
+        // least one cell it can act on. When an AnyCell footprint has none,
+        // the first cell's refusal is still what to tell the player.
+        PlacementRefusal verdict = policy == FootprintPolicy.AnyCell
+            ? legalCells > 0 ? PlacementRefusal.None : firstRefusal
+            : firstRefusal;
 
         if (verdict == PlacementRefusal.None
             && rules.HasFlag(PlacementRule.TouchesRoad)
@@ -161,20 +236,33 @@ public static class PlacementRules
     public static PlacementRefusal CheckCell(
         WorldGrid world, Vector2I cell, PlacementRule rules, TileType placing)
     {
-        if (rules.HasFlag(PlacementRule.BuildableTerrain))
+        // BuildableTerrain is InBounds plus "and it must be soil", so the map
+        // bound is checked once for either flag and the terrain kind only for
+        // the stricter one.
+        if (rules.HasFlag(PlacementRule.BuildableTerrain) || rules.HasFlag(PlacementRule.InBounds))
         {
-            TerrainType terrain = world.GetTerrain(cell);
-            if (terrain == TerrainType.OutOfBounds)
+            if (!world.InBounds(cell))
             {
                 return PlacementRefusal.OffMap;
             }
-            if (!IsBuildableTerrain(terrain))
-            {
-                return PlacementRefusal.UnbuildableTerrain;
-            }
         }
 
-        if (rules.HasFlag(PlacementRule.VacantCell))
+        if (rules.HasFlag(PlacementRule.BuildableTerrain)
+            && !IsBuildableTerrain(world.GetTerrain(cell)))
+        {
+            return PlacementRefusal.UnbuildableTerrain;
+        }
+
+        if (rules.HasFlag(PlacementRule.OccupiedCell))
+        {
+            // The inverse rule, and the whole of a removal's per-cell legality:
+            // it is only ever refused for having nothing to take.
+            if (world.GetTile(cell) == TileType.Empty)
+            {
+                return PlacementRefusal.NothingToClear;
+            }
+        }
+        else if (rules.HasFlag(PlacementRule.VacantCell))
         {
             if (world.GetTile(cell) != TileType.Empty)
             {
@@ -222,6 +310,7 @@ public static class PlacementRules
         PlacementRefusal.OffMap => "off the map",
         PlacementRefusal.UnbuildableTerrain => "cannot build on rock or water",
         PlacementRefusal.Occupied => "something is already built here",
+        PlacementRefusal.NothingToClear => "nothing here to clear",
         PlacementRefusal.NoRoadAccess => "must touch a road",
         _ => "nothing to place",
     };

@@ -324,6 +324,54 @@ public partial class WorldGrid : Node3D
         }
     }
 
+    /// <summary>
+    /// Takes whatever the player placed off the cell and reports what came off,
+    /// or null when the cell held nothing. <b>The terrain underneath is never
+    /// touched</b> — the two layers are stored separately, so clearing the
+    /// placement simply uncovers the ground that was always there, fertility
+    /// and all.
+    ///
+    /// This is the one removal path (<c>BulldozeTool</c> is its only player-
+    /// facing caller), and it reports rather than counts because a removal is
+    /// not a cell: clearing a field cell shrinks a <see cref="Field"/> that may
+    /// survive it, while clearing any cell of a building demolishes the
+    /// <b>whole</b> building (see <see cref="SetTile"/>) — the returned
+    /// <see cref="Removal"/> carries the footprint that actually went. Calling
+    /// it again on a cell of that same building answers null, because the cell
+    /// is already empty, which is what keeps one building from being refunded
+    /// once per cell a drag clipped.
+    ///
+    /// <b>Note for M5 (vehicles) — road removal is not a safe operation.</b>
+    /// From the milestone that gives machines routes onward, a road cell can be
+    /// cleared out from under a vehicle that is driving over it or has it in a
+    /// path it already computed. Nothing here stops that today and nothing is
+    /// re-validated: machines currently pick their own random road walks and
+    /// would simply fail to path next time. It is a real case, not an
+    /// impossible one — when M5 lands, the vehicles must handle a route whose
+    /// cells stopped being road (re-path, or refuse the removal), and this is
+    /// the function that will hand them the news.
+    /// </summary>
+    public Removal? Clear(Vector2I cell)
+    {
+        TileType tile = GetTile(cell);
+        if (tile == TileType.Empty)
+        {
+            return null;
+        }
+
+        // Read the entities *before* the write: SetTile drops an emptied field
+        // and demolishes a structure whole, so afterwards neither lookup can
+        // still name what was removed.
+        Field? field = GetField(cell);
+        Structure? structure = GetStructure(cell);
+        IReadOnlyList<Vector2I> freed = structure != null
+            ? new List<Vector2I>(structure.Cells)
+            : [cell];
+
+        SetTile(cell, TileType.Empty);
+        return new Removal(tile, cell, freed, field, structure);
+    }
+
     public void SetTile(Vector2I cell, TileType type)
     {
         TileType previous = GetTile(cell);

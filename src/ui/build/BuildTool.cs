@@ -11,7 +11,12 @@ namespace Arable;
 /// write (<see cref="PlacedTile"/>), which rules they opt into
 /// (<see cref="Rules"/>), and which cells a drag covers
 /// (<see cref="Footprint"/>) — so a new tool is a dozen lines, not a copy of
-/// this file.
+/// this file. Four more hooks are virtual for the tools that need them:
+/// <see cref="Apply"/> (what a commit writes), <see cref="NeedsAnchor"/>
+/// (drag or single click), <see cref="Policy"/> and
+/// <see cref="GhostColorFor"/> (how a footprint's per-cell verdicts add up,
+/// and how the ghost then paints them — which is where the bulldozer, the one
+/// tool that removes instead of places, parts company with the rest).
 ///
 /// Interaction: the first left click anchors, a second left click places, and
 /// right click / Esc drops the anchor first and leaves the tool second. A tool
@@ -54,8 +59,11 @@ public abstract partial class BuildTool : Node3D
     public static readonly Color GhostIllegalCell = new(0.95f, 0.15f, 0.12f, 0.6f);
 
     /// <summary>
-    /// Ghost cell that is fine on its own but belongs to a refused placement —
-    /// dimmed, and never the legal colour, because nothing here will be built.
+    /// Ghost cell that <i>nothing is going to happen to</i> — dimmed, and never
+    /// the legal colour. For a building tool that is a cell which is fine on
+    /// its own but belongs to a refused placement, since none of a refused
+    /// placement gets built; for the bulldozer it is a cell of the drag with
+    /// nothing on it to take.
     /// </summary>
     public static readonly Color GhostRefused = new(0.8f, 0.2f, 0.16f, 0.45f);
 
@@ -104,6 +112,13 @@ public abstract partial class BuildTool : Node3D
 
     /// <summary>Legality rules this tool opts into.</summary>
     protected abstract PlacementRule Rules { get; }
+
+    /// <summary>
+    /// How this tool's per-cell verdicts add up over a multi-cell footprint.
+    /// Building is all-or-nothing (the default); the bulldozer overrides it,
+    /// because a removal drag is expected to cross ground with nothing on it.
+    /// </summary>
+    protected virtual FootprintPolicy Policy => FootprintPolicy.EveryCell;
 
     /// <summary>
     /// Cells a placement from <paramref name="anchor"/> to
@@ -223,7 +238,7 @@ public abstract partial class BuildTool : Node3D
             return PlacementPlan.Nothing;
         }
         Vector2I anchor = Anchor ?? cell;
-        return PlacementRules.Check(World, Footprint(anchor, cell), Rules, PlacedTile);
+        return PlacementRules.Check(World, Footprint(anchor, cell), Rules, PlacedTile, Policy);
     }
 
     /// <summary>
@@ -382,8 +397,14 @@ public abstract partial class BuildTool : Node3D
     /// A legal placement draws every cell legal; a refused one draws none of
     /// them legal (nothing there is going to be built) and marks the offending
     /// cells strongest, so the player can see which cell killed the drag.
+    ///
+    /// Virtual because the ghost has to keep telling the truth for a tool whose
+    /// footprint is not all-or-nothing: under
+    /// <see cref="FootprintPolicy.AnyCell"/> a legal plan still contains cells
+    /// it will not act on, and painting those legal would promise something the
+    /// click does not do.
     /// </summary>
-    private static Color GhostColorFor(PlacementPlan plan, int index) =>
+    protected virtual Color GhostColorFor(PlacementPlan plan, int index) =>
         plan.Legal ? GhostLegal
         : plan.CellLegal(index) ? GhostRefused
         : GhostIllegalCell;
