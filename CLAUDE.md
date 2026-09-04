@@ -24,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Tasks live as GitHub issues on the `origin` repo. Two stdlib-only Python scripts wrap the API — `scripts/README.md` has the full flag set:
 
 - `python scripts/gh_issues_read.py list|get|comments|search|labels|milestones` — read side; `--json` (optionally `--fields`) for machine-readable output, PRs filtered out by default.
-- `python scripts/gh_issues_publish.py create|batch|update|comment|close|reopen` — write side; `--dry-run` previews the payload, `--dedupe` keeps repeat runs idempotent.
+- `python scripts/gh_issues_publish.py create|batch|update|milestone|comment|close|reopen` — write side; `--dry-run` previews the payload, `--dedupe` keeps repeat runs idempotent. `milestone` upserts by title.
 - Both resolve the repo from the `origin` remote and the token from `$GITHUB_TOKEN` / `gh auth token`, so `--repo`/`--token` are rarely needed.
 - Caveat: GitHub's issue *list* endpoint lags a few seconds behind a write, so a `--dedupe` scan run immediately after a create can miss it.
 

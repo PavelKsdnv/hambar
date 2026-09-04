@@ -249,18 +249,37 @@ def split_list(values) -> list:
     return out
 
 
+def find_milestone(client: "Client", value: Optional[str]) -> Optional[dict]:
+    """Look up a milestone by number or title. Returns None if there is no match.
+
+    Open and closed milestones are both searched, so a title cannot be reused
+    for a second milestone just because the first one was closed.
+    """
+    if value is None:
+        return None
+    wanted = str(value).strip()
+    if not wanted:
+        return None
+    for milestone in client.paginate(
+        "/repos/{}/milestones".format(client.repo), {"state": "all"}
+    ):
+        if wanted.isdigit() and milestone["number"] == int(wanted):
+            return milestone
+        if milestone["title"].strip().lower() == wanted.lower():
+            return milestone
+    return None
+
+
 def resolve_milestone(client: "Client", value: Optional[str]) -> Optional[int]:
     """Accept a milestone number or title; the API only takes a number."""
     if value is None:
         return None
     if str(value).isdigit():
         return int(value)
-    for milestone in client.paginate(
-        "/repos/{}/milestones".format(client.repo), {"state": "all"}
-    ):
-        if milestone["title"].strip().lower() == str(value).strip().lower():
-            return milestone["number"]
-    raise GhError("no milestone titled {!r} in {}".format(value, client.repo))
+    found = find_milestone(client, value)
+    if found is None:
+        raise GhError("no milestone titled {!r} in {}".format(value, client.repo))
+    return found["number"]
 
 
 def is_pull_request(item: dict) -> bool:

@@ -5,7 +5,7 @@ prompt *or* by an agent/skill:
 
 | Script | Direction | Subcommands |
 | --- | --- | --- |
-| `gh_issues_publish.py` | write | `create`, `batch`, `update`, `comment`, `close`, `reopen` |
+| `gh_issues_publish.py` | write | `create`, `batch`, `update`, `milestone`, `comment`, `close`, `reopen` |
 | `gh_issues_read.py` | read | `list`, `get`, `comments`, `search`, `labels`, `milestones` |
 
 `ghlib.py` holds the auth, repo resolution, HTTP and pagination they share.
@@ -33,6 +33,8 @@ python scripts/gh_issues_read.py labels            # valid label names before wr
 # write
 python scripts/gh_issues_publish.py create --title "Chunked GridMap streaming" \
     --body-file notes.md --label perf,world --milestone "Alpha"
+python scripts/gh_issues_publish.py milestone --title "M1 — World you can look at" \
+    --description-file docs/m1.md --due 2026-10-15
 python scripts/gh_issues_publish.py comment 12 --body "Fixed in 9cbd441."
 python scripts/gh_issues_publish.py update 12 --add-label blocked --remove-label ready
 python scripts/gh_issues_publish.py close 12 --reason not_planned --comment "Superseded."
@@ -78,4 +80,11 @@ subcommand also takes `--dry-run`.
   A `{"issues": [...]}` wrapper is accepted too, and `labels`/`assignees` may be
   comma-separated strings instead of lists.
 - **Milestones** accept a title or a number in both scripts; titles are resolved
-  to numbers automatically.
+  to numbers automatically, searching open *and* closed milestones.
+- **`milestone` upserts by title.** It creates the milestone, or edits the one
+  already carrying that title — so re-running the same command is an update, not
+  a duplicate, and a generated set of milestones can be regenerated safely. Pass
+  `--dedupe` to leave an existing milestone untouched instead of updating it.
+  `--due` takes `YYYY-MM-DD` (anchored at midday UTC, so the displayed date does
+  not slip a day) or a full ISO 8601 timestamp. There is no delete subcommand —
+  removing a milestone is a rare, destructive action, so do it on the web UI.

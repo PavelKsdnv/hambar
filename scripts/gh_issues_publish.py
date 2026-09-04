@@ -14,6 +14,9 @@ Examples
     python scripts/gh_issues_publish.py close 12 --reason not_planned
     cat issues.json | python scripts/gh_issues_publish.py batch --file - --dry-run
 
+    python scripts/gh_issues_publish.py milestone --title "M1 — World you can \
+        look at" --description-file m1.md --due 2026-10-15
+
 Batch input is a JSON list (or {"issues": [...]}) of objects shaped like:
     {"title": "...", "body": "...", "labels": ["bug"],
      "assignees": ["octocat"], "milestone": "M1"}
@@ -95,6 +98,28 @@ def create_one(client: ghlib.Client, payload: dict, dry_run: bool) -> dict:
     return client.post("/repos/{}/issues".format(client.repo), payload)
 
 
+def milestone_line(milestone: dict, prefix: str = "") -> str:
+    return "{}#{} {} [{}]\n  {}".format(
+        prefix,
+        milestone.get("number", 0),
+        milestone.get("title", ""),
+        milestone.get("state", "open"),
+        milestone.get("html_url", ""),
+    )
+
+
+def normalize_due(value: str) -> str:
+    """Accept a plain YYYY-MM-DD; the API wants an ISO 8601 timestamp.
+
+    Anchored at midday UTC so the date GitHub displays does not slip a day for
+    viewers either side of the meridian.
+    """
+    value = value.strip()
+    if len(value) == 10 and value.count("-") == 2:
+        return value + "T12:00:00Z"
+    return value
+
+
 # --------------------------------------------------------------------------- commands
 
 
@@ -164,6 +189,51 @@ def cmd_batch(args) -> int:
 
     if args.as_json:
         ghlib.dump_json(results)
+    return 0
+
+
+def cmd_milestone(args) -> int:
+    """Upsert a milestone by title: create it, or edit the one already there.
+
+    Titles are the stable handle (`--milestone "M1 — ..."` elsewhere resolves by
+    title), so re-running the same command is a no-op-shaped update rather than
+    a duplicate. Pass --dedupe to leave an existing milestone untouched instead.
+    """
+    client = ghlib.make_client(args)
+    description = ghlib.read_body(args.description, args.description_file)
+
+    payload = {"title": args.title}
+    if description is not None:
+        payload["description"] = description
+    if args.due is not None:
+        payload["due_on"] = normalize_due(args.due)
+    if args.state:
+        payload["state"] = args.state
+
+    existing = ghlib.find_milestone(client, args.title)
+    if existing and args.dedupe:
+        emit(args, existing, milestone_line(existing, prefix="skipped (duplicate) "))
+        return 0
+
+    path = "/repos/{}/milestones".format(client.repo)
+    if args.dry_run:
+        emit(
+            args,
+            dict(payload, number=existing["number"] if existing else 0,
+                 html_url="(dry-run)", _dry_run=True),
+            "dry-run milestone {}: {}".format(
+                "update #{}".format(existing["number"]) if existing else "create",
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        return 0
+
+    if existing:
+        milestone = client.patch("{}/{}".format(path, existing["number"]), payload)
+        emit(args, milestone, milestone_line(milestone, prefix="updated "))
+    else:
+        milestone = client.post(path, payload)
+        emit(args, milestone, milestone_line(milestone, prefix="created "))
     return 0
 
 
@@ -310,6 +380,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_shared(batch)
     batch.set_defaults(func=cmd_batch)
+
+    milestone = subs.add_parser(
+        "milestone", help="create a milestone, or update the one with that title"
+    )
+    milestone.add_argument("--title", required=True)
+    milestone.add_argument("--description")
+    milestone.add_argument(
+        "--description-file", help="read the description from a file, or '-' for stdin"
+    )
+    milestone.add_argument("--due", help="YYYY-MM-DD, or a full ISO 8601 timestamp")
+    milestone.add_argument("--state", choices=("open", "closed"))
+    milestone.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="leave an existing milestone with this title untouched",
+    )
+    add_shared(milestone)
+    milestone.set_defaults(func=cmd_milestone)
 
     update = subs.add_parser("update", help="edit an existing issue")
     update.add_argument("number", type=int)
