@@ -56,17 +56,16 @@ Last updated: 2026-09-05.
 
 ## Project layout
 
-```
-assets/dev/        tile_library.tres — the GridMap MeshLibrary
+```text
+assets/dev/        dev art, including the GridMap MeshLibrary
 assets/icons/      toolbar/ — build-tool icons (white SVGs, tinted per state)
 docs/              design docs (concept, tech decisions, this file)
 scenes/            Main.tscn is the entry point; world/ holds instanced
                    scenes; dev/ holds test scenes, not part of the game
-src/camera/        CameraRig.cs
-src/ui/            BuildPalette, DevShortcuts, CellPicker, CellInspector
-src/ui/build/      BuildTool (the base) + Road/Field/Structure/Bulldoze tools
-src/world/         WorldGrid, TileType, PlacementRules, Field, Structure,
-                   Removal, Economy, Machine
+src/camera/        the camera rig
+src/ui/            HUD, input handling and screen-to-cell picking
+src/ui/build/      the build-tool base and its placement-tool subclasses
+src/world/         world state, terrain, placement rules and entities
 src/dev/           the scripts behind scenes/dev
 ```
 
@@ -599,8 +598,7 @@ godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn  # rig pans, rot
 godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn   # terrain, seed determinism, layer
                                                                  # independence, machines, and the
                                                                  # picker/inspector pixel round trip
-godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn   # palette, rules, ghost, all four
-                                                                 # tools, costs, the refund seam
+godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 ```
 
 What each one asserts is in the test file, and is not re-narrated here. What is
