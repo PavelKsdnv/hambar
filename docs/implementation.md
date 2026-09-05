@@ -23,7 +23,7 @@ scenes/            .tscn scenes; Main.tscn is the entry point
 scenes/world/      scenes instanced by the world (Machine.tscn)
 scenes/dev/        headless smoke-test scenes (not part of the game)
 src/camera/        CameraRig.cs
-src/ui/            MenuController.cs (keyboard menu),
+src/ui/            BuildPalette.cs (the build toolbar), DevShortcuts.cs (dev keys),
                    CellPicker.cs (screen -> cell), CellInspector.cs (hover readout)
 src/ui/build/      BuildTool.cs (base for every placement tool), RoadBuildTool.cs,
                    FieldBuildTool.cs, StructureBuildTool.cs, BulldozeTool.cs
@@ -223,20 +223,96 @@ for now, varied per instance by exported `Speed`, `TurnSpeed`, `BodyColor`.
   `MachineScene` export (position and behavior seeds come from a fixed-seed
   spawn counter, so any spawn sequence is reproducible); machines join the
   `machines` node group. `_Ready` calls it `MachineCount` times, but the
-  default is 0 — the game starts with no machines; spawn them via menu key 9.
+  default is 0 — the game starts with no machines; spawn them via dev key 9.
 
-## Keyboard menu (`src/ui/MenuController.cs`)
+## Build palette (`src/ui/BuildPalette.cs`)
 
-A minimal command menu on the number keys: actions `menu_1`..`menu_9` in
-`project.godot` map keys 1–9 to slots, handled in `_UnhandledInput` on the
-`Menu` node in Main.tscn. **1** toggles the road-build tool, **2** the hover
-readout, **3** the field-marking tool, **4** the structure tool, **5** the
-bulldozer, **9** calls `WorldGrid.SpawnMachine()`; the other slots log
-"unassigned". The `World`, `Inspector` and tool references
-are node `[Export]`s wired in the scene — the tool slots are typed as the
-`BuildTool` base, so a slot (or the M2 palette) can point at any build tool
-without touching the menu. The menu never has to *disarm* anything either:
-arming a tool disarms the rest through the tool group (below).
+> **The toolbar is how a build tool is chosen.** One button per tool along the
+> bottom of the screen, each naming its tool, what it costs and the key that
+> arms it, with the armed one filled in the build cursor's amber — so what the
+> next click is going to do is legible without moving the mouse. It replaces
+> the number-key menu that stood in for it (`MenuController`, deleted; what was
+> not a build tool moved to **Dev shortcuts** below).
+
+The palette is a `Control` under the `Hud` `CanvasLayer` in Main.tscn, and the
+bar itself is built in **code** from the exported `Tools` list — the four tools
+in bar order, wired in the scene, so the order is a design decision and not an
+accident of tree order. Putting M5's silo on the bar is adding it to that list.
+
+Each button reads both of the things it says **off the tool**: `DisplayName` and
+`CostPerCell` are `[Export]`s on `BuildTool`, so renaming or repricing a tool in
+the editor moves the label, and the bar can never quote a number the click does
+not charge. How the price is worded follows how the tool charges — a drag tool
+reads `5 / cell`, a single-click tool `250`, and a tool that costs nothing says
+`free` rather than showing a zero. Amounts are grouped with
+`InvariantCulture`, like the money readout, so the bar and the balance agree on
+every machine.
+
+**It is not a second source of truth.** Which tool is armed is a fact about the
+tools — `BuildTool.Active`, kept unique by the `build_tools` group — and the
+palette only ever reads it. `Refresh()` repaints every button from the tools'
+own state and runs every frame, so a tool disarmed by *any* other route (Esc,
+right click, another tool arming, a dev script or a screenshot run calling
+`SetActive`) is right on the bar the same frame, and there is no palette-side
+copy that could disagree. The one thing the palette owns that the tools do not
+know is each entry's availability (below).
+
+**One selection path, and the buttons take it:**
+
+| Member | Meaning |
+|---|---|
+| `Select(int)` / `Select(BuildTool)` | arm that entry's tool; false, changing nothing, for an index off the bar or an entry that is not available |
+| `Toggle(int)` | what a button press does: arm the entry, or put the tool down when it is already the armed one |
+| `Deselect()` | leave build mode |
+| `ActiveIndex` / `ActiveTool` | which entry is armed — derived from the tools every time it is asked, never cached |
+| `Entries` / `Entry(int)` / `Count` / `IndexOf(BuildTool)` | what is on the bar |
+| `Bar` | the panel the buttons sit on, so where the toolbar is can be asserted |
+| `Refresh()` | repaint from the tools now instead of next frame |
+
+`Select` is what the button's `Pressed` handler calls, what the number-key
+accelerator calls, and what `BuildSmokeTest` calls — which is the whole reason
+it is public: a headless test arms tools along the path a click takes, without
+synthesizing mouse events on a `Control`.
+
+**Keys are an accelerator for the bar, not a way around it.** Key *n* arms the
+n-th entry — **1** road, **2** field, **3** structure, **4** bulldoze — by
+calling the same `Toggle`, so a button and the world can never disagree about
+what is armed. The palette claims `menu_1` upwards, one key per entry, so the
+range grows with the roster.
+
+**The M8 seam is `ToolAvailability`.** Every entry carries one of `Available`,
+`Locked` (still on the bar, greyed out and unclickable) or `Hidden` (off the bar
+altogether), set with `SetAvailability(index | tool, availability)` and read
+back with `GetAvailability`. An entry that is not `Available` is refused on
+**every** path in — the button, the key and `Select` alike — because a seam only
+one path respects is decoration; and a tool that stops being available while the
+player is holding it is disarmed on the spot, so the bar never says "locked"
+about the tool the clicks are going to. The *rules* are M8's: nothing here knows
+what an unlock is, and nothing sets an entry to anything but `Available` today.
+
+**Layout and look.** The bar is anchored bottom-centre — the genre's place for a
+build toolbar — 18 px clear of the edge and grown from its own centre, so it
+stays centred and clear of the cell readout (top-left) and the money readout
+(top-right) at any window size; `BuildSmokeTest` asserts that rectangle the way
+it asserts the money readout's. The root `Control` is `MOUSE_FILTER_IGNORE` so
+only the bar itself takes the mouse — a full-screen `Control` would otherwise
+swallow every click meant for the world — the inner labels ignore it too so
+every pixel of a button is the button, and the buttons take no focus, so no
+focus ring is ever left behind in a screenshot. The styling is `StyleBoxFlat`es
+built in `BuildBar`: a dark rounded panel with a shadow, dark grey buttons, and
+the armed one filled in `BuildTool.CursorLegal`'s amber with dark text, because
+"which tool is listening to your clicks" should be the same colour on the bar as
+it is on the ground.
+
+## Dev shortcuts (`src/ui/DevShortcuts.cs`)
+
+What is left of the number-key menu: **8** toggles the hover readout, **9**
+spawns a machine on the road network (`WorldGrid.SpawnMachine()`). Neither is a
+build tool — which is why they still need a home — and both sit at the top of
+the number row because the palette claims that row from the bottom up. The
+readout moved off key 2 for exactly that reason: key 2 is the second tool on the
+bar now. Nothing in this node reaches a build tool, which is the point: after
+M2 there is one way to choose one, and it is the palette.
 
 ## Build tools (`src/ui/build/`, `src/world/PlacementRules.cs`)
 
@@ -265,12 +341,12 @@ subclass that is not a copy of any of them: it removes instead of placing, and
 exported price — see **Money and build costs**, and treat every number as a
 placeholder):
 
-| Tool | Menu key | Places | Costs | Rules | Footprint | `Apply` |
+| Tool | Key | Places | Costs | Rules | Footprint | `Apply` |
 |---|---|---|---|---|---|---|
 | `RoadBuildTool` | **1** | `Road` | **5**/cell | `BuildableTerrain` + `NoOverlap` | `LineCells` — a stair-stepped line | default (stamps tiles) |
-| `FieldBuildTool` | **3** | `Field` | **10**/cell | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
-| `StructureBuildTool` | **4** | `Structure` | **250** (its footprint is one cell) | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
-| `BulldozeTool` | **5** | nothing — it *removes* | **0** — taking something off is free | `InBounds` + `OccupiedCell`, and `Policy` = `AnyCell` | `RectCells`, like the field tool | overridden: `WorldGrid.Clear` per cell, each removal through the refund seam |
+| `FieldBuildTool` | **2** | `Field` | **10**/cell | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
+| `StructureBuildTool` | **3** | `Structure` | **250** (its footprint is one cell) | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
+| `BulldozeTool` | **4** | nothing — it *removes* | **0** — taking something off is free | `InBounds` + `OccupiedCell`, and `Policy` = `AnyCell` | `RectCells`, like the field tool | overridden: `WorldGrid.Clear` per cell, each removal through the refund seam |
 
 **The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
 re-coding a check inside a tool):
@@ -359,8 +435,9 @@ places on the first click.
 (`BuildTool.ToolGroup`) in `_Ready`, and `SetActive(true)` disarms every other
 member of it — so two tools can never listen to the same click, and a disarmed
 tool drops its anchor, ghost and preview on the way out. It lives in the base
-rather than in the menu on purpose: a new tool gets the behaviour for free, and
-neither the menu nor the coming palette has to know the full list.
+rather than in the palette on purpose: a new tool gets the behaviour for free,
+and the palette has to know neither the full list nor the rule — it *reads* the
+result (see **Build palette**) instead of keeping its own copy of it.
 
 **Driving a tool without a cursor.** Every state-changing entry point is
 public and cell-driven — `SetActive`/`Toggle`, `HoverAt(cell)`,
@@ -390,7 +467,7 @@ without that marker the property loads as null.
 > refers to "that field cell". Crops, jobs, yields and the output buffer M4
 > adds all hang off the entity, reached with `WorldGrid.GetField(cell)`.
 
-`FieldBuildTool` (menu key **3**) is the smallest possible `BuildTool`
+`FieldBuildTool` (palette key **2**) is the smallest possible `BuildTool`
 subclass: soil only, every cell vacant, a `RectCells` footprint, and an `Apply`
 override that calls `WorldGrid.MarkField` — because the default `Apply` would
 write the tiles and leave farmland nothing could address. `Field` itself holds
@@ -432,7 +509,7 @@ through `VacantCell`, so that path never comes up in play.
 > them and `PlacementRules` can call them occupied. Reach the building itself
 > with `WorldGrid.GetStructure(cell)` or `GetStructure(id)`.
 
-`StructureBuildTool` (menu key **4**) places one generic placeholder building;
+`StructureBuildTool` (palette key **3**) places one generic placeholder building;
 the roster — silo in M5, cleaner, mill and bakery in M6 — hangs off the same
 tool. What exists today is placement and the adjacency rule: free soil
 (`VacantCell`), buildable ground, and `TouchesRoad`. `NeedsAnchor` is false, so
@@ -483,7 +560,7 @@ rather than refusing.
 ### Bulldozing (`src/ui/build/BulldozeTool.cs`, `src/world/Removal.cs`)
 
 > **Anything the player placed can be taken back off, and the terrain under it
-> is never touched.** Drag a rectangle with the bulldozer (menu key **5**) and
+> is never touched.** Drag a rectangle with the bulldozer (palette key **4**) and
 > every road, field cell and building inside it comes off; the ground that was
 > hidden under it comes back exactly as it was, fertility and all, because the
 > two layers were never stored together.
@@ -618,7 +695,10 @@ test working exactly as before.
 
 **On screen**, the balance is a `Label` (`Hud/MoneyReadout`) in the **top-right
 corner**, anchored to the right edge and right-aligned, opposite the cell
-readout in the top-left; `Economy` writes it on every balance change.
+readout in the top-left; `Economy` writes it on every balance change. What each
+tool *charges* is on its palette button, read straight off `CostPerCell` (see
+**Build palette**), so the price the bar quotes is the price the plan is
+validated against.
 
 **Refunds still pay nothing, but the wiring is real.** `BulldozeTool.Apply`
 credits whatever `RefundFor(Removal)` returns to the `Economy`, so the day M7
@@ -676,7 +756,7 @@ tile: road
   label's visibility. `Inspect(screenPosition)` does the pick + refresh and
   returns the cell — `_Process` calls it with the mouse position, the smoke
   test with a computed pixel.
-- **Toggle:** menu key 2. It starts **on** (`EnabledOnStart`), because a dev
+- **Toggle:** dev key 8. It starts **on** (`EnabledOnStart`), because a dev
   instrument that needs arming isn't one; `ScreenshotTest` calls
   `SetEnabled(false)` before capturing so the canonical views stay clean.
 
@@ -707,9 +787,10 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   restores the original. It then asserts the **layers are independent** —
   placing a road leaves `GetTerrain`/`GetFertility` unchanged and only swaps
   the GridMap item, and clearing it restores that item. After that: exactly
-  the starting road placed (33 road cells, no machines), menu key 9 spawns a
+  the starting road placed (33 road cells, no machines), dev key 9 spawns a
   machine that has moved after ~3 s and is still on the road, and the
-  road-build tool works (menu key 1 toggles it on/off, two `ClickCell` calls
+  road-build tool works (the palette arms it and puts it down again, two
+  `ClickCell` calls
   place a diagonal road — over cells this seed generates as clear soil, since
   the tool validates placement now; refusal itself is `BuildSmokeTest`'s
   subject — `FindRoadPath` across it returns the corner-cutting
@@ -722,12 +803,26 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   the *same* pixel (that is the "one shared code path" check), that the label
   mirrors the inspector's text, that the readout names all four facts for the
   origin, that an off-map pixel still resolves to its real coordinates and
-  reads "off the map", and that menu key 2 switches the readout off and on.
+  reads "off the map", and that dev key 8 switches the readout off and on.
 - **BuildSmokeTest** is where build mode (M2) is asserted, and where the rest
   of M2 adds its checks: the `BuildTool` base, `PlacementRules`, the ghost,
-  each tool in turn, and what a placement costs (463 assertions today).
-  The **road tool** goes first, driven through the public cell API — menu key 1
-  arms it, `HoverAt`/`ClickCell`/`Cancel` do the rest — covering **place**
+  each tool in turn, the palette they are chosen from, and what a placement
+  costs (531 assertions today).
+  The **palette** is asserted first, because everything after it is armed
+  through it: the four entries in bar order, each naming its tool and printing
+  the key that arms it; the bar's rectangle on screen, along the bottom and
+  clear of both corner readouts; that selecting an entry arms exactly that tool
+  and disarms the rest, and that the bar follows a tool armed or disarmed by any
+  other route — including the Esc and right-click cancels further down, which
+  are asserted across frames with nobody telling the palette anything; that each
+  button's price is the tool's `CostPerCell`, checked by retuning the export at
+  runtime and watching the label move; and the M8 availability seam — a locked
+  entry is greyed, unclickable and refused by `Select` and `Toggle` too, a
+  hidden one is off the bar, locking the armed tool disarms it, and everything
+  is handed back before the next section runs.
+  The **road tool** goes next, driven through the public cell API — the palette
+  arms it (key 1, the accelerator, so that path is proven too),
+  `HoverAt`/`ClickCell`/`Cancel` do the rest — covering **place**
   (anchor, all-legal ghost over the whole line, second click writes exactly
   that line, road-over-road stays legal), **refuse** (rock under the cursor
   tints the hover square red and cannot even be anchored; a drag into water
@@ -738,7 +833,7 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   click each drop the anchor first and leave the tool second, clearing ghost
   and preview).
   The **field tool** follows, so it validates against a world that already
-  holds those roads. Menu key 3 arms it and — the tool-group rule — disarms the
+  holds those roads. The palette arms it and — the tool-group rule — disarms the
   road tool. It asserts `RectCells` on its own (inclusive of both corners, no
   duplicates, and the same list dragged from any of the four corners), then a
   rectangle marked from its far corner: the whole rectangle previews legal and
@@ -753,7 +848,7 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   over a field cell shrinks its field, and the field disappears when its last
   cell goes.
   The **structure tool** comes last, because the rule it exists for only means
-  something once there is a road network to touch. Menu key 4 arms it (and
+  something once there is a road network to touch. The palette arms it (and
   disarms the field tool — the group rule again, now with three members). The
   accepted case: free soil beside a road previews legal, ghosts one legal cell
   *without* an anchor, and goes down on a **single** click — after which the
@@ -773,7 +868,7 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   lookup, registry entry and id all gone, terrain intact, the other building
   untouched.
   The **bulldozer** comes last of all, because it needs one of everything on
-  the map before it can take anything off again; menu key 5 arms it and
+  the map before it can take anything off again; the palette arms it and
   disarms the structure tool (the group rule, now with four members). It
   places a road, a field and a building **through their own tools** and then
   bulldozes each away, and the headline runs underneath all three: the terrain
@@ -859,6 +954,11 @@ purpose, and `07-structure-placed` its building, so the rotated, zoomed and
 overview shots carry both too. `08-bulldoze-mixed` only ever hovers its drag —
 committing it would take the start road out of every view that follows.
 
+Every view carries the **build palette** along the bottom, and the views that
+arm a tool (02–08) show that tool's button lit: the screenshot run arms tools
+with `SetActive`, never through the bar, so the lit button is the palette's
+reflection rule in a picture.
+
 Views settle by **time**, not frame count (the rig smooths on `delta`, so a
 frame count converges differently on a fast machine). Anything driven by the
 cursor is pinned instead: a screenshot run has no mouse, so the readout and
@@ -887,9 +987,11 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
   still writes anywhere (including off the map), which is what start layout,
   dev code and tests want. Anything the *player* places goes through
   `BuildTool`, and therefore through `PlacementRules`.
-- Player interaction is the keyboard menu plus the road, field, structure and
-  bulldoze tools. The build palette is not written yet; it is meant to be more
-  `BuildTool` subclasses and assertions in `BuildSmokeTest`.
+- Player interaction is the build palette plus the road, field, structure and
+  bulldoze tools, and two dev keys beside them. The palette has the *seam* for
+  unlock gating (`ToolAvailability`) and none of the rules — what unlocks a tool
+  is M8's — and no entry is ever anything but `Available` today. The full HUD
+  pass is M10's; the bar and the two corner readouts are all the UI there is.
 - Money is a **stub number**: placements are charged and the balance is shown,
   but nothing puts money *in* — earning is M5's depot, prices moving are M7's,
   wages are M5's — and every price is a placeholder chosen to be tunable rather

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using Godot;
 
 namespace Arable;
@@ -21,11 +22,18 @@ namespace Arable;
 /// which needs one of each of those on the map before it can take them off
 /// again. <b>Money comes after all four</b>, because paying for a placement is
 /// the one rule that needs every tool already proven: see
-/// <see cref="CheckCommitChargesExactlyTheCost"/> onwards. The rest of M2 (the
-/// palette) adds its assertions the same way: give each new tool a section like
+/// <see cref="CheckCommitChargesExactlyTheCost"/> onwards. A new tool adds its
+/// assertions the same way: give it a section like
 /// <see cref="CheckLegalPlacement"/> and reuse the cell-finding helpers at the
 /// bottom, which look terrain up at runtime instead of hard-coding coordinates
 /// that a seed change would invalidate.
+///
+/// <b>Tools are armed through the <see cref="BuildPalette"/></b>, which is the
+/// player's only way to reach one. <see cref="BuildPalette.Select(int)"/> is
+/// the same call the buttons make, so a headless run exercises the path a click
+/// takes without synthesizing a click on a <see cref="Control"/>; the bar
+/// itself — what it shows, what it costs, and the M8 availability seam — is
+/// asserted first, from <see cref="CheckPaletteStartState"/> onwards.
 ///
 /// <b>Prices are kept out of the sections that are not about them.</b> The
 /// money section sets the balance it needs before every check it makes;
@@ -35,6 +43,16 @@ namespace Arable;
 /// </summary>
 public partial class BuildSmokeTest : Node
 {
+    /// <summary>
+    /// Where each tool sits on the build palette, left to right. The bar's
+    /// order is the order Main.tscn wires the tools in, and these are the
+    /// indices <see cref="BuildPalette.Select(int)"/> takes.
+    /// </summary>
+    private const int RoadEntry = 0;
+    private const int FieldEntry = 1;
+    private const int StructureEntry = 2;
+    private const int BulldozeEntry = 3;
+
     /// <summary>Width and height of the rectangle the field checks mark.</summary>
     private const int FieldRectWidth = 3;
     private const int FieldRectHeight = 2;
@@ -52,6 +70,7 @@ public partial class BuildSmokeTest : Node
     private FieldBuildTool _fieldTool = null!;
     private StructureBuildTool _structureTool = null!;
     private BulldozeTool _bulldozeTool = null!;
+    private BuildPalette _palette = null!;
     private CellInspector _inspector = null!;
     private Economy _economy = null!;
     private Label _moneyReadout = null!;
@@ -101,6 +120,7 @@ public partial class BuildSmokeTest : Node
         _fieldTool = main.GetNode<FieldBuildTool>("FieldTool");
         _structureTool = main.GetNode<StructureBuildTool>("StructureTool");
         _bulldozeTool = main.GetNode<BulldozeTool>("BulldozeTool");
+        _palette = main.GetNode<BuildPalette>("Hud/BuildPalette");
         _inspector = main.GetNode<CellInspector>("CellInspector");
         _economy = main.GetNode<Economy>("Economy");
         _moneyReadout = main.GetNode<Label>("Hud/MoneyReadout");
@@ -115,13 +135,26 @@ public partial class BuildSmokeTest : Node
             PickTestCells();
             CheckStartState();
             CheckMoneyStartState();
+            CheckPaletteStartState();
 
-            // Menu slot 1 arms the road tool — the same path the player takes.
+            // Key 1 is the first palette entry's accelerator, and it arms the
+            // road tool by calling into the palette — the same path the button
+            // takes, which is what stops the bar and the world disagreeing.
             Input.ParseInputEvent(new InputEventAction { Action = "menu_1", Pressed = true });
         }
         else if (_frame == 10)
         {
-            Check("menu key 1 activates the build tool", _tool.Active);
+            Check("key 1 activates the build tool", _tool.Active);
+            Check("the accelerator went through the palette",
+                _palette.ActiveIndex == RoadEntry && _palette.ActiveTool == _tool
+                && OnlyButtonPressed(RoadEntry));
+
+            CheckPaletteSelectsEveryTool();
+            CheckPaletteFollowsToolsArmedElsewhere();
+            CheckPaletteShowsWhatToolsCost();
+            CheckPaletteAvailabilitySeam();
+            Check("the palette hands the road tool back for the checks below",
+                _palette.Select(RoadEntry) && OnlyToolArmed(RoadEntry));
 
             CheckHoverPreview();
             // Before anything is placed: the road-access rule is asserted
@@ -142,6 +175,10 @@ public partial class BuildSmokeTest : Node
             Check("Esc drops the pending anchor", _tool.Anchor == null);
             Check("Esc with an anchor keeps the tool active", _tool.Active);
             Check("cancelling clears the ghost", _tool.GhostCellCount == 0);
+            // Nothing told the palette about that Esc: it reads the tools every
+            // frame, so the bar is already right.
+            Check("the bar still shows the road tool armed after the Esc",
+                _palette.ActiveIndex == RoadEntry && OnlyButtonPressed(RoadEntry));
 
             // Right click does the same two steps: anchor first, tool second.
             _tool.ClickCell(_soilFrom);
@@ -169,6 +206,10 @@ public partial class BuildSmokeTest : Node
             Check("right click with no anchor leaves the tool", !_tool.Active);
             Check("leaving the tool clears the ghost", _tool.GhostCellCount == 0);
             Check("leaving the tool clears the preview", _tool.Preview == null);
+            // Same again for the tool leaving by right click, and again with
+            // nobody having told the bar.
+            Check("the bar shows nothing armed once right click left the tool",
+                _palette.ActiveIndex == -1 && OnlyButtonPressed(-1));
 
             // Re-arm the road tool, so the next frame can prove that arming the
             // field tool is what disarms it.
@@ -176,10 +217,11 @@ public partial class BuildSmokeTest : Node
         }
         else if (_frame == 30)
         {
-            Check("menu key 1 re-arms the road tool", _tool.Active);
+            Check("key 1 re-arms the road tool", _tool.Active);
 
-            // Menu slot 3 arms the field tool — again, the player's path.
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_3", Pressed = true });
+            // The palette arms the field tool — the player's path, and the same
+            // call its button makes.
+            _palette.Select(FieldEntry);
         }
         else if (_frame == 35)
         {
@@ -194,8 +236,8 @@ public partial class BuildSmokeTest : Node
             CheckFieldIntoRoughTerrainIsRefused();
             CheckClearingShrinksAndDropsAField();
 
-            // Menu slot 4 arms the structure tool — the player's path again.
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_4", Pressed = true });
+            // The palette arms the structure tool — the player's path again.
+            _palette.Select(StructureEntry);
         }
         else if (_frame == 40)
         {
@@ -206,8 +248,8 @@ public partial class BuildSmokeTest : Node
             CheckStructureOnOccupiedGroundIsRefused();
             CheckClearingDemolishesAStructure();
 
-            // Menu slot 5 arms the bulldozer — the player's path, once more.
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_5", Pressed = true });
+            // The palette arms the bulldozer — the player's path, once more.
+            _palette.Select(BulldozeEntry);
         }
         else if (_frame == 45)
         {
@@ -314,6 +356,303 @@ public partial class BuildSmokeTest : Node
         Check("setting it takes the readout with it",
             _moneyReadout.Text == Economy.Describe(WorkingBalance));
     }
+
+    /// <summary>
+    /// The build palette before the player has touched it: one button per tool
+    /// in bar order, each naming its tool and the key that arms it, nothing
+    /// armed — and the bar itself where a toolbar belongs. The last part is a
+    /// visual claim, so it is checked as one, the way the money readout is:
+    /// on the screen, along the bottom, and clear of both corner readouts.
+    /// </summary>
+    private void CheckPaletteStartState()
+    {
+        Check("the palette holds one entry per build tool",
+            _palette.Count == 4 && _palette.Entries.Count == _palette.Count);
+        Check("the entries are the four tools, in bar order",
+            _palette.Entry(RoadEntry)?.Tool == _tool
+            && _palette.Entry(FieldEntry)?.Tool == _fieldTool
+            && _palette.Entry(StructureEntry)?.Tool == _structureTool
+            && _palette.Entry(BulldozeEntry)?.Tool == _bulldozeTool);
+        Check("the palette finds an entry by its tool",
+            _palette.IndexOf(_bulldozeTool) == BulldozeEntry
+            && _palette.IndexOf(null) == -1);
+        Check("there is no entry off either end of the bar",
+            _palette.Entry(-1) == null && _palette.Entry(_palette.Count) == null);
+
+        // Both of the things a button says come off the tool it stands for, so
+        // renaming or repricing one in the editor moves its button.
+        Check("every button names its tool",
+            AllEntries(entry => entry.NameText == entry.Tool.DisplayName
+                && entry.NameText.Length > 0));
+        Check("every button prints the key that arms it",
+            _palette.Entry(RoadEntry)?.KeyText == "1"
+            && _palette.Entry(FieldEntry)?.KeyText == "2"
+            && _palette.Entry(StructureEntry)?.KeyText == "3"
+            && _palette.Entry(BulldozeEntry)?.KeyText == "4");
+        Check("each entry knows the slot it is in",
+            AllEntries(entry => entry.Slot == _palette.IndexOf(entry.Tool) + 1));
+
+        Check("every entry starts available",
+            AllEntries(entry => entry.IsAvailable
+                && entry.Availability == ToolAvailability.Available));
+        Check("every button starts on the bar and clickable",
+            AllEntries(entry => entry.Button.Visible && !entry.Button.Disabled));
+        Check("no tool is armed before the player picks one",
+            _palette.ActiveIndex == -1 && _palette.ActiveTool == null
+            && AllEntries(entry => !entry.IsActive));
+        Check("no button is drawn as the armed one", OnlyButtonPressed(-1));
+
+        Rect2 screen = GetViewport().GetVisibleRect();
+        Rect2 bar = _palette.Bar.GetGlobalRect();
+        Check("the palette is visible", _palette.Visible && _palette.Bar.Visible);
+        Check("the whole bar is on screen", screen.Encloses(bar));
+        Check("the bar sits along the bottom of the screen",
+            bar.Position.Y > screen.Size.Y * 0.6f);
+        Check("the bar is centred on the screen",
+            Mathf.Abs(bar.GetCenter().X - screen.GetCenter().X) < 1.5f);
+        Check("the bar does not overlap the cell readout",
+            !bar.Intersects(_cellReadout.GetGlobalRect()));
+        Check("the bar does not overlap the money readout",
+            !bar.Intersects(_moneyReadout.GetGlobalRect()));
+        Check("every button is drawn inside the bar",
+            AllEntries(entry => bar.Encloses(entry.Button.GetGlobalRect())));
+        var buttons = new List<string>();
+        foreach (PaletteEntry entry in _palette.Entries)
+        {
+            buttons.Add($"[{entry.KeyText} {entry.NameText} / {entry.CostText}]");
+        }
+        GD.Print($"build palette: {bar} on a {screen.Size} screen; buttons "
+            + string.Join(", ", buttons));
+    }
+
+    /// <summary>
+    /// The selection path, exercised the way a button press exercises it —
+    /// <see cref="BuildPalette.Select(int)"/> is the call the button makes.
+    /// Picking an entry arms that tool and disarms every other one, which is
+    /// the tool group's rule reached <i>through</i> the palette rather than
+    /// duplicated by it.
+    /// </summary>
+    private void CheckPaletteSelectsEveryTool()
+    {
+        for (int index = 0; index < _palette.Count; index++)
+        {
+            PaletteEntry entry = _palette.Entry(index)!;
+            string tool = entry.NameText;
+            Check($"the palette selects the {tool} tool", _palette.Select(index));
+            Check($"selecting {tool} arms exactly that tool", OnlyToolArmed(index));
+            Check($"the bar draws {tool} as the armed entry",
+                _palette.ActiveIndex == index && _palette.ActiveTool == entry.Tool
+                && OnlyButtonPressed(index));
+        }
+
+        Check("selecting the armed entry again leaves it armed",
+            _palette.Select(BulldozeEntry) && OnlyToolArmed(BulldozeEntry));
+        Check("clicking the armed entry again puts the tool down",
+            _palette.Toggle(BulldozeEntry) && !_bulldozeTool.Active
+            && _palette.ActiveIndex == -1 && _palette.ActiveTool == null);
+        Check("no button is drawn armed once nothing is", OnlyButtonPressed(-1));
+        Check("toggling it once more picks it back up",
+            _palette.Toggle(BulldozeEntry) && OnlyToolArmed(BulldozeEntry));
+
+        Check("selecting by tool arms that tool's entry",
+            _palette.Select(_fieldTool) && OnlyToolArmed(FieldEntry));
+        Check("an index off the bar selects nothing",
+            !_palette.Select(-1) && !_palette.Select(_palette.Count)
+            && OnlyToolArmed(FieldEntry));
+        Check("a tool that is not on the bar selects nothing",
+            !_palette.Select((BuildTool?)null) && OnlyToolArmed(FieldEntry));
+
+        _palette.Deselect();
+        Check("leaving build mode disarms whatever was armed",
+            _palette.ActiveIndex == -1 && OnlyToolArmed(-1) && OnlyButtonPressed(-1));
+    }
+
+    /// <summary>
+    /// <b>The palette reflects the tools; it does not remember its own answer.</b>
+    /// A tool armed or disarmed by any other route shows up on the bar, because
+    /// <see cref="BuildPalette.Refresh"/> reads <see cref="BuildTool.Active"/>
+    /// rather than a copy of it. The two routes the player has — Esc and right
+    /// click — are input events, so they are asserted across frames in
+    /// <c>_Process</c>; what is taken here is every other way a tool's state
+    /// can change without the palette being told.
+    /// </summary>
+    private void CheckPaletteFollowsToolsArmedElsewhere()
+    {
+        _structureTool.SetActive(true);
+        _palette.Refresh();
+        Check("the bar shows a tool armed without it",
+            _palette.ActiveIndex == StructureEntry && OnlyToolArmed(StructureEntry)
+            && OnlyButtonPressed(StructureEntry));
+
+        _structureTool.SetActive(false);
+        _palette.Refresh();
+        Check("the bar shows a tool disarmed without it",
+            _palette.ActiveIndex == -1 && OnlyButtonPressed(-1));
+
+        // Arming one tool disarms the rest through the tool group. The palette
+        // has no part in that and no copy of it — it just reads the result.
+        _palette.Select(RoadEntry);
+        _fieldTool.SetActive(true);
+        _palette.Refresh();
+        Check("the bar follows the tool group when another tool takes over",
+            !_tool.Active && _palette.ActiveIndex == FieldEntry
+            && OnlyToolArmed(FieldEntry) && OnlyButtonPressed(FieldEntry));
+
+        // Cancel with no anchor pending is what Esc and right click end in.
+        _fieldTool.Cancel();
+        _palette.Refresh();
+        Check("the bar shows a tool that cancelled itself",
+            _palette.ActiveIndex == -1 && OnlyToolArmed(-1) && OnlyButtonPressed(-1));
+    }
+
+    /// <summary>
+    /// What a button says a placement costs is read off
+    /// <see cref="BuildTool.CostPerCell"/> — the same export
+    /// <see cref="PlacementRules"/> prices a plan with — so retuning a price in
+    /// the editor moves the label, and the bar can never quote a number the
+    /// click does not charge. The wording follows how the tool charges: per cell
+    /// for a drag, flat for a single click, "free" for a tool that costs
+    /// nothing.
+    /// </summary>
+    private void CheckPaletteShowsWhatToolsCost()
+    {
+        Check("every priced button carries its tool's price",
+            AllEntries(entry => entry.Tool.CostPerCell == 0
+                || entry.CostText.Contains(Money(entry.Tool.CostPerCell))));
+        Check("a drag tool is priced per cell",
+            _palette.Entry(RoadEntry)?.CostText == Money(_tool.CostPerCell) + " / cell"
+            && _palette.Entry(FieldEntry)?.CostText
+                == Money(_fieldTool.CostPerCell) + " / cell");
+        Check("a single-click tool is priced as the thing it places",
+            _palette.Entry(StructureEntry)?.CostText == Money(_structureTool.CostPerCell));
+        Check("a tool that costs nothing says so rather than showing a zero",
+            _bulldozeTool.CostPerCell == 0
+            && _palette.Entry(BulldozeEntry)?.CostText == "free");
+
+        int priced = _structureTool.CostPerCell;
+        _structureTool.CostPerCell = 4242;
+        _palette.Refresh();
+        Check("retuning a tool's price moves its button label",
+            _palette.Entry(StructureEntry)?.CostText == "4,242");
+        _structureTool.CostPerCell = priced;
+        _palette.Refresh();
+        Check("putting the price back puts the label back",
+            _palette.Entry(StructureEntry)?.CostText == Money(priced));
+    }
+
+    /// <summary>
+    /// <b>The M8 seam.</b> An entry can be locked (still on the bar, greyed and
+    /// unclickable) or hidden (off it entirely), and either way it is refused on
+    /// <i>every</i> path in — the button's and the programmatic one — because a
+    /// seam only one path respects is decoration. A tool that stops being
+    /// available while the player is holding it is taken out of their hand. The
+    /// rules that decide any of this are M8's; nothing here knows what an unlock
+    /// is.
+    /// </summary>
+    private void CheckPaletteAvailabilitySeam()
+    {
+        Check("an entry can be locked",
+            _palette.SetAvailability(FieldEntry, ToolAvailability.Locked)
+            && _palette.GetAvailability(FieldEntry) == ToolAvailability.Locked);
+        Check("a locked entry says it is not available",
+            _palette.Entry(FieldEntry) is { IsAvailable: false });
+        Check("a locked button stays on the bar, greyed out and unclickable",
+            _palette.Entry(FieldEntry) is { Button.Visible: true, Button.Disabled: true });
+        Check("a locked entry cannot be selected programmatically either",
+            !_palette.Select(FieldEntry) && !_fieldTool.Active);
+        Check("nor through the tool it stands for",
+            !_palette.Select(_fieldTool) && !_fieldTool.Active);
+        Check("nor through the path the button and its accelerator both take",
+            !_palette.Toggle(FieldEntry) && !_fieldTool.Active);
+        Check("locking one entry leaves the rest pickable",
+            _palette.Select(RoadEntry) && OnlyToolArmed(RoadEntry));
+
+        Check("an entry can be hidden outright",
+            _palette.SetAvailability(_structureTool, ToolAvailability.Hidden)
+            && _palette.GetAvailability(StructureEntry) == ToolAvailability.Hidden);
+        Check("a hidden entry is off the bar altogether",
+            _palette.Entry(StructureEntry) is { Button.Visible: false, Button.Disabled: true });
+        Check("a hidden entry cannot be selected either",
+            !_palette.Select(StructureEntry) && !_structureTool.Active);
+        Check("an unavailable entry is not the armed one",
+            _palette.ActiveIndex == RoadEntry);
+
+        Check("locking the armed tool takes it out of the player's hand",
+            _palette.SetAvailability(RoadEntry, ToolAvailability.Locked)
+            && !_tool.Active && _palette.ActiveIndex == -1 && OnlyButtonPressed(-1));
+        Check("an entry off the bar has no availability to set",
+            !_palette.SetAvailability(_palette.Count, ToolAvailability.Available)
+            && _palette.GetAvailability(_palette.Count) == ToolAvailability.Hidden);
+
+        // Everything goes back: nothing in this section may leak into the
+        // sections after it.
+        Check("an entry can be handed back",
+            _palette.SetAvailability(RoadEntry, ToolAvailability.Available)
+            && _palette.SetAvailability(FieldEntry, ToolAvailability.Available)
+            && _palette.SetAvailability(StructureEntry, ToolAvailability.Available));
+        Check("every entry is available again",
+            AllEntries(entry => entry.IsAvailable && entry.Button.Visible
+                && !entry.Button.Disabled));
+        Check("an entry handed back can be picked again",
+            _palette.Select(FieldEntry) && OnlyToolArmed(FieldEntry));
+    }
+
+    /// <summary>
+    /// Whether the entry at <paramref name="index"/> is the one armed tool —
+    /// -1 meaning "no tool is armed". The palette's whole promise about arming
+    /// is this, so it is asked of the tools themselves.
+    /// </summary>
+    private bool OnlyToolArmed(int index)
+    {
+        for (int i = 0; i < _palette.Count; i++)
+        {
+            if (_palette.Entry(i)!.Tool.Active != (i == index))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The same question asked of the <i>buttons</i>: exactly the one entry is
+    /// drawn armed. Deliberately does not refresh the palette first — a caller
+    /// that changed a tool without going through the bar refreshes it itself,
+    /// so the checks that read this across a frame boundary are really checking
+    /// that the palette keeps itself up to date.
+    /// </summary>
+    private bool OnlyButtonPressed(int index)
+    {
+        for (int i = 0; i < _palette.Count; i++)
+        {
+            if (_palette.Entry(i)!.Button.ButtonPressed != (i == index))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Whether every entry on the bar satisfies <paramref name="test"/>.</summary>
+    private bool AllEntries(Func<PaletteEntry, bool> test)
+    {
+        foreach (PaletteEntry entry in _palette.Entries)
+        {
+            if (!test(entry))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// An amount as the palette prints it — grouped and
+    /// <see cref="CultureInfo.InvariantCulture"/>, like the money readout, so a
+    /// test can predict the label on any machine.
+    /// </summary>
+    private static string Money(int amount) =>
+        amount.ToString("N0", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Hovering before the anchor: no ghost line yet, but the hover square is
@@ -464,14 +803,14 @@ public partial class BuildSmokeTest : Node
     // --- field marking -----------------------------------------------------
 
     /// <summary>
-    /// Build mode has exactly one armed tool: arming the field tool through
-    /// menu key 3 disarms the road tool, and a disarmed tool shows nothing.
+    /// Build mode has exactly one armed tool: arming the field tool from the
+    /// palette disarms the road tool, and a disarmed tool shows nothing.
     /// Neither tool knows about the other — the <see cref="BuildTool.ToolGroup"/>
     /// scene group carries it, so a future tool gets the same for free.
     /// </summary>
     private void CheckOneToolAtATime()
     {
-        Check("menu key 3 activates the field tool", _fieldTool.Active);
+        Check("the palette activates the field tool", _fieldTool.Active);
         Check("arming the field tool disarms the road tool", !_tool.Active);
         Check("the disarmed tool clears its ghost", _tool.GhostCellCount == 0);
         Check("the disarmed tool clears its preview", _tool.Preview == null);
@@ -778,7 +1117,7 @@ public partial class BuildSmokeTest : Node
     /// </summary>
     private void CheckStructureToolArmed()
     {
-        Check("menu key 4 activates the structure tool", _structureTool.Active);
+        Check("the palette activates the structure tool", _structureTool.Active);
         Check("arming the structure tool disarms the field tool", !_fieldTool.Active);
         Check("arming the structure tool leaves the road tool disarmed", !_tool.Active);
         // No anchor to check for — a single-click tool never takes one, and it
@@ -1056,7 +1395,7 @@ public partial class BuildSmokeTest : Node
     /// </summary>
     private void CheckBulldozeToolArmed()
     {
-        Check("menu key 5 activates the bulldozer", _bulldozeTool.Active);
+        Check("the palette activates the bulldozer", _bulldozeTool.Active);
         Check("arming the bulldozer disarms the structure tool", !_structureTool.Active);
         Check("arming the bulldozer leaves the road and field tools disarmed",
             !_tool.Active && !_fieldTool.Active);

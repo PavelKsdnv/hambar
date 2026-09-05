@@ -4,8 +4,8 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Road-building tool, toggled by menu key 1: click a start cell, click an end
-/// cell, get a straight Bresenham line of road between them (stair-stepped
+/// Road-building tool, the palette's first entry: click a start cell, click an
+/// end cell, get a straight Bresenham line of road between them (stair-stepped
 /// through diagonals so the road stays 4-connected for machines).
 ///
 /// Hovering, ghosting, validating and cancelling all live in
@@ -22,7 +22,11 @@ public partial class RoadBuildTool : BuildTool
     /// <see cref="BuildTool.CostPerCell"/> is the base's export; Main.tscn
     /// overrides it, which is the point of exporting it.
     /// </summary>
-    public RoadBuildTool() => CostPerCell = 5;
+    public RoadBuildTool()
+    {
+        DisplayName = "Road";
+        CostPerCell = 5;
+    }
 
     protected override TileType PlacedTile => TileType.Road;
 

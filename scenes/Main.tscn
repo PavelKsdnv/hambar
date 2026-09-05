@@ -1,16 +1,17 @@
-[gd_scene load_steps=15 format=3]
+[gd_scene load_steps=16 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
 [ext_resource type="MeshLibrary" path="res://assets/dev/tile_library.tres" id="3_tiles"]
 [ext_resource type="PackedScene" path="res://scenes/world/Machine.tscn" id="4_machine"]
-[ext_resource type="Script" path="res://src/ui/MenuController.cs" id="5_menu"]
+[ext_resource type="Script" path="res://src/ui/DevShortcuts.cs" id="5_devkeys"]
 [ext_resource type="Script" path="res://src/ui/build/RoadBuildTool.cs" id="6_roadtool"]
 [ext_resource type="Script" path="res://src/ui/CellInspector.cs" id="7_inspector"]
 [ext_resource type="Script" path="res://src/ui/build/FieldBuildTool.cs" id="8_fieldtool"]
 [ext_resource type="Script" path="res://src/ui/build/StructureBuildTool.cs" id="9_structuretool"]
 [ext_resource type="Script" path="res://src/ui/build/BulldozeTool.cs" id="10_bulldozetool"]
 [ext_resource type="Script" path="res://src/world/Economy.cs" id="11_economy"]
+[ext_resource type="Script" path="res://src/ui/BuildPalette.cs" id="12_palette"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -51,24 +52,28 @@ cell_center_y = false
 script = ExtResource("6_roadtool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
+DisplayName = "Road"
 CostPerCell = 5
 
 [node name="FieldTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("8_fieldtool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
+DisplayName = "Field"
 CostPerCell = 10
 
 [node name="StructureTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("9_structuretool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
+DisplayName = "Structure"
 CostPerCell = 250
 
 [node name="BulldozeTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("10_bulldozetool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
+DisplayName = "Bulldoze"
 CostPerCell = 0
 
 [node name="Hud" type="CanvasLayer" parent="."]
@@ -98,6 +103,15 @@ theme_override_constants/outline_size = 5
 horizontal_alignment = 2
 text = "money: 5,000"
 
+[node name="BuildPalette" type="Control" parent="Hud" node_paths=PackedStringArray("Tools")]
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("12_palette")
+Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../BulldozeTool")]
+
 [node name="CellInspector" type="Node" parent="." node_paths=PackedStringArray("World", "Readout")]
 script = ExtResource("7_inspector")
 World = NodePath("../World")
@@ -108,13 +122,9 @@ script = ExtResource("11_economy")
 Readout = NodePath("../Hud/MoneyReadout")
 StartingBalance = 5000
 
-[node name="Menu" type="Node" parent="." node_paths=PackedStringArray("World", "RoadTool", "FieldTool", "StructureTool", "BulldozeTool", "Inspector")]
-script = ExtResource("5_menu")
+[node name="DevShortcuts" type="Node" parent="." node_paths=PackedStringArray("World", "Inspector")]
+script = ExtResource("5_devkeys")
 World = NodePath("../World")
-RoadTool = NodePath("../RoadTool")
-FieldTool = NodePath("../FieldTool")
-StructureTool = NodePath("../StructureTool")
-BulldozeTool = NodePath("../BulldozeTool")
 Inspector = NodePath("../CellInspector")
 
 [node name="CameraRig" type="Node3D" parent="."]

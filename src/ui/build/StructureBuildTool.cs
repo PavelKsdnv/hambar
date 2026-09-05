@@ -4,7 +4,7 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Structure-placing tool, toggled by menu key 4: one click drops one building
+/// Structure-placing tool, the palette's third entry: one click drops one building
 /// on the cell under the cursor — but only where the cell shares an edge with
 /// the road network, which is the rule that makes roads load-bearing instead of
 /// decorative.
@@ -29,7 +29,11 @@ public partial class StructureBuildTool : BuildTool
     /// there is one building and one placeholder number, overridable in
     /// Main.tscn.
     /// </summary>
-    public StructureBuildTool() => CostPerCell = 250;
+    public StructureBuildTool()
+    {
+        DisplayName = "Structure";
+        CostPerCell = 250;
+    }
 
     protected override TileType PlacedTile => TileType.Structure;
 
@@ -49,7 +53,7 @@ public partial class StructureBuildTool : BuildTool
     /// A building is placed, not dragged: one click and it is down, and the
     /// ghost shows the verdict as soon as the cursor moves.
     /// </summary>
-    protected override bool NeedsAnchor => false;
+    public override bool NeedsAnchor => false;
 
     /// <summary>
     /// The cell under the cursor, on its own. This is the single place a

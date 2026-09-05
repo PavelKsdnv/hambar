@@ -4,7 +4,7 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Field-marking tool, toggled by menu key 3: click one corner, click the
+/// Field-marking tool, the palette's second entry: click one corner, click the
 /// opposite one, and the filled rectangle between them becomes a single
 /// <see cref="Field"/> — a named region, not a pile of field tiles (see
 /// <see cref="Field"/> for what that buys and costs).
@@ -22,7 +22,11 @@ public partial class FieldBuildTool : BuildTool
     /// to it. A placeholder like every price here — see
     /// <see cref="BuildTool.CostPerCell"/>, which Main.tscn overrides.
     /// </summary>
-    public FieldBuildTool() => CostPerCell = 10;
+    public FieldBuildTool()
+    {
+        DisplayName = "Field";
+        CostPerCell = 10;
+    }
 
     protected override TileType PlacedTile => TileType.Field;
 

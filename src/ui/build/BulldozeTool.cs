@@ -4,7 +4,7 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Bulldoze tool, toggled by menu key 5: drag a rectangle and everything the
+/// Bulldoze tool, the palette's fourth entry: drag a rectangle and everything the
 /// player built inside it comes off, leaving the terrain underneath exactly as
 /// it was. The fourth <see cref="BuildTool"/>, and the first that removes
 /// instead of places — which is why it is the one that had to bend the base
@@ -53,7 +53,11 @@ public partial class BulldozeTool : BuildTool
     /// for the cells it actually clears (see <see cref="Policy"/>), never for
     /// the empty ground it crossed.
     /// </summary>
-    public BulldozeTool() => CostPerCell = 0;
+    public BulldozeTool()
+    {
+        DisplayName = "Bulldoze";
+        CostPerCell = 0;
+    }
 
     /// <summary>
     /// The one tool that writes nothing. <see cref="TileType.Empty"/> is only

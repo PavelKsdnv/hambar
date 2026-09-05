@@ -9,7 +9,8 @@ namespace Arable;
 /// generated world is what the generator thinks it is; the player-facing
 /// inspector panels (fields, buildings) are separate, later work.
 ///
-/// Toggled with menu key 2, so it can be switched off for screenshots. Picking
+/// Toggled with dev key 8 (see <see cref="DevShortcuts"/>), so it can be
+/// switched off for screenshots. Picking
 /// goes through <see cref="CellPicker"/>, the same code path the build tools
 /// use, so the readout can never disagree with what a click would hit.
 /// </summary>

@@ -7,18 +7,23 @@ namespace Arable;
 /// Headless smoke test for the world grid and machines: instances Main.tscn and
 /// asserts the generated terrain (seeded, bounded, varied, deterministic) and
 /// the starting road, that terrain and placement are independent layers, then
-/// spawns a machine via menu key 9 and asserts it drives the road, exercises
-/// the road-build tool (menu key 1: anchor click + place click → straight road
-/// with diagonal steps), and drives known screen pixels through the shared cell
-/// picker to check the hover readout (menu key 2). Run with:
+/// spawns a machine via dev key 9 and asserts it drives the road, exercises
+/// the road-build tool (armed from the build palette, then anchor click + place
+/// click → straight road with diagonal steps), and drives known screen pixels
+/// through the shared cell picker to check the hover readout (dev key 8). Run
+/// with:
 /// godot --headless res://scenes/dev/WorldSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 /// </summary>
 public partial class WorldSmokeTest : Node
 {
+    /// <summary>The road tool's place on the build palette — its first entry.</summary>
+    private const int RoadEntry = 0;
+
     private WorldGrid _world = null!;
     private GridMap _gridMap = null!;
     private RoadBuildTool _roadTool = null!;
+    private BuildPalette _palette = null!;
     private CellInspector _inspector = null!;
     private Label _readout = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
@@ -32,6 +37,7 @@ public partial class WorldSmokeTest : Node
         _world = main.GetNode<WorldGrid>("World");
         _gridMap = _world.GetNode<GridMap>("GridMap");
         _roadTool = main.GetNode<RoadBuildTool>("RoadTool");
+        _palette = main.GetNode<BuildPalette>("Hud/BuildPalette");
         _inspector = main.GetNode<CellInspector>("CellInspector");
         _readout = main.GetNode<Label>("Hud/CellReadout");
     }
@@ -45,7 +51,8 @@ public partial class WorldSmokeTest : Node
             CheckLayersAreIndependent();
             CheckStartRoad();
 
-            // Menu slot 9 spawns a machine.
+            // Dev key 9 spawns a machine — one of the two shortcuts left over
+            // from the number-key menu the build palette replaced.
             Input.ParseInputEvent(new InputEventAction { Action = "menu_9", Pressed = true });
         }
         else if (_frame == 10)
@@ -54,15 +61,16 @@ public partial class WorldSmokeTest : Node
             {
                 _startPositions[(Machine)node] = ((Machine)node).Position;
             }
-            Check("menu key 9 spawned a machine", _startPositions.Count == 1);
+            Check("dev key 9 spawned a machine", _startPositions.Count == 1);
 
-            // Menu slot 1 toggles the road-build tool.
+            // The build palette is how a tool is armed: the first entry is the
+            // road tool, and Select is the same call its button makes.
             Check("road tool starts inactive", !_roadTool.Active);
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_1", Pressed = true });
+            _palette.Select(RoadEntry);
         }
         else if (_frame == 15)
         {
-            Check("menu key 1 activates the road tool", _roadTool.Active);
+            Check("the palette arms the road tool", _roadTool.Active);
 
             // First click anchors, second click places a diagonal road
             // (headless has no real cursor, so click the cells directly). The
@@ -87,29 +95,31 @@ public partial class WorldSmokeTest : Node
             Check("cell beside the new road is empty",
                 _world.GetTile(new Vector2I(4, 2)) == TileType.Empty);
 
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_1", Pressed = true });
+            _palette.Toggle(RoadEntry);
         }
         else if (_frame == 20)
         {
-            Check("menu key 1 deactivates the road tool", !_roadTool.Active);
+            Check("the palette puts the road tool down again", !_roadTool.Active);
             Check("inspector is wired to the world and its label",
                 _inspector.World == _world && _inspector.Readout == _readout);
             Check("the readout starts switched on", _inspector.Enabled && _readout.Visible);
 
             CheckHoverReadout();
 
-            // Menu slot 2 toggles the readout (so it can be off for screenshots).
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_2", Pressed = true });
+            // Dev key 8 toggles the readout (so it can be off for screenshots).
+            // It moved off key 2 when the palette took the low number keys for
+            // its entries; the readout is a dev instrument, not a build tool.
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_8", Pressed = true });
         }
         else if (_frame == 25)
         {
-            Check("menu key 2 switches the readout off",
+            Check("dev key 8 switches the readout off",
                 !_inspector.Enabled && !_readout.Visible);
-            Input.ParseInputEvent(new InputEventAction { Action = "menu_2", Pressed = true });
+            Input.ParseInputEvent(new InputEventAction { Action = "menu_8", Pressed = true });
         }
         else if (_frame == 30)
         {
-            Check("menu key 2 switches the readout back on",
+            Check("dev key 8 switches the readout back on",
                 _inspector.Enabled && _readout.Visible);
         }
         else if (_frame == 190)

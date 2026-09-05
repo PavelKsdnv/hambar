@@ -77,6 +77,15 @@ public abstract partial class BuildTool : Node3D
     [Export] public WorldGrid? World { get; set; }
 
     /// <summary>
+    /// What the build palette calls this tool on its button. Exported for the
+    /// same reason the price is — it is wording, and wording is argued about
+    /// without a rebuild — and each subclass's constructor carries a default so
+    /// a code-built tool still has a name; Main.tscn's value wins. The palette
+    /// falls back to the node's name if it is ever left empty.
+    /// </summary>
+    [Export] public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary>
     /// What one cell of this tool's footprint costs to place. A ten-cell road
     /// costs ten times this; a single-click tool's footprint is one cell, so
     /// for those it is simply the price of the thing.
@@ -170,9 +179,12 @@ public abstract partial class BuildTool : Node3D
 
     /// <summary>
     /// False for tools that place on a single click (no drag), which then show
-    /// their ghost as soon as the cursor moves.
+    /// their ghost as soon as the cursor moves. Public because it is a fact
+    /// about how the tool is used rather than an implementation detail: the
+    /// palette words a drag tool's price per cell and a single-click tool's as
+    /// the price of the thing.
     /// </summary>
-    protected virtual bool NeedsAnchor => true;
+    public virtual bool NeedsAnchor => true;
 
     // -----------------------------------------------------------------------
 
