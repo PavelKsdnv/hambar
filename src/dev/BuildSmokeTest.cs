@@ -2208,7 +2208,9 @@ public partial class BuildSmokeTest : Node
     /// negative, and money only ever comes <i>in</i> through
     /// <see cref="Economy.Credit"/> — a negative spend is not a credit through
     /// the wrong door, and a credit of nothing is a genuine no-op rather than a
-    /// balance write.
+    /// balance write. <see cref="Economy.SetBalance"/> is the one door those two
+    /// do not guard, so it clamps: a mistyped export or a corrupt save leaves
+    /// the player broke, not in debt.
     /// </summary>
     private void CheckTheAccountItself()
     {
@@ -2232,6 +2234,12 @@ public partial class BuildSmokeTest : Node
         Check("a negative credit is ignored, not a charge", _economy.Balance == 25);
         Check("the readout tracks every one of those",
             _moneyReadout.Text == Economy.Describe(25) && _economy.Text == _moneyReadout.Text);
+
+        _economy.SetBalance(-500);
+        Check("a negative balance set outright is clamped, not stored",
+            _economy.Balance == 0);
+        Check("and the readout says broke, not minus five hundred",
+            _moneyReadout.Text == Economy.Describe(0) && _economy.Text == _moneyReadout.Text);
     }
 
     /// <summary>

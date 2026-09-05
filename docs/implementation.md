@@ -621,12 +621,13 @@ already lived.
 **The refund seam is an M7 stub.** Every removal passes through exactly one
 function, `BulldozeTool.RefundFor(Removal)`, which is where a price will be
 put on it (`Apply` credits what it returns, on the line after the call — the
-line the money counter takes over). It pays **nothing** today, deliberately rather than unfinished: nothing
-has a build cost yet, so no fraction of one exists to give back, and the refund
-*economics* — what fraction, whether it varies by building, whether a bulldozed
-field returns anything — are M7's to design and are explicitly not designed
-here. What the seam does carry is everything a real rule needs: `Removal` names
-the tile kind, the entity (`Field` or `Structure`, kept as the object so a
+line the money counter takes over). It pays **nothing** today, deliberately
+rather than unfinished: road, field and structure each *do* have a build cost
+now, deducted on commit, but the refund *economics* — what fraction of that
+comes back, whether it varies by building, whether a bulldozed field returns
+anything at all — are M7's to design and are explicitly not designed here.
+What the seam does carry is everything a real rule needs: `Removal` names the
+tile kind, the entity (`Field` or `Structure`, kept as the object so a
 building can be priced by *what* it is once the roster exists), the cells that
 were actually freed, and the cell the player hit. The money counter that comes
 next credits the amount; neither the signature nor its callers have to move for
@@ -942,7 +943,9 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 The visual counterpart to the smoke tests: it renders the canonical views to
 PNG so a human — or an agent — can look at what the game actually draws.
 **Must run windowed** (`--headless` is the dummy rasterizer: no framebuffer to
-read back, and the run hangs), output dir as a user arg:
+read back, so `FramePostDraw` never fires — `_Ready` detects it, prints
+`SCREENSHOT TEST FAILED: --headless cannot render` and quits 1 rather than
+waiting for a frame that will not come), output dir as a user arg:
 
 ```
 godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>

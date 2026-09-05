@@ -96,9 +96,21 @@ public partial class Economy : Node
     /// other two share, and the entry point a save-load (or a test that wants
     /// the player broke) needs — not a way for game code to award itself money,
     /// which is <see cref="Credit"/>.
+    ///
+    /// This is also the only door a number can come through without
+    /// <see cref="TrySpend"/> having vetted it — a mistyped
+    /// <see cref="StartingBalance"/> in the inspector, a corrupt save — so it is
+    /// where "never negative" is actually enforced. A negative input is clamped
+    /// to zero and warned about rather than thrown on: a bad export should leave
+    /// the player broke and the log loud, not take the scene down on load.
     /// </summary>
     public void SetBalance(int balance)
     {
+        if (balance < 0)
+        {
+            GD.PushWarning($"Economy: refusing a negative balance ({balance}); clamped to 0.");
+            balance = 0;
+        }
         Balance = balance;
         Text = Describe(balance);
         if (Readout != null)

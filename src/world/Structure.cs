@@ -36,12 +36,14 @@ namespace Arable;
 public sealed class Structure
 {
     private readonly List<Vector2I> _cells;
+    private readonly IReadOnlyList<Vector2I> _readOnlyCells;
 
     public Structure(int id, string name, IReadOnlyList<Vector2I> cells)
     {
         Id = id;
         Name = name;
         _cells = new List<Vector2I>(cells);
+        _readOnlyCells = _cells.AsReadOnly();
     }
 
     /// <summary>
@@ -56,9 +58,12 @@ public sealed class Structure
 
     /// <summary>
     /// Cells the building covers, in footprint order — one today, four for a
-    /// 2x2. The first is <see cref="Origin"/>.
+    /// 2x2. The first is <see cref="Origin"/>. A read-only <i>wrapper</i>, not
+    /// the backing list: a footprint may only change through
+    /// <see cref="WorldGrid"/>, which is the only thing that can keep the tile
+    /// layer and the cell → structure lookup in step with it.
     /// </summary>
-    public IReadOnlyList<Vector2I> Cells => _cells;
+    public IReadOnlyList<Vector2I> Cells => _readOnlyCells;
 
     /// <summary>
     /// Anchor cell: the first cell of the footprint, which for the rectangular

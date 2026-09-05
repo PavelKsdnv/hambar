@@ -30,12 +30,14 @@ namespace Arable;
 public sealed class Field
 {
     private readonly List<Vector2I> _cells;
+    private readonly IReadOnlyList<Vector2I> _readOnlyCells;
 
     public Field(int id, string name, IReadOnlyList<Vector2I> cells)
     {
         Id = id;
         Name = name;
         _cells = new List<Vector2I>(cells);
+        _readOnlyCells = _cells.AsReadOnly();
     }
 
     /// <summary>Stable identity, handed out in creation order and never reused.</summary>
@@ -44,8 +46,14 @@ public sealed class Field
     /// <summary>What the player calls it. Defaulted at creation, renameable later.</summary>
     public string Name { get; set; }
 
-    /// <summary>Cells the field covers, in the order they were marked.</summary>
-    public IReadOnlyList<Vector2I> Cells => _cells;
+    /// <summary>
+    /// Cells the field covers, in the order they were marked. A read-only
+    /// <i>wrapper</i>, not the backing list — it tracks the shrinking a
+    /// <see cref="RemoveCell"/> does, but a caller cannot cast it back and take
+    /// a cell out behind <see cref="WorldGrid"/>'s back, leaving the tile layer
+    /// and the cell → field lookup pointing at a cell the field disowns.
+    /// </summary>
+    public IReadOnlyList<Vector2I> Cells => _readOnlyCells;
 
     public int CellCount => _cells.Count;
 
