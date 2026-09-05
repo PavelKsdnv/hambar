@@ -44,6 +44,18 @@ public partial class BulldozeTool : BuildTool
     private readonly List<Removal> _removals = new();
 
     /// <summary>
+    /// <b>Taking something off is free</b>, which is a decision and not an
+    /// oversight: charging for demolition would make a misclick punishing
+    /// twice over, and the money side of a removal is the *refund*, which is
+    /// <see cref="RefundFor"/>'s and therefore M7's. It is the base's export
+    /// like any other price, so a playtest that disagrees can put a number on
+    /// it in Main.tscn without a rebuild — and if it does, the drag is priced
+    /// for the cells it actually clears (see <see cref="Policy"/>), never for
+    /// the empty ground it crossed.
+    /// </summary>
+    public BulldozeTool() => CostPerCell = 0;
+
+    /// <summary>
     /// The one tool that writes nothing. <see cref="TileType.Empty"/> is only
     /// here because the base hands <see cref="PlacedTile"/> to the rules as
     /// "what is being placed", and the only rule that reads it
@@ -73,9 +85,15 @@ public partial class BulldozeTool : BuildTool
     /// on the drag: legal where there is something to take, dimmed where there
     /// is not. The base's version would paint a legal drag's every cell legal —
     /// true for a build, a lie for a removal that skips half of them.
+    ///
+    /// The <see cref="PlacementPlan.Legal"/> half of the test is what keeps the
+    /// promise the other way round: a drag refused as a whole — priced beyond
+    /// the balance, if a playtest ever gives this tool a
+    /// <see cref="BuildTool.CostPerCell"/> — clears nothing, so none of its
+    /// cells may be drawn as though they will go.
     /// </summary>
     protected override Color GhostColorFor(PlacementPlan plan, int index) =>
-        plan.CellLegal(index) ? GhostLegal : GhostRefused;
+        plan.Legal && plan.CellLegal(index) ? GhostLegal : GhostRefused;
 
     /// <summary>
     /// Everything this tool has taken off the map, in removal order — one
@@ -87,11 +105,12 @@ public partial class BulldozeTool : BuildTool
     public IReadOnlyList<Removal> Removals => _removals;
 
     /// <summary>
-    /// What the player has been refunded, in whatever money M7 ends up using.
-    /// Zero, and it stays zero until there is a build cost to give a fraction
-    /// of — see <see cref="RefundFor"/>. It is also the placeholder for the
-    /// account: the next issue's money counter takes over the one line in
-    /// <see cref="Apply"/> that adds to it.
+    /// What this tool has refunded the player, in the same money the
+    /// <see cref="Economy"/> holds — every amount here was credited to it. Zero,
+    /// and it stays zero until <see cref="RefundFor"/> puts a fraction of a
+    /// build cost on a removal, which is M7's call. It is kept as a running
+    /// total because it is the one number a test (or a HUD) can hold the
+    /// balance against: after a bulldoze the balance has moved by exactly this.
     /// </summary>
     public int RefundTotal { get; private set; }
 
@@ -113,12 +132,15 @@ public partial class BulldozeTool : BuildTool
             }
 
             // Every removal, and nothing else, comes through here: priced by
-            // the seam, credited on the line after it — which is the line the
-            // money counter takes over — and recorded, so what the bulldozer
-            // took can be read back without parsing a log.
+            // the seam, credited to the account on the line after it, and
+            // recorded, so what the bulldozer took can be read back without
+            // parsing a log. The credit is a real one — the seam is wired to
+            // the money, not to a counter beside it — and it moves nothing
+            // today only because RefundFor still answers zero.
             int refund = RefundFor(removed);
             _removals.Add(removed);
             RefundTotal += refund;
+            Economy?.Credit(refund);
             GD.Print($"{Name}: cleared {removed}, refund {refund}");
         }
     }
@@ -136,8 +158,10 @@ public partial class BulldozeTool : BuildTool
     /// building, whether a bulldozed field returns anything at all — are M7's
     /// to design, not this tool's to guess at. When there are costs, this
     /// becomes one expression — <c>fraction * BuildCost(removed)</c> — and
-    /// nothing that calls it has to change; the money counter that comes next
-    /// credits what it returns.
+    /// nothing that calls it has to change: what it returns is already credited
+    /// to the player's <see cref="Economy"/> by the caller, so the day it stops
+    /// returning zero is the day refunds start appearing in the balance, with
+    /// no other line touched.
     /// </summary>
     private static int RefundFor(Removal removed) => 0;
 }

@@ -22,6 +22,15 @@ namespace Arable;
 /// </summary>
 public partial class StructureBuildTool : BuildTool
 {
+    /// <summary>
+    /// A building is the expensive decision, and its footprint is one cell, so
+    /// <see cref="BuildTool.CostPerCell"/> is simply its price. When the roster
+    /// arrives (M5/M6) the per-kind prices go where the kinds do; until then
+    /// there is one building and one placeholder number, overridable in
+    /// Main.tscn.
+    /// </summary>
+    public StructureBuildTool() => CostPerCell = 250;
+
     protected override TileType PlacedTile => TileType.Structure;
 
     /// <summary>

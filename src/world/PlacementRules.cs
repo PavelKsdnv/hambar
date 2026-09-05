@@ -80,8 +80,66 @@ public enum PlacementRefusal
 
     NoRoadAccess,
 
+    /// <summary>
+    /// The player cannot pay for it. A refusal like any other, and
+    /// deliberately so: it is decided inside <see cref="PlacementRules.Check"/>
+    /// from the <see cref="PlacementBudget"/> handed in, so the ghost shows
+    /// "you cannot afford this" before the click exactly the way it shows
+    /// "that is water". Like <see cref="NoRoadAccess"/> it is a property of the
+    /// <i>whole</i> placement — no single cell is the offender — because a
+    /// drag is bought outright or not at all.
+    /// </summary>
+    CannotAfford,
+
     /// <summary>Nothing to place: an empty footprint, or no world to place in.</summary>
     NothingToPlace,
+}
+
+/// <summary>
+/// What a placement costs and what the player has to pay with — the pair
+/// <see cref="PlacementRules.Check"/> needs to answer "can this be afforded?"
+/// <b>as part of the verdict</b> rather than after it.
+///
+/// It is a <i>value</i>, not a handle on the account, and that is the whole of
+/// the design: <see cref="PlacementRules"/> stays a pure evaluator with no node
+/// state, so money reaches it the same way the world does — passed in. A tool
+/// reads its own price (<see cref="BuildTool.CostPerCell"/>) and the
+/// <see cref="Economy"/>'s balance and hands over the pair; nothing in the
+/// rules ever reaches out for either, and nothing here can spend anything.
+/// </summary>
+public readonly struct PlacementBudget
+{
+    /// <summary>
+    /// A placement nothing charges for, and which is therefore always
+    /// affordable — the default, so every caller that has no money to talk
+    /// about (dev code, the tests that check a rule on its own, a tool with no
+    /// account wired) keeps asking the same question it always did.
+    /// </summary>
+    public static PlacementBudget Free => default;
+
+    public PlacementBudget(int costPerCell, int balance)
+    {
+        CostPerCell = costPerCell;
+        Balance = balance;
+    }
+
+    /// <summary>What one charged cell costs. Zero for a tool that is free.</summary>
+    public int CostPerCell { get; }
+
+    /// <summary>The money that is there to pay with.</summary>
+    public int Balance { get; }
+
+    /// <summary>
+    /// What <paramref name="chargedCells"/> cells come to. Affordability is a
+    /// whole-placement property, like <see cref="PlacementRule.TouchesRoad"/>:
+    /// a ten-cell road at five each costs fifty, and the player either buys all
+    /// of it or none of it — never "the cells that were individually
+    /// affordable".
+    /// </summary>
+    public int Price(int chargedCells) => CostPerCell * chargedCells;
+
+    /// <summary>Whether that total is within the balance.</summary>
+    public bool CanAfford(int cost) => cost <= Balance;
 }
 
 /// <summary>
@@ -120,16 +178,18 @@ public sealed class PlacementPlan
 {
     /// <summary>The verdict on "nothing at all" — refused, covering no cells.</summary>
     public static readonly PlacementPlan Nothing =
-        new([], [], PlacementRefusal.NothingToPlace);
+        new([], [], PlacementRefusal.NothingToPlace, 0);
 
     public PlacementPlan(
         IReadOnlyList<Vector2I> cells,
         IReadOnlyList<PlacementRefusal> cellRefusals,
-        PlacementRefusal refusal)
+        PlacementRefusal refusal,
+        int cost)
     {
         Cells = cells;
         CellRefusals = cellRefusals;
         Refusal = refusal;
+        Cost = cost;
     }
 
     /// <summary>Cells the placement would write, in footprint order.</summary>
@@ -143,6 +203,16 @@ public sealed class PlacementPlan
 
     /// <summary>Why the whole placement is refused, or None when it is allowed.</summary>
     public PlacementRefusal Refusal { get; }
+
+    /// <summary>
+    /// What committing this placement charges: the tool's price times the
+    /// cells it would actually act on (see <see cref="PlacementRules.Check"/>).
+    /// Priced <i>here</i>, with the rest of the verdict, so the amount the
+    /// player is charged on the click is the amount the ghost was validated
+    /// against — the click never prices anything itself. Zero for a free tool,
+    /// and for a plan checked without a <see cref="PlacementBudget"/>.
+    /// </summary>
+    public int Cost { get; }
 
     public bool Legal => Refusal == PlacementRefusal.None;
 
@@ -185,13 +255,23 @@ public static class PlacementRules
     /// cells that caused the refusal — or, under
     /// <see cref="FootprintPolicy.AnyCell"/>, at the cells nothing will happen
     /// to.
+    ///
+    /// <b>Cost is one of the rules.</b> <paramref name="budget"/> carries the
+    /// tool's price and the player's balance, and the plan comes back priced
+    /// (<see cref="PlacementPlan.Cost"/>) and refused with
+    /// <see cref="PlacementRefusal.CannotAfford"/> when the total is out of
+    /// reach — so "you cannot afford this" is in the ghost with every other
+    /// refusal instead of being discovered on the click. Omit it and the
+    /// placement is free, which is what every caller that has no money to talk
+    /// about wants.
     /// </summary>
     public static PlacementPlan Check(
         WorldGrid? world,
         IReadOnlyList<Vector2I> cells,
         PlacementRule rules,
         TileType placing,
-        FootprintPolicy policy = FootprintPolicy.EveryCell)
+        FootprintPolicy policy = FootprintPolicy.EveryCell,
+        PlacementBudget budget = default)
     {
         if (world == null || cells.Count == 0)
         {
@@ -229,7 +309,22 @@ public static class PlacementRules
             verdict = PlacementRefusal.NoRoadAccess;
         }
 
-        return new PlacementPlan(cells, refusals, verdict);
+        // The price is the price of the cells the placement will act on. For a
+        // build that is the whole footprint — all-or-nothing, so there is
+        // nothing else it could be. For an AnyCell footprint it is only the
+        // cells that pass: a bulldoze drag crosses empty ground as a matter of
+        // course, and charging for cells nothing happens to would be charging
+        // for nothing. Affordability is judged last, after every reason that
+        // is not about money, so the player is told the more useful of two
+        // refusals.
+        int chargedCells = policy == FootprintPolicy.AnyCell ? legalCells : cells.Count;
+        int cost = budget.Price(chargedCells);
+        if (verdict == PlacementRefusal.None && !budget.CanAfford(cost))
+        {
+            verdict = PlacementRefusal.CannotAfford;
+        }
+
+        return new PlacementPlan(cells, refusals, verdict, cost);
     }
 
     /// <summary>The per-cell rules, applied to one cell on its own.</summary>
@@ -312,6 +407,7 @@ public static class PlacementRules
         PlacementRefusal.Occupied => "something is already built here",
         PlacementRefusal.NothingToClear => "nothing here to clear",
         PlacementRefusal.NoRoadAccess => "must touch a road",
+        PlacementRefusal.CannotAfford => "not enough money",
         _ => "nothing to place",
     };
 }

@@ -18,6 +18,13 @@ namespace Arable;
 /// and how the ghost then paints them — which is where the bulldozer, the one
 /// tool that removes instead of places, parts company with the rest).
 ///
+/// <b>Money is one of the rules, not a step after them.</b> A tool's price
+/// (<see cref="CostPerCell"/>) and the <see cref="Economy"/>'s balance go into
+/// <see cref="PlacementRules.Check"/> as a <see cref="PlacementBudget"/>, so a
+/// placement the player cannot pay for is refused exactly like one on water —
+/// in the ghost, before the click. The click's only part in it is paying: the
+/// plan comes back priced and <see cref="ClickCell"/> spends that on commit.
+///
 /// Interaction: the first left click anchors, a second left click places, and
 /// right click / Esc drops the anchor first and leaves the tool second. A tool
 /// that places on a single click sets <see cref="NeedsAnchor"/> to false and
@@ -68,6 +75,27 @@ public abstract partial class BuildTool : Node3D
     public static readonly Color GhostRefused = new(0.8f, 0.2f, 0.16f, 0.45f);
 
     [Export] public WorldGrid? World { get; set; }
+
+    /// <summary>
+    /// What one cell of this tool's footprint costs to place. A ten-cell road
+    /// costs ten times this; a single-click tool's footprint is one cell, so
+    /// for those it is simply the price of the thing.
+    ///
+    /// Exported, and set per tool in Main.tscn, because the first thing a
+    /// playtest argues about is the numbers and none of them are worth a
+    /// rebuild. Each subclass's constructor carries a placeholder so a
+    /// code-built tool is priced too; the scene value wins.
+    /// </summary>
+    [Export] public int CostPerCell { get; set; }
+
+    /// <summary>
+    /// The account this tool charges and (bulldozing) credits. Null is legal
+    /// and means <b>free</b>, not broke: a scene with no money — a dev scene, a
+    /// test that only cares about legality — keeps building exactly as it did
+    /// before, the same way a null <see cref="CellInspector.Readout"/> keeps
+    /// the inspector working without a HUD.
+    /// </summary>
+    [Export] public Economy? Economy { get; set; }
 
     /// <summary>Whether the tool is armed and reacting to the mouse.</summary>
     public bool Active { get; private set; }
@@ -238,8 +266,20 @@ public abstract partial class BuildTool : Node3D
             return PlacementPlan.Nothing;
         }
         Vector2I anchor = Anchor ?? cell;
-        return PlacementRules.Check(World, Footprint(anchor, cell), Rules, PlacedTile, Policy);
+        return PlacementRules.Check(
+            World, Footprint(anchor, cell), Rules, PlacedTile, Policy, Budget);
     }
+
+    /// <summary>
+    /// The price and the purse, as a value the rules can be asked about — read
+    /// fresh on every plan, so a ghost is always judged against the balance as
+    /// it is now. This is the whole of how money reaches
+    /// <see cref="PlacementRules"/>: it is handed in, never fetched, which is
+    /// what keeps the evaluator free of node state.
+    /// </summary>
+    private PlacementBudget Budget => Economy is { } account
+        ? new PlacementBudget(CostPerCell, account.Balance)
+        : PlacementBudget.Free;
 
     /// <summary>
     /// One build click on a cell: anchors first, places second (or places
@@ -269,6 +309,13 @@ public abstract partial class BuildTool : Node3D
         }
         else
         {
+            // Charged on the commit, never on the preview — and charged the
+            // amount the plan was priced at, which is the amount the ghost the
+            // player was looking at had already been validated against a few
+            // lines up. There is deliberately no second affordability check
+            // here: a click that tested its own price would be a click the
+            // ghost could not predict.
+            Economy?.TrySpend(plan.Cost);
             Apply(plan);
             Anchor = null;
         }

@@ -19,11 +19,19 @@ namespace Arable;
 /// proven — then the structure tool, whose must-touch-a-road rule only means
 /// anything once there is a road network to touch, and last the bulldozer,
 /// which needs one of each of those on the map before it can take them off
-/// again. The rest of M2 (costs, the palette) adds its assertions the same way:
-/// give each new tool a section like <see cref="CheckLegalPlacement"/> and
-/// reuse the cell-finding helpers at the bottom, which look terrain up at
-/// runtime instead of hard-coding coordinates that a seed change would
-/// invalidate.
+/// again. <b>Money comes after all four</b>, because paying for a placement is
+/// the one rule that needs every tool already proven: see
+/// <see cref="CheckCommitChargesExactlyTheCost"/> onwards. The rest of M2 (the
+/// palette) adds its assertions the same way: give each new tool a section like
+/// <see cref="CheckLegalPlacement"/> and reuse the cell-finding helpers at the
+/// bottom, which look terrain up at runtime instead of hard-coding coordinates
+/// that a seed change would invalidate.
+///
+/// <b>Prices are kept out of the sections that are not about them.</b> The
+/// money section sets the balance it needs before every check it makes;
+/// everything before it runs on <see cref="WorkingBalance"/>, set once the
+/// starting balance has been asserted, so no assertion about legality can fail
+/// for want of funds.
 /// </summary>
 public partial class BuildSmokeTest : Node
 {
@@ -31,12 +39,23 @@ public partial class BuildSmokeTest : Node
     private const int FieldRectWidth = 3;
     private const int FieldRectHeight = 2;
 
+    /// <summary>
+    /// The balance every section that is <i>not</i> about money runs on: far
+    /// more than this test can spend, so pricing can never reach into an
+    /// assertion about something else. Set once the starting balance itself has
+    /// been asserted.
+    /// </summary>
+    private const int WorkingBalance = 1_000_000;
+
     private WorldGrid _world = null!;
     private RoadBuildTool _tool = null!;
     private FieldBuildTool _fieldTool = null!;
     private StructureBuildTool _structureTool = null!;
     private BulldozeTool _bulldozeTool = null!;
     private CellInspector _inspector = null!;
+    private Economy _economy = null!;
+    private Label _moneyReadout = null!;
+    private Label _cellReadout = null!;
     private int _frame;
     private bool _failed;
 
@@ -83,6 +102,9 @@ public partial class BuildSmokeTest : Node
         _structureTool = main.GetNode<StructureBuildTool>("StructureTool");
         _bulldozeTool = main.GetNode<BulldozeTool>("BulldozeTool");
         _inspector = main.GetNode<CellInspector>("CellInspector");
+        _economy = main.GetNode<Economy>("Economy");
+        _moneyReadout = main.GetNode<Label>("Hud/MoneyReadout");
+        _cellReadout = main.GetNode<Label>("Hud/CellReadout");
     }
 
     public override void _Process(double delta)
@@ -92,6 +114,7 @@ public partial class BuildSmokeTest : Node
         {
             PickTestCells();
             CheckStartState();
+            CheckMoneyStartState();
 
             // Menu slot 1 arms the road tool — the same path the player takes.
             Input.ParseInputEvent(new InputEventAction { Action = "menu_1", Pressed = true });
@@ -198,6 +221,18 @@ public partial class BuildSmokeTest : Node
             CheckBulldozeSkipsEmptyGround();
             CheckNothingToClearIsRefused();
             CheckRefundSeam();
+        }
+        else if (_frame == 50)
+        {
+            // Money last: paying for a placement is the one rule that needs
+            // every tool already proven, and every check below sets the balance
+            // it is about.
+            CheckCommitChargesExactlyTheCost();
+            CheckUnaffordablePlacementIsRefused();
+            CheckADragIsAffordableAsAWhole();
+            CheckAnAnyCellDragPaysForWhatItActsOn();
+            CheckTheAccountItself();
+            CheckTheRefundSeamCreditsTheAccount();
 
             GD.Print(_failed ? "BUILD SMOKE TEST FAILED" : "BUILD SMOKE TEST PASSED");
             GetTree().Quit(_failed ? 1 : 0);
@@ -224,6 +259,60 @@ public partial class BuildSmokeTest : Node
             _world.Fields.Count == 0 && _world.FieldCellCount == 0);
         Check("no structure is registered before one is placed",
             _world.Structures.Count == 0 && _world.StructureCellCount == 0);
+    }
+
+    /// <summary>
+    /// The account before anything has been bought: the player starts with the
+    /// exported balance, the readout on screen says so, and every tool carries
+    /// a price it charges against that one account.
+    ///
+    /// The prices are asserted as <i>relations</i> — building costs something,
+    /// bulldozing does not — never as numbers. They are placeholders that live
+    /// in Main.tscn precisely so they can be tuned without a rebuild, and a test
+    /// spelling them out would turn every tuning pass into the code change it is
+    /// supposed to avoid.
+    ///
+    /// It ends by putting the balance out of reach of the rest of the test: see
+    /// <see cref="WorkingBalance"/>.
+    /// </summary>
+    private void CheckMoneyStartState()
+    {
+        Check("the player starts with the exported balance",
+            _economy.Balance == _economy.StartingBalance);
+        Check("the starting balance is a real one to spend",
+            _economy.StartingBalance > 0);
+        Check("the readout says what the balance is",
+            _economy.Text == Economy.Describe(_economy.Balance)
+            && _moneyReadout.Text == _economy.Text);
+        Check("money reads as money, grouped and culture-independent",
+            Economy.Describe(1234567) == "money: 1,234,567"
+            && Economy.Describe(0) == "money: 0");
+
+        Check("every build tool is wired to the one account",
+            _tool.Economy == _economy && _fieldTool.Economy == _economy
+            && _structureTool.Economy == _economy && _bulldozeTool.Economy == _economy);
+        Check("building things costs money",
+            _tool.CostPerCell > 0 && _fieldTool.CostPerCell > 0
+            && _structureTool.CostPerCell > 0);
+        Check("taking them off again does not", _bulldozeTool.CostPerCell == 0);
+
+        // The readout is a visual claim, so it is checked as one: on the
+        // screen, and not sitting on top of the readout already there.
+        Rect2 screen = GetViewport().GetVisibleRect();
+        Check("the money readout is visible", _moneyReadout.Visible);
+        Check("the money readout is on screen",
+            screen.Encloses(_moneyReadout.GetGlobalRect()));
+        Check("the money readout does not overlap the cell readout",
+            !_moneyReadout.GetGlobalRect().Intersects(_cellReadout.GetGlobalRect()));
+        GD.Print($"money readout: \"{_moneyReadout.Text}\" at "
+            + $"{_moneyReadout.GetGlobalRect()} on a {screen.Size} screen; "
+            + $"cell readout at {_cellReadout.GetGlobalRect()}");
+
+        _economy.SetBalance(WorkingBalance);
+        Check("the balance can be set outright, which is how a test gets broke",
+            _economy.Balance == WorkingBalance);
+        Check("setting it takes the readout with it",
+            _moneyReadout.Text == Economy.Describe(WorkingBalance));
     }
 
     /// <summary>
@@ -1433,6 +1522,361 @@ public partial class BuildSmokeTest : Node
         Check("nothing is refunded yet - the seam is an M7 stub",
             _bulldozeTool.RefundTotal == 0);
     }
+
+    // --- money -------------------------------------------------------------
+
+    /// <summary>
+    /// The plain case: a drag is priced as a total by the <i>plan</i>, the
+    /// preview costs nothing however long it is held, and the commit takes
+    /// exactly what the plan said — no more, and not twice.
+    /// </summary>
+    private void CheckCommitChargesExactlyTheCost()
+    {
+        Vector2I? run = FindCell(cell => IsFreeSoilLine(cell, cell + new Vector2I(3, 0)));
+        Check("found clear soil to buy a road on", run != null);
+        if (run is not { } from)
+        {
+            return;
+        }
+
+        Vector2I to = from + new Vector2I(3, 0);
+        int cells = WorldGrid.LineCells(from, to).Count;
+        int price = _tool.CostPerCell * cells;
+
+        _economy.SetBalance(WorkingBalance);
+        _tool.SetActive(true);
+        Check("the drag anchors on ground the player can pay for", _tool.ClickCell(from));
+
+        _tool.HoverAt(to);
+        Check("the plan prices the whole drag, not one cell of it",
+            cells > 1 && _tool.Preview?.Cost == price);
+        Check("a drag the player can pay for previews as legal", _tool.PreviewLegal);
+        Check("every cell of an affordable drag is drawn legal",
+            CountGhost(_tool, BuildTool.GhostLegal) == cells);
+        Check("previewing a placement charges nothing at all",
+            _economy.Balance == WorkingBalance);
+
+        Check("the second click places it", _tool.ClickCell(to));
+        Check("committing deducts exactly the plan's cost",
+            _economy.Balance == WorkingBalance - price);
+        Check("what it paid for is on the map", AllRoad(from, to));
+        Check("the readout followed the balance down",
+            _moneyReadout.Text == Economy.Describe(WorkingBalance - price)
+            && _economy.Text == _moneyReadout.Text);
+
+        // A refused click is free, whatever it was refused for.
+        int spent = _economy.Balance;
+        Check("a click on rock is refused as it always was", !_tool.ClickCell(_rock));
+        Check("and being refused costs nothing", _economy.Balance == spent);
+    }
+
+    /// <summary>
+    /// The point of the whole issue: a placement the player cannot afford is
+    /// refused on the same footing as an illegal one — <b>in the ghost, before
+    /// the click</b>. It is checked on the structure tool because that one
+    /// places on a single click, so the ghost is the only warning there is.
+    ///
+    /// Money is a property of the whole placement, so no cell is the offender:
+    /// the ghost dims all of it and blames none of it, exactly the way
+    /// <see cref="PlacementRefusal.NoRoadAccess"/> does. One coin more and the
+    /// very same cell builds — nothing about the ground changed.
+    /// </summary>
+    private void CheckUnaffordablePlacementIsRefused()
+    {
+        Vector2I? found = FindCell(cell => IsFreeSoil(cell) && TouchesRoad(cell));
+        Check("found clear soil beside a road to price a building on", found != null);
+        if (found is not { } cell)
+        {
+            return;
+        }
+
+        int price = _structureTool.CostPerCell;
+        int structuresBefore = _world.Structures.Count;
+
+        _structureTool.SetActive(true);
+        _economy.SetBalance(price - 1);
+        _structureTool.HoverAt(cell);
+        Check("a building one coin short of its price previews as refused",
+            !_structureTool.PreviewLegal);
+        Check("the refusal names the money",
+            _structureTool.Preview?.Refusal == PlacementRefusal.CannotAfford);
+        Check("the wording is the player's",
+            PlacementRules.Explain(PlacementRefusal.CannotAfford) == "not enough money");
+        Check("the plan still says what it would have cost",
+            _structureTool.Preview?.Cost == price);
+        Check("the ghost still covers the placement", _structureTool.GhostCellCount == 1);
+        Check("no cell of an unaffordable placement is drawn legal",
+            CountGhost(_structureTool, BuildTool.GhostLegal) == 0);
+        Check("the whole placement reads refused and no cell is blamed for the money",
+            CountGhost(_structureTool, BuildTool.GhostRefused) == 1
+            && CountGhost(_structureTool, BuildTool.GhostIllegalCell) == 0
+            && _structureTool.Preview?.CellRefusals[0] == PlacementRefusal.None);
+        Check("the hover square reads refused when the money is short",
+            _structureTool.CursorColor.IsEqualApprox(BuildTool.CursorRefused));
+
+        Check("the click is rejected", !_structureTool.ClickCell(cell));
+        Check("nothing was built",
+            _world.GetTile(cell) == TileType.Empty
+            && _world.Structures.Count == structuresBefore);
+        Check("the refused click left the balance alone", _economy.Balance == price - 1);
+
+        _economy.SetBalance(price);
+        _structureTool.HoverAt(cell);
+        Check("the exact price is affordable", _structureTool.PreviewLegal);
+        Check("the ghost turns legal with the money, not with the ground",
+            CountGhost(_structureTool, BuildTool.GhostLegal) == 1);
+        Check("the click is accepted", _structureTool.ClickCell(cell));
+        Check("the building went up",
+            _world.GetStructure(cell) != null
+            && _world.Structures.Count == structuresBefore + 1);
+        Check("paying for it emptied the account", _economy.Balance == 0);
+        Check("the readout says so", _moneyReadout.Text == Economy.Describe(0));
+        Check("and a player with nothing can afford nothing", !_economy.CanAfford(1));
+    }
+
+    /// <summary>
+    /// Affordability is a whole-placement property, like
+    /// <see cref="PlacementRule.TouchesRoad"/>: a drag is bought outright or
+    /// not at all. Four cells of road are affordable at exactly their total,
+    /// five are not — and every one of those five is affordable on its own,
+    /// which is the misreading this check exists to rule out. Pulling the drag
+    /// back in to what the money covers places it.
+    /// </summary>
+    private void CheckADragIsAffordableAsAWhole()
+    {
+        Vector2I? run = FindCell(cell => IsFreeSoilLine(cell, cell + new Vector2I(4, 0)));
+        Check("found a clear soil run to price a long drag on", run != null);
+        if (run is not { } from)
+        {
+            return;
+        }
+
+        Vector2I near = from + new Vector2I(3, 0);
+        Vector2I far = from + new Vector2I(4, 0);
+        int nearCells = WorldGrid.LineCells(from, near).Count;
+        int farCells = WorldGrid.LineCells(from, far).Count;
+        int purse = _tool.CostPerCell * nearCells;
+
+        _economy.SetBalance(purse);
+        _tool.SetActive(true);
+        Check("the drag anchors", _tool.ClickCell(from));
+
+        _tool.HoverAt(near);
+        Check("a drag priced at exactly the balance is legal",
+            _tool.PreviewLegal && _tool.Preview?.Count == nearCells
+            && _tool.Preview?.Cost == purse);
+
+        _tool.HoverAt(far);
+        Check("one cell further is refused - for the total, not for the cell",
+            _tool.Preview?.Refusal == PlacementRefusal.CannotAfford
+            && _tool.Preview?.Cost == _tool.CostPerCell * farCells);
+        Check("though every cell of it was affordable on its own",
+            farCells > nearCells && _economy.CanAfford(_tool.CostPerCell));
+        Check("no cell of an unaffordable drag is drawn legal",
+            CountGhost(_tool, BuildTool.GhostLegal) == 0
+            && CountGhost(_tool, BuildTool.GhostRefused) == farCells);
+        Check("the click on it is rejected", !_tool.ClickCell(far));
+        Check("not one cell of it was built", AllTile(WorldGrid.LineCells(from, far),
+            TileType.Empty));
+        Check("and it cost nothing to be refused", _economy.Balance == purse);
+        Check("a refused drag keeps its anchor so the player can pull it back in",
+            _tool.Anchor == from);
+
+        _tool.HoverAt(near);
+        Check("the shorter drag is legal again", _tool.PreviewLegal);
+        Check("and it places", _tool.ClickCell(near));
+        Check("spending the balance to the last coin", _economy.Balance == 0);
+        Check("exactly the cells that were paid for are road", AllRoad(from, near));
+        Check("the one cell too far is not", _world.GetTile(far) == TileType.Empty);
+    }
+
+    /// <summary>
+    /// How the price meets <see cref="FootprintPolicy.AnyCell"/>: <b>a drag
+    /// pays for the cells it acts on</b>. A bulldoze rectangle crosses empty
+    /// ground as a matter of course, and charging for cells nothing happens to
+    /// would be charging for nothing — while a build, being all-or-nothing, is
+    /// priced for its whole footprint. Both halves are asked straight through
+    /// <see cref="PlacementRules"/> with a budget handed in, which is also the
+    /// check that money reaches the evaluator as a <i>value</i>: no account, no
+    /// node, nothing to reach out for.
+    ///
+    /// Then the same thing through the tool, by putting a price on the
+    /// bulldozer at runtime — which is the export doing its job, and the one
+    /// way to see an <c>AnyCell</c> footprint actually charged.
+    /// </summary>
+    private void CheckAnAnyCellDragPaysForWhatItActsOn()
+    {
+        Vector2I? block = FindCell(cell => IsFreeSoilRect(cell, cell + new Vector2I(2, 1)));
+        Check("found clear soil for a half-built rectangle", block != null);
+        if (block is not { } origin)
+        {
+            return;
+        }
+
+        Vector2I roadEnd = origin + new Vector2I(2, 0);
+        Vector2I far = origin + new Vector2I(2, 1);
+        List<Vector2I> rect = WorldGrid.RectCells(origin, far);
+        List<Vector2I> road = WorldGrid.RectCells(origin, roadEnd);
+        List<Vector2I> bare = WorldGrid.RectCells(origin + Vector2I.Down, far);
+        _world.BuildRoadLine(origin, roadEnd);
+        Check("the rectangle is half road and half bare ground",
+            AllTile(road, TileType.Road) && AllTile(bare, TileType.Empty)
+            && rect.Count == road.Count + bare.Count);
+
+        const int perCell = 7;
+        int acted = road.Count;
+        PlacementRule removal = PlacementRule.InBounds | PlacementRule.OccupiedCell;
+
+        PlacementPlan rich = RemovalPlan(rect, new PlacementBudget(perCell, WorkingBalance));
+        Check("an AnyCell drag is priced for the cells it acts on",
+            rich.Cost == perCell * acted);
+        Check("not for the empty ground it crossed", rich.Cost < perCell * rect.Count);
+        Check("and it is legal when that price is covered", rich.Legal);
+
+        Check("a balance covering exactly the acted-on cells is enough",
+            RemovalPlan(rect, new PlacementBudget(perCell, perCell * acted)).Legal);
+        Check("one coin short of it is refused for the money",
+            RemovalPlan(rect, new PlacementBudget(perCell, perCell * acted - 1)).Refusal
+                == PlacementRefusal.CannotAfford);
+        Check("a budget that could not cover the whole rectangle still buys it",
+            RemovalPlan(rect, new PlacementBudget(perCell, perCell * rect.Count - 1)).Legal);
+
+        PlacementPlan build = PlacementRules.Check(
+            _world, bare, PlacementRule.BuildableTerrain | PlacementRule.VacantCell,
+            TileType.Field, FootprintPolicy.EveryCell,
+            new PlacementBudget(perCell, WorkingBalance));
+        Check("a build is priced for its whole footprint",
+            build.Legal && build.Cost == perCell * bare.Count);
+
+        Check("a plan checked without a budget is free, and free is always affordable",
+            RemovalPlan(rect, PlacementBudget.Free).Cost == 0
+            && PlacementRules.Check(_world, rect, removal, TileType.Empty,
+                FootprintPolicy.AnyCell).Legal
+            && PlacementBudget.Free.Price(99) == 0);
+
+        // The tool itself, priced through the export at runtime — the knob a
+        // playtest would turn, and the only way to watch an AnyCell footprint
+        // actually pay.
+        _bulldozeTool.CostPerCell = perCell;
+        _bulldozeTool.SetActive(true);
+        _economy.SetBalance(perCell * acted - 1);
+        Check("the priced bulldoze drag anchors on the built half",
+            _bulldozeTool.ClickCell(origin));
+        _bulldozeTool.HoverAt(far);
+        Check("a removal it cannot pay for is refused",
+            _bulldozeTool.Preview?.Refusal == PlacementRefusal.CannotAfford
+            && _bulldozeTool.Preview?.Cost == perCell * acted);
+        Check("and its ghost promises nothing, not even the cells that hold something",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == 0
+            && CountGhost(_bulldozeTool, BuildTool.GhostRefused) == rect.Count);
+        Check("the click is rejected and the road survives",
+            !_bulldozeTool.ClickCell(far) && AllTile(road, TileType.Road));
+
+        _economy.SetBalance(perCell * acted);
+        _bulldozeTool.HoverAt(far);
+        Check("the price of the cells it acts on is enough to run it",
+            _bulldozeTool.PreviewLegal);
+        Check("and the ghost is honest again: the built cells, and only those",
+            CountGhost(_bulldozeTool, BuildTool.GhostLegal) == acted
+            && CountGhost(_bulldozeTool, BuildTool.GhostRefused) == bare.Count);
+        Check("the second click clears it", _bulldozeTool.ClickCell(far));
+        Check("the built half is gone", AllTile(rect, TileType.Empty));
+        Check("and it was charged for the cells it cleared, not for the drag",
+            _economy.Balance == 0);
+
+        // Put the tool back the way the scene has it: bulldozing is free.
+        _bulldozeTool.CostPerCell = 0;
+        Check("the price comes back off again", _bulldozeTool.CostPerCell == 0);
+    }
+
+    /// <summary>
+    /// The account on its own, and the invariant that survives however a caller
+    /// is written: <see cref="Economy.TrySpend"/> refuses rather than going
+    /// negative, and money only ever comes <i>in</i> through
+    /// <see cref="Economy.Credit"/> — a negative spend is not a credit through
+    /// the wrong door, and a credit of nothing is a genuine no-op rather than a
+    /// balance write.
+    /// </summary>
+    private void CheckTheAccountItself()
+    {
+        _economy.SetBalance(100);
+        Check("afford is exact at the balance",
+            _economy.CanAfford(100) && !_economy.CanAfford(101));
+        Check("spending more than there is is refused", !_economy.TrySpend(101));
+        Check("a refused spend changes nothing", _economy.Balance == 100);
+        Check("spending what is there is allowed", _economy.TrySpend(100));
+        Check("which leaves exactly nothing, never less", _economy.Balance == 0);
+        Check("a free placement is allowed with an empty account", _economy.TrySpend(0));
+        Check("and moves nothing", _economy.Balance == 0);
+        Check("a negative spend is not a credit through the wrong door",
+            _economy.TrySpend(-50) && _economy.Balance == 0);
+
+        _economy.Credit(25);
+        Check("a credit puts money in", _economy.Balance == 25);
+        _economy.Credit(0);
+        Check("a refund of nothing is a no-op", _economy.Balance == 25);
+        _economy.Credit(-10);
+        Check("a negative credit is ignored, not a charge", _economy.Balance == 25);
+        Check("the readout tracks every one of those",
+            _moneyReadout.Text == Economy.Describe(25) && _economy.Text == _moneyReadout.Text);
+    }
+
+    /// <summary>
+    /// The bulldozer's refund seam, now wired to the account: whatever
+    /// <c>RefundFor</c> returns is credited, so the balance after a bulldoze is
+    /// the balance before plus <see cref="BulldozeTool.RefundTotal"/>'s change —
+    /// asserted in those terms, so it stays true the day M7 makes the seam pay.
+    /// Today it pays zero, which is why the balance does not move.
+    /// </summary>
+    private void CheckTheRefundSeamCreditsTheAccount()
+    {
+        Vector2I? run = FindCell(cell => IsFreeSoilLine(cell, cell + new Vector2I(2, 0)));
+        Check("found clear soil for a road to buy and then take away", run != null);
+        if (run is not { } from)
+        {
+            return;
+        }
+
+        Vector2I to = from + new Vector2I(2, 0);
+        int price = _tool.CostPerCell * WorldGrid.LineCells(from, to).Count;
+
+        _economy.SetBalance(WorkingBalance);
+        Check("the road goes down", Drag(_tool, from, to));
+        Check("buying it cost what the tool charges",
+            _economy.Balance == WorkingBalance - price);
+
+        int balanceBefore = _economy.Balance;
+        int refundedBefore = _bulldozeTool.RefundTotal;
+        int removalsBefore = _bulldozeTool.Removals.Count;
+        Check("the bulldozer takes it off again", Drag(_bulldozeTool, from, to));
+        int refunded = _bulldozeTool.RefundTotal - refundedBefore;
+
+        Check("the removals went through the seam",
+            _bulldozeTool.Removals.Count > removalsBefore);
+        Check("the balance moved by exactly what the seam returned",
+            _economy.Balance == balanceBefore + refunded);
+        Check("which is nothing today - refund economics are M7's",
+            refunded == 0 && _bulldozeTool.RefundTotal == 0);
+        Check("so clearing leaves the balance where it was",
+            _economy.Balance == balanceBefore);
+        Check("and the seam credits the same account the tools charge",
+            _bulldozeTool.Economy == _economy && _tool.Economy == _economy);
+    }
+
+    /// <summary>
+    /// The bulldozer's own question — "what would clearing these cells cost and
+    /// would it be allowed?" — asked straight through
+    /// <see cref="PlacementRules"/> with a budget, no tool and no account in
+    /// sight.
+    /// </summary>
+    private PlacementPlan RemovalPlan(IReadOnlyList<Vector2I> cells, PlacementBudget budget) =>
+        PlacementRules.Check(
+            _world,
+            cells,
+            PlacementRule.InBounds | PlacementRule.OccupiedCell,
+            TileType.Empty,
+            FootprintPolicy.AnyCell,
+            budget);
 
     /// <summary>Cells the tool's ghost currently draws in that colour.</summary>
     private static int CountGhost(BuildTool tool, Color color)

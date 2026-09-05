@@ -16,6 +16,14 @@ namespace Arable;
 /// </summary>
 public partial class FieldBuildTool : BuildTool
 {
+    /// <summary>
+    /// Clearing ground for farmland is priced per cell, and dearer than road:
+    /// a field is the thing that earns, so it should cost more than the track
+    /// to it. A placeholder like every price here — see
+    /// <see cref="BuildTool.CostPerCell"/>, which Main.tscn overrides.
+    /// </summary>
+    public FieldBuildTool() => CostPerCell = 10;
+
     protected override TileType PlacedTile => TileType.Field;
 
     /// <summary>

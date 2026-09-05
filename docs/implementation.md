@@ -2,7 +2,7 @@
 
 What exists in the codebase today and how it fits together. Companion to
 `tech.md` (the decisions) — this documents how those decisions were realized.
-Last updated: 2026-09-04.
+Last updated: 2026-09-05.
 
 ## Building & running
 
@@ -28,7 +28,8 @@ src/ui/            MenuController.cs (keyboard menu),
 src/ui/build/      BuildTool.cs (base for every placement tool), RoadBuildTool.cs,
                    FieldBuildTool.cs, StructureBuildTool.cs, BulldozeTool.cs
 src/world/         TileType.cs, WorldGrid.cs, PlacementRules.cs, Field.cs,
-                   Structure.cs, Removal.cs, Machine.cs
+                   Structure.cs, Removal.cs, Economy.cs (the player's money),
+                   Machine.cs
 src/dev/           smoke-test scripts backing scenes/dev
 ```
 
@@ -260,14 +261,16 @@ subclass that is not a copy of any of them: it removes instead of placing, and
 | `FootprintPolicy Policy` *(virtual, `EveryCell`)* | how the per-cell verdicts add up over a footprint: all-or-nothing for a build, `AnyCell` for the bulldozer |
 | `Color GhostColorFor(plan, i)` *(virtual)* | how the ghost paints cell `i`; overridden only where a legal plan does not act on every cell |
 
-**The tools that fill it in** (one row per subclass):
+**The tools that fill it in** (one row per subclass; `CostPerCell` is the
+exported price — see **Money and build costs**, and treat every number as a
+placeholder):
 
-| Tool | Menu key | Places | Rules | Footprint | `Apply` |
-|---|---|---|---|---|---|
-| `RoadBuildTool` | **1** | `Road` | `BuildableTerrain` + `NoOverlap` | `LineCells` — a stair-stepped line | default (stamps tiles) |
-| `FieldBuildTool` | **3** | `Field` | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
-| `StructureBuildTool` | **4** | `Structure` | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
-| `BulldozeTool` | **5** | nothing — it *removes* | `InBounds` + `OccupiedCell`, and `Policy` = `AnyCell` | `RectCells`, like the field tool | overridden: `WorldGrid.Clear` per cell, each removal through the refund seam |
+| Tool | Menu key | Places | Costs | Rules | Footprint | `Apply` |
+|---|---|---|---|---|---|---|
+| `RoadBuildTool` | **1** | `Road` | **5**/cell | `BuildableTerrain` + `NoOverlap` | `LineCells` — a stair-stepped line | default (stamps tiles) |
+| `FieldBuildTool` | **3** | `Field` | **10**/cell | `BuildableTerrain` + `VacantCell` | `RectCells` — the filled rectangle between the corners | overridden: `WorldGrid.MarkField`, which creates the `Field` entity as well as the tiles |
+| `StructureBuildTool` | **4** | `Structure` | **250** (its footprint is one cell) | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell alone (`NeedsAnchor` = false, so one click places) | overridden: `WorldGrid.PlaceStructure`, which creates the `Structure` entity as well as the tile |
+| `BulldozeTool` | **5** | nothing — it *removes* | **0** — taking something off is free | `InBounds` + `OccupiedCell`, and `Policy` = `AnyCell` | `RectCells`, like the field tool | overridden: `WorldGrid.Clear` per cell, each removal through the refund seam |
 
 **The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
 re-coding a check inside a tool):
@@ -305,9 +308,10 @@ re-coding a check inside a tool):
   individual cell — every per-cell verdict is `None`, so the ghost dims the
   whole placement (`GhostRefused`) instead of marking an offender.
 
-`PlacementRules.Check(world, cells, rules, placing, policy)` returns a
+`PlacementRules.Check(world, cells, rules, placing, policy, budget)` returns a
 `PlacementPlan`: the cells, a parallel array of per-cell `PlacementRefusal`s,
-and the one refusal that describes the whole placement. How those add up is
+the one refusal that describes the whole placement, and what committing it
+would cost. How those add up is
 the `FootprintPolicy`, and there are exactly two — because building and
 clearing genuinely want opposite answers about a mixed region, not because a
 tool might prefer one:
@@ -320,10 +324,15 @@ tool might prefer one:
 - `AnyCell` (the bulldozer, and only it): one passing cell is enough and the
   failing ones are skipped; the drag is refused only when there is nothing in
   it at all to remove. See **Bulldozing** for why that inversion is the right
-  answer there and how the ghost keeps it honest.
+  answer there and how the ghost keeps it honest. It is also what a placement
+  is *priced* on: an `AnyCell` drag pays for the cells it acts on and not for
+  the ground it merely crossed (**Money and build costs**).
 
-`PlacementRules.Explain(refusal)` gives the player-facing wording (a
-build-cost/HUD issue can reuse it).
+The `budget` (a `PlacementBudget`) is how **money** gets into that verdict
+rather than being tested afterwards — see **Money and build costs** below.
+
+`PlacementRules.Explain(refusal)` gives the player-facing wording, which the
+tools log on a refused click and a HUD can reuse.
 
 **What the player sees.** The blinking hover square is yellow
 (`BuildTool.CursorLegal`) or red (`CursorRefused`) by the verdict on the
@@ -542,6 +551,86 @@ random road paths and would simply fail to path next time — and it is left
 open rather than assumed away: the note lives on `WorldGrid.Clear`, where
 whoever writes M5's vehicles will be standing.
 
+**The refund seam is wired to the money now** — `Apply` credits whatever
+`RefundFor` returns to the `Economy` — and still pays zero, because zero is
+what `RefundFor` returns. See **Money and build costs**.
+
+### Money and build costs (`src/world/Economy.cs`)
+
+> **Building costs money, and "you cannot afford this" is a placement refusal
+> like any other** — decided with the rest of the verdict, so the ghost shows
+> it before the click instead of the click discovering it. Money itself is a
+> **stub number** until M7 gives it a market: this is the plumbing, not the
+> economy.
+
+`Economy` is a `Node` in `Main.tscn` and **the one thing that owns the
+balance**. Everything that moves money goes through it, so there is one number,
+one place it changes, and one thing to serialize when saves arrive:
+
+| Member | Meaning |
+|---|---|
+| `[Export] int StartingBalance` | what the player starts with (**5000**, a placeholder) |
+| `[Export] Label? Readout` | the HUD label the balance is written to; null is legal (no HUD, e.g. a dev scene) |
+| `int Balance` / `string Text` | the money, and what the readout says |
+| `bool CanAfford(int)` | whether that much could be spent right now |
+| `bool TrySpend(int)` | takes it out **or refuses and changes nothing** — the balance can never go negative however a caller is written; a spend of zero is a free no-op |
+| `void Credit(int)` | puts money in (refunds today, deliveries and sales later); non-positive is ignored, so the M7 stub's refund of 0 is a genuine no-op |
+| `void SetBalance(int)` | the write the other two share, and the seam a save-load — or a test that wants the player broke — uses |
+| `static string Describe(int)` | `"money: 5,000"`, `InvariantCulture` like the fertility readout, so a test can predict it |
+
+**Cost is a validation input, not a post-hoc check.** A tool's price
+(`BuildTool.CostPerCell`) and the current balance go into
+`PlacementRules.Check` as a `PlacementBudget` — a *value*, never a handle on
+the account, which is what keeps the evaluator the pure, node-state-free thing
+it was. `Check` prices the placement (`PlacementPlan.Cost`) and, when the total
+is out of reach, refuses it with `PlacementRefusal.CannotAfford` ("not enough
+money"). Everything downstream then works unchanged: the hover square goes red,
+the ghost dims, `ClickCell` rejects the click and logs the reason. Testing
+affordability inside `ClickCell` instead would have made the ghost lie — it
+would have shown a placement as legal that the click then refused — which is
+the whole reason the price lives in the plan.
+
+Like `TouchesRoad`, affordability is a property of the **whole placement**: a
+ten-cell road at five each costs fifty, and the player buys all of it or none
+of it, never "the cells that were individually affordable". No single cell is
+the offender either, so the ghost dims the placement and blames nobody. It is
+judged **last**, after every reason that is not about money, so a drag into
+water is refused for the water.
+
+**What a placement is priced for is the cells it acts on.** Under `EveryCell`
+that is the whole footprint — a build is all-or-nothing, so there is nothing
+else it could be. Under `AnyCell` it is only the cells that pass: a bulldoze
+drag crosses empty ground as a matter of course, and charging for cells nothing
+happens to would be charging for nothing.
+
+**Charged on commit, never on preview.** `ClickCell` spends `plan.Cost` on the
+second click (the first only anchors) and nothing else in the tool touches
+money. Previewing a placement — however long the drag is held, however often
+the ghost is recomputed — moves nothing. A refused click is free.
+
+**The knobs are exported and wired in `Main.tscn`**: `StartingBalance` on the
+`Economy` node, `CostPerCell` on each of the four tools, so tuning is an editor
+change and not a rebuild. Each tool's constructor carries the same placeholder
+so a code-built tool is priced too; the scene value wins. A tool with **no**
+`Economy` wired builds for **free** — that is "there is no money in this scene",
+not "the player is broke", and it is what keeps a dev scene or a rules-only
+test working exactly as before.
+
+**On screen**, the balance is a `Label` (`Hud/MoneyReadout`) in the **top-right
+corner**, anchored to the right edge and right-aligned, opposite the cell
+readout in the top-left; `Economy` writes it on every balance change.
+
+**Refunds still pay nothing, but the wiring is real.** `BulldozeTool.Apply`
+credits whatever `RefundFor(Removal)` returns to the `Economy`, so the day M7
+puts a fraction of a build cost in that one expression is the day refunds start
+appearing in the balance, with nothing else touched. `RefundTotal` is the
+running total of what it has paid — the number the balance can be held against
+(after a bulldoze the balance has moved by exactly that, which is how
+`BuildSmokeTest` asserts the seam rather than the amount).
+
+**Out of scope, deliberately**: earning money (M5's depot), prices moving (M7),
+wages (M5). Nothing yet puts money *in* except a refund of zero.
+
 ## Cell picking (`src/ui/CellPicker.cs`)
 
 One implementation of "which cell is under that pixel", shared by every
@@ -635,8 +724,8 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   origin, that an off-map pixel still resolves to its real coordinates and
   reads "off the map", and that menu key 2 switches the readout off and on.
 - **BuildSmokeTest** is where build mode (M2) is asserted, and where the rest
-  of M2 adds its checks: the `BuildTool` base, `PlacementRules`, the ghost, and
-  each tool in turn (364 assertions today).
+  of M2 adds its checks: the `BuildTool` base, `PlacementRules`, the ghost,
+  each tool in turn, and what a placement costs (463 assertions today).
   The **road tool** goes first, driven through the public cell API — menu key 1
   arms it, `HoverAt`/`ClickCell`/`Cancel` do the rest — covering **place**
   (anchor, all-legal ghost over the whole line, second click writes exactly
@@ -707,6 +796,30 @@ godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
   naming its kind, its entity, the cells actually freed and where the player
   hit it, across all three kinds — and a total refund of zero, the M7 stub
   doing exactly what it says.
+  **Money comes last of all**, because paying for a placement needs every tool
+  already proven. The starting balance is asserted before anything is built —
+  the exported number, the readout showing it, every tool wired to the one
+  account, and the readout's own rectangle on screen and clear of the cell
+  readout — and the balance is then set to a working million, so no assertion
+  about *legality* can fail for want of funds; every money check sets the
+  balance it is about. The checks: a drag priced as a **total** by the plan, a
+  preview that moves nothing however long it is held, and a commit that deducts
+  exactly `plan.Cost`; a building one coin short of its price refused as
+  `CannotAfford` with the ghost dimmed, no cell blamed, nothing built and the
+  balance untouched — then bought by the very same click once the money is
+  there, so it is the money and not the ground that changed; four cells of road
+  affordable at exactly their total while five are not, though every one of the
+  five is affordable on its own; the `AnyCell` rule asked straight through
+  `PlacementRules` with a budget (a half-built rectangle is priced for the cells
+  it clears, not for the ground it crosses, while a build is priced for its
+  whole footprint) and then through the bulldozer itself, with a price put on it
+  at runtime through the export — which is both the tunable knob and the only
+  way to watch an `AnyCell` footprint actually pay. Then the account's own
+  invariant (`TrySpend` refuses rather than going negative, a negative spend is
+  not a credit through the wrong door, a credit of zero is a no-op) and the
+  refund seam: after a bulldoze the balance has moved by exactly the change in
+  `RefundTotal` — asserted in those terms, so it stays true when M7 makes the
+  seam pay — which is zero today.
   It picks its cells by **searching the generated terrain at runtime**
   (nearest rock, a clear soil run, a soil run ending in water, a clear soil
   block for the rectangles, a strip running into rough ground, free soil
@@ -775,12 +888,15 @@ frames to PNG: `godot --path . --write-movie out/frame.png --fixed-fps 30
   dev code and tests want. Anything the *player* places goes through
   `BuildTool`, and therefore through `PlacementRules`.
 - Player interaction is the keyboard menu plus the road, field, structure and
-  bulldoze tools. The build palette and build costs are not written yet; they
-  are meant to be more `BuildTool` subclasses and assertions in
-  `BuildSmokeTest`.
+  bulldoze tools. The build palette is not written yet; it is meant to be more
+  `BuildTool` subclasses and assertions in `BuildSmokeTest`.
+- Money is a **stub number**: placements are charged and the balance is shown,
+  but nothing puts money *in* — earning is M5's depot, prices moving are M7's,
+  wages are M5's — and every price is a placeholder chosen to be tunable rather
+  than balanced (see **Money and build costs**).
 - Removing something refunds **nothing**, on purpose: `BulldozeTool.RefundFor`
-  has the shape of a refund and none of the economics, which are M7's — and
-  nothing has a build cost to give a fraction of yet anyway.
+  has the shape of a refund and none of the economics, which are M7's. What it
+  returns *is* credited to the `Economy` now, so only the number is missing.
 - Nothing stops a road being bulldozed out from under a machine that is driving
   it or has it in a route. That is a real case from M5, not an impossible one;
   the note sits on `WorldGrid.Clear`.
