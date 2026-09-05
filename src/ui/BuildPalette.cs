@@ -40,12 +40,13 @@ public enum ToolAvailability
 /// </summary>
 public sealed class PaletteEntry
 {
-    internal PaletteEntry(BuildTool tool, int slot, Button button, Label name, Label cost, Label key)
+    internal PaletteEntry(
+        BuildTool tool, int slot, Button button, TextureRect icon, Label cost, Label key)
     {
         Tool = tool;
         Slot = slot;
         Button = button;
-        NameLabel = name;
+        Icon = icon;
         CostLabel = cost;
         KeyLabel = key;
     }
@@ -63,14 +64,24 @@ public sealed class PaletteEntry
     /// <summary>The button itself — what a click lands on, and what M8 greys out.</summary>
     public Button Button { get; }
 
-    internal Label NameLabel { get; }
+    /// <summary>
+    /// The tool's picture, and the whole of what the button shows for
+    /// <i>which</i> tool it is — the name is on the tooltip instead.
+    /// </summary>
+    public TextureRect Icon { get; }
 
     internal Label CostLabel { get; }
 
     internal Label KeyLabel { get; }
 
-    /// <summary>What the button calls the tool.</summary>
-    public string NameText => NameLabel.Text;
+    /// <summary>
+    /// What the button calls the tool. It is no longer printed on the button —
+    /// the icon is what the player reads at a glance — but an icon bar still
+    /// has to be able to say what a picture means, so the name reaches the
+    /// player through <see cref="Button"/>'s tooltip and reaches code through
+    /// here. Refreshed off the tool, like everything else the entry shows.
+    /// </summary>
+    public string NameText { get; internal set; } = string.Empty;
 
     /// <summary>What the button says the tool costs — read from the tool, never hard-coded.</summary>
     public string CostText => CostLabel.Text;
@@ -128,11 +139,17 @@ public partial class BuildPalette : Control
     /// <summary>Distance from the bottom edge of the screen to the bar.</summary>
     private const float BottomMargin = 18f;
 
-    private const float ButtonWidth = 128f;
-    private const float ButtonHeight = 62f;
+    /// <summary>
+    /// Buttons are square: the tool is read as a picture now, and a picture has
+    /// no reason to be wider than it is tall.
+    /// </summary>
+    private const float ButtonSide = 72f;
+
     private const int ButtonSeparation = 8;
 
-    private const int NameFontSize = 15;
+    /// <summary>How much of the button the icon itself takes.</summary>
+    private const float IconSide = 34f;
+
     private const int CostFontSize = 12;
     private const int KeyFontSize = 11;
 
@@ -160,13 +177,15 @@ public partial class BuildPalette : Control
     private static readonly Color ArmedHoverBackground = new(1f, 0.87f, 0.38f, 1f);
     private static readonly Color ArmedBorder = new(1f, 0.95f, 0.65f, 1f);
 
-    private static readonly Color NameColor = new(0.94f, 0.95f, 0.98f);
+    // The icon tints are a modulate, which multiplies — which is why the source
+    // SVGs are white artwork. A dark glyph could not be lit up again.
+    private static readonly Color IconColor = new(0.94f, 0.95f, 0.98f);
     private static readonly Color CostColor = new(0.72f, 0.76f, 0.83f);
     private static readonly Color KeyColor = new(1f, 1f, 1f, 0.38f);
-    private static readonly Color ArmedNameColor = new(0.13f, 0.10f, 0.02f);
+    private static readonly Color ArmedIconColor = new(0.13f, 0.10f, 0.02f);
     private static readonly Color ArmedCostColor = new(0.32f, 0.24f, 0.04f);
     private static readonly Color ArmedKeyColor = new(0.32f, 0.24f, 0.04f);
-    private static readonly Color LockedNameColor = new(1f, 1f, 1f, 0.32f);
+    private static readonly Color LockedIconColor = new(1f, 1f, 1f, 0.32f);
     private static readonly Color LockedCostColor = new(1f, 1f, 1f, 0.22f);
 
     /// <summary>
@@ -377,7 +396,9 @@ public partial class BuildPalette : Control
     {
         foreach (PaletteEntry entry in _entries)
         {
-            entry.NameLabel.Text = DisplayNameOf(entry.Tool);
+            entry.NameText = DisplayNameOf(entry.Tool);
+            entry.Button.TooltipText = TooltipFor(entry.Tool, entry.Slot);
+            entry.Icon.Texture = entry.Tool.Icon;
             entry.CostLabel.Text = CostTextFor(entry.Tool);
 
             bool active = entry.Tool.Active;
@@ -392,8 +413,8 @@ public partial class BuildPalette : Control
 
             entry.Painted = (active, entry.Availability);
             bool locked = entry.Availability != ToolAvailability.Available;
-            entry.NameLabel.AddThemeColorOverride("font_color",
-                locked ? LockedNameColor : active ? ArmedNameColor : NameColor);
+            entry.Icon.SelfModulate =
+                locked ? LockedIconColor : active ? ArmedIconColor : IconColor;
             entry.CostLabel.AddThemeColorOverride("font_color",
                 locked ? LockedCostColor : active ? ArmedCostColor : CostColor);
             entry.KeyLabel.AddThemeColorOverride("font_color",
@@ -418,6 +439,16 @@ public partial class BuildPalette : Control
     /// with <see cref="CultureInfo.InvariantCulture"/> like the money readout,
     /// so the bar and the balance agree on every machine.
     /// </summary>
+    /// <summary>
+    /// What hovering the button says: the name the icon stands for, its price,
+    /// and the key that arms it. This is where the tool's name went when the
+    /// button became a picture, so it is built from the tool on every
+    /// <see cref="Refresh"/> rather than frozen at build time.
+    /// </summary>
+    private static string TooltipFor(BuildTool tool, int slot) => slot > 0
+        ? $"{DisplayNameOf(tool)} ({CostTextFor(tool)}) — key {slot}"
+        : $"{DisplayNameOf(tool)} ({CostTextFor(tool)})";
+
     private static string CostTextFor(BuildTool tool)
     {
         if (tool.CostPerCell == 0)
@@ -492,9 +523,10 @@ public partial class BuildPalette : Control
     }
 
     /// <summary>
-    /// One button: the tool's name and price stacked in the middle, the
-    /// accelerator key small in the top-right corner. The inner labels ignore
-    /// the mouse so every pixel of the button is the button.
+    /// One square button: the tool's icon over its price, with the accelerator
+    /// key small in the top-right corner and the tool's name on the tooltip.
+    /// The inner widgets ignore the mouse so every pixel of the button is the
+    /// button.
     /// </summary>
     private PaletteEntry MakeEntry(BuildTool tool, int index)
     {
@@ -506,7 +538,7 @@ public partial class BuildPalette : Control
             // Nothing on this bar should keep keyboard focus: a focused button
             // would draw a focus ring in every screenshot after the first click.
             FocusMode = FocusModeEnum.None,
-            CustomMinimumSize = new Vector2(ButtonWidth, ButtonHeight),
+            CustomMinimumSize = new Vector2(ButtonSide, ButtonSide),
         };
         button.AddThemeStyleboxOverride("normal", _idleStyle);
         button.AddThemeStyleboxOverride("hover", _hoverStyle);
@@ -517,10 +549,10 @@ public partial class BuildPalette : Control
 
         var padding = new MarginContainer { MouseFilter = MouseFilterEnum.Ignore };
         padding.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        padding.AddThemeConstantOverride("margin_left", 11);
-        padding.AddThemeConstantOverride("margin_right", 11);
-        padding.AddThemeConstantOverride("margin_top", 8);
-        padding.AddThemeConstantOverride("margin_bottom", 8);
+        padding.AddThemeConstantOverride("margin_left", 6);
+        padding.AddThemeConstantOverride("margin_right", 6);
+        padding.AddThemeConstantOverride("margin_top", 7);
+        padding.AddThemeConstantOverride("margin_bottom", 7);
         button.AddChild(padding);
 
         var column = new VBoxContainer
@@ -528,22 +560,45 @@ public partial class BuildPalette : Control
             MouseFilter = MouseFilterEnum.Ignore,
             Alignment = BoxContainer.AlignmentMode.Center,
         };
-        column.AddThemeConstantOverride("separation", 1);
+        column.AddThemeConstantOverride("separation", 3);
         padding.AddChild(column);
 
-        var nameLabel = new Label
+        // KeepAspectCentered, so an icon whose source is not square is letter-
+        // boxed rather than stretched into a different shape than it was drawn.
+        var icon = new TextureRect
         {
-            Name = "ToolName",
-            Text = DisplayNameOf(tool),
+            Name = "ToolIcon",
+            Texture = tool.Icon,
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            CustomMinimumSize = new Vector2(IconSide, IconSide),
             MouseFilter = MouseFilterEnum.Ignore,
         };
-        nameLabel.AddThemeFontSizeOverride("font_size", NameFontSize);
-        column.AddChild(nameLabel);
+        column.AddChild(icon);
+
+        // A tool with no icon wired still has to be identifiable, so the name
+        // takes the icon's place rather than leaving a blank square.
+        if (tool.Icon == null)
+        {
+            var fallback = new Label
+            {
+                Name = "ToolNameFallback",
+                Text = DisplayNameOf(tool),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+                MouseFilter = MouseFilterEnum.Ignore,
+            };
+            fallback.AddThemeFontSizeOverride("font_size", CostFontSize);
+            fallback.AddThemeColorOverride("font_color", IconColor);
+            icon.AddChild(fallback);
+            fallback.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        }
 
         var costLabel = new Label
         {
             Name = "ToolCost",
             Text = CostTextFor(tool),
+            HorizontalAlignment = HorizontalAlignment.Center,
             MouseFilter = MouseFilterEnum.Ignore,
         };
         costLabel.AddThemeFontSizeOverride("font_size", CostFontSize);
@@ -566,9 +621,7 @@ public partial class BuildPalette : Control
         keyLabel.AddThemeFontSizeOverride("font_size", KeyFontSize);
         button.AddChild(keyLabel);
 
-        button.TooltipText = slot <= LastKeySlot
-            ? $"{DisplayNameOf(tool)} ({CostTextFor(tool)}) — key {slot}"
-            : $"{DisplayNameOf(tool)} ({CostTextFor(tool)})";
+        button.TooltipText = TooltipFor(tool, slot <= LastKeySlot ? slot : 0);
 
         // The button takes the same path a test or a key takes. It is the only
         // thing the click knows how to do, which is why the bar cannot end up
@@ -576,7 +629,10 @@ public partial class BuildPalette : Control
         button.Pressed += () => Toggle(index);
 
         return new PaletteEntry(tool, slot <= LastKeySlot ? slot : 0,
-            button, nameLabel, costLabel, keyLabel);
+            button, icon, costLabel, keyLabel)
+        {
+            NameText = DisplayNameOf(tool),
+        };
     }
 
     private static StyleBoxFlat ButtonStyle(Color background, Color border, int borderWidth)

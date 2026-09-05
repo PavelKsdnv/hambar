@@ -86,6 +86,15 @@ public abstract partial class BuildTool : Node3D
     [Export] public string DisplayName { get; set; } = string.Empty;
 
     /// <summary>
+    /// The tool's picture on the build palette, wired in Main.tscn. Read off
+    /// the tool for the same reason its name and price are: putting the M5 silo
+    /// or the M6 mill on the bar should be wiring, not a change to the palette.
+    /// A tool with no icon still gets a button — the palette falls back to its
+    /// name — so a half-wired scene degrades instead of breaking.
+    /// </summary>
+    [Export] public Texture2D? Icon { get; set; }
+
+    /// <summary>
     /// What one cell of this tool's footprint costs to place. A ten-cell road
     /// costs ten times this; a single-click tool's footprint is one cell, so
     /// for those it is simply the price of the thing.

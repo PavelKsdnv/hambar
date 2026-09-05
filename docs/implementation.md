@@ -239,10 +239,23 @@ bar itself is built in **code** from the exported `Tools` list — the four tool
 in bar order, wired in the scene, so the order is a design decision and not an
 accident of tree order. Putting M5's silo on the bar is adding it to that list.
 
-Each button reads both of the things it says **off the tool**: `DisplayName` and
-`CostPerCell` are `[Export]`s on `BuildTool`, so renaming or repricing a tool in
-the editor moves the label, and the bar can never quote a number the click does
-not charge. How the price is worded follows how the tool charges — a drag tool
+Buttons are **square and icon-led**: each shows the tool's picture over its
+price, with the accelerator digit in the corner. The tool's name is not printed
+— the icon is what the player reads at a glance — so it moves to the button's
+tooltip, which names the tool, its price and its key.
+
+Each button reads everything it shows **off the tool**: `DisplayName`, `Icon`
+and `CostPerCell` are `[Export]`s on `BuildTool`, so renaming, re-picturing or
+repricing a tool in the editor moves the button, and the bar can never quote a
+number the click does not charge. A tool with no icon wired falls back to its
+name in the icon's place, so a half-wired scene degrades instead of showing a
+blank square.
+
+Icons live in `assets/icons/toolbar/` as SVGs and are tinted per state — light
+on an idle button, dark on the armed amber, dimmed when locked. The tint is a
+*modulate*, which multiplies, so **the source artwork has to be white**: a dark
+glyph would stay dark whatever colour it were given. The four icons were
+recoloured to white on import for exactly that reason. How the price is worded follows how the tool charges — a drag tool
 reads `5 / cell`, a single-click tool `250`, and a tool that costs nothing says
 `free` rather than showing a zero. Amounts are grouped with
 `InvariantCulture`, like the money readout, so the bar and the balance agree on

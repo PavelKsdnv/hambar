@@ -379,6 +379,8 @@ public partial class BuildSmokeTest : Node
         Check("there is no entry off either end of the bar",
             _palette.Entry(-1) == null && _palette.Entry(_palette.Count) == null);
 
+        CheckPaletteDrawsToolIcons();
+
         // Both of the things a button says come off the tool it stands for, so
         // renaming or repricing one in the editor moves its button.
         Check("every button names its tool",
@@ -423,6 +425,78 @@ public partial class BuildSmokeTest : Node
         }
         GD.Print($"build palette: {bar} on a {screen.Size} screen; buttons "
             + string.Join(", ", buttons));
+    }
+
+    /// <summary>
+    /// The button shows the tool's picture, tinted for the state it is in.
+    /// Icons come off the tool the way its name and price do, and this scene
+    /// instantiates Main.tscn, so what it checks is the bar the player gets.
+    /// Clearing one afterwards covers the other half: a tool with no picture
+    /// has to stay identifiable rather than become a blank square.
+    ///
+    /// The tint is a <i>modulate</i>, which multiplies, so it only works on
+    /// white artwork; a dark glyph would stay dark however it were tinted.
+    /// Asserting the armed and idle tints sit on opposite sides of mid-grey is
+    /// what would catch someone dropping a dark icon into the bar.
+    /// </summary>
+    private void CheckPaletteDrawsToolIcons()
+    {
+        PaletteEntry? road = _palette.Entry(RoadEntry);
+        if (road == null)
+        {
+            Check("the palette has a road entry to draw", false);
+            return;
+        }
+
+        // Main.tscn wires a picture to every tool, so the bar this scene builds
+        // is the bar the player gets.
+        Check("every tool on the bar carries an icon",
+            AllEntries(entry => entry.Tool.Icon != null));
+        Check("every button draws the icon its own tool carries",
+            AllEntries(entry => entry.Icon.Texture == entry.Tool.Icon));
+        Check("the buttons are square, now that a picture is what they show",
+            AllEntries(entry => Mathf.IsEqualApprox(
+                entry.Button.Size.X, entry.Button.Size.Y)));
+        Check("the tool still knows the name the button no longer prints",
+            road.NameText == _tool.DisplayName && road.NameText.Length > 0);
+        Check("hovering says what the picture means, with its price and key",
+            road.Button.TooltipText.Contains(_tool.DisplayName)
+            && road.Button.TooltipText.Contains(road.CostText));
+
+        _palette.Select(RoadEntry);
+        _palette.Refresh();
+        Color armed = road.Icon.SelfModulate;
+        _palette.Deselect();
+        _palette.Refresh();
+        Color idle = road.Icon.SelfModulate;
+
+        Check("the armed button tints its icon differently from an idle one",
+            armed != idle);
+        Check("the idle tint is light, to read on a dark button", idle.Luminance > 0.5f);
+        Check("the armed tint is dark, to read on the amber fill", armed.Luminance < 0.5f);
+
+        _palette.SetAvailability(RoadEntry, ToolAvailability.Locked);
+        _palette.Refresh();
+        Check("a locked entry dims its icon rather than hiding it",
+            road.Icon.SelfModulate.A < idle.A);
+        _palette.SetAvailability(RoadEntry, ToolAvailability.Available);
+
+        // A tool with no picture wired must still be identifiable rather than a
+        // blank square — the half of the palette Main.tscn does not exercise.
+        Texture2D? wired = _tool.Icon;
+        _tool.Icon = null;
+        _palette.Refresh();
+        Check("clearing a tool's icon takes it off the button too",
+            road.Icon.Texture == null);
+        Check("a tool with no icon still names itself somewhere",
+            road.NameText == _tool.DisplayName
+            && road.Button.TooltipText.Contains(_tool.DisplayName));
+
+        // Put it back: every later section builds roads through this bar.
+        _tool.Icon = wired;
+        _palette.Refresh();
+        Check("the icon goes back on when the tool carries one again",
+            road.Icon.Texture == wired);
     }
 
     /// <summary>

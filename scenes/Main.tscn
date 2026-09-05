@@ -1,4 +1,4 @@
-[gd_scene load_steps=16 format=3]
+[gd_scene load_steps=20 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
@@ -12,6 +12,10 @@
 [ext_resource type="Script" path="res://src/ui/build/BulldozeTool.cs" id="10_bulldozetool"]
 [ext_resource type="Script" path="res://src/world/Economy.cs" id="11_economy"]
 [ext_resource type="Script" path="res://src/ui/BuildPalette.cs" id="12_palette"]
+[ext_resource type="Texture2D" path="res://assets/icons/toolbar/road.svg" id="13_icon_road"]
+[ext_resource type="Texture2D" path="res://assets/icons/toolbar/field.svg" id="14_icon_field"]
+[ext_resource type="Texture2D" path="res://assets/icons/toolbar/structure.svg" id="15_icon_structure"]
+[ext_resource type="Texture2D" path="res://assets/icons/toolbar/bulldozer.svg" id="16_icon_bulldozer"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -53,6 +57,7 @@ script = ExtResource("6_roadtool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
 DisplayName = "Road"
+Icon = ExtResource("13_icon_road")
 CostPerCell = 5
 
 [node name="FieldTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
@@ -60,6 +65,7 @@ script = ExtResource("8_fieldtool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
 DisplayName = "Field"
+Icon = ExtResource("14_icon_field")
 CostPerCell = 10
 
 [node name="StructureTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
@@ -67,6 +73,7 @@ script = ExtResource("9_structuretool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
 DisplayName = "Structure"
+Icon = ExtResource("15_icon_structure")
 CostPerCell = 250
 
 [node name="BulldozeTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
@@ -74,6 +81,7 @@ script = ExtResource("10_bulldozetool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
 DisplayName = "Bulldoze"
+Icon = ExtResource("16_icon_bulldozer")
 CostPerCell = 0
 
 [node name="Hud" type="CanvasLayer" parent="."]
