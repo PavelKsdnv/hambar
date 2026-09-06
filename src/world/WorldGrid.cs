@@ -134,6 +134,9 @@ public partial class WorldGrid : Node3D, IHashableState
     private int _halfExtent = -1;
 
     private RandomStreams? _streams;
+
+    // Only ever used when there is no Simulation to ask; see Streams.
+    private RandomStreams? _fallbackStreams;
     private RandomStream _spawnRng = null!;
     private int _machinesSpawned;
 
@@ -197,7 +200,15 @@ public partial class WorldGrid : Node3D, IHashableState
             {
                 GD.PushWarning("WorldGrid: no Simulation in the tree; "
                     + "world randomness falls back to a private registry.");
-                fromSim = new RandomStreams();
+                // Deliberately not cached into _streams: an access from outside
+                // the tree must not decide the world's randomness for the rest
+                // of the run. Caching it here would leave _Ready building the
+                // world from a registry the Simulation does not own, and so
+                // outside SimStateHash — a world whose rolls are invisible to
+                // the determinism harness, which would still happily pass.
+                // The caveat that remains: a reseed made before the world
+                // enters the tree lands on this registry and is dropped.
+                return _fallbackStreams ??= new RandomStreams();
             }
             return _streams = fromSim;
         }

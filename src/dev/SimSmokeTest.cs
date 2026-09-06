@@ -87,14 +87,18 @@ public partial class SimSmokeTest : Node
                 _settle = SettleFrames;
                 break;
             case 1:
-                _first = Run("run 1", 0, probeWorldState: true);
+                CheckWorldTakesTheSimsStreams();
                 _settle = SettleFrames;
                 break;
             case 2:
-                _second = Run("run 2", 0);
+                _first = Run("run 1", 0, probeWorldState: true);
                 _settle = SettleFrames;
                 break;
             case 3:
+                _second = Run("run 2", 0);
+                _settle = SettleFrames;
+                break;
+            case 4:
                 _otherSeed = Run("run 3", 1);
                 _settle = SettleFrames;
                 break;
@@ -104,6 +108,44 @@ public partial class SimSmokeTest : Node
                 GetTree().Quit(_failed ? 1 : 0);
                 break;
         }
+    }
+
+    /// <summary>
+    /// A world reads its randomness from the <c>Simulation</c>, even when
+    /// something asked it for a seed before it was in the tree.
+    ///
+    /// The reason this is worth a check of its own: the answer to "which
+    /// registry" decides whether the world's rolls are inside
+    /// <see cref="SimStateHash"/> at all, and getting it wrong is invisible to
+    /// every other test here. A world running on a private registry is still
+    /// perfectly deterministic — both runs build the same private registry from
+    /// the same seed — so the comparison below would go on passing while
+    /// quietly hashing none of the world's randomness. A determinism harness
+    /// that has stopped watching is worse than none.
+    /// </summary>
+    private void CheckWorldTakesTheSimsStreams()
+    {
+        Node main = GD.Load<PackedScene>("res://scenes/Main.tscn").Instantiate();
+        var sim = main.GetNode<Simulation>("Sim");
+        var world = main.GetNode<WorldGrid>("World");
+
+        // The access the lazy resolve exists to tolerate: there is no tree yet,
+        // so there is no Simulation to find. Whatever it answers here must not
+        // become the world's registry for the rest of the run.
+        int seedWhileDetached = world.WorldSeed;
+        sim.WorldSeed = seedWhileDetached + 4242;
+        world.MachineCount = 0;
+        AddChild(main);
+
+        Check("a world asked for its seed before the tree still takes the sim's",
+            world.WorldSeed == sim.WorldSeed && world.WorldSeed != seedWhileDetached);
+        // _Ready opens both of the world's streams. They have to have been
+        // opened on the sim's registry, which is the one the walker hashes.
+        Check("and the streams it opened are on the hashed registry",
+            sim.Streams.Has(WorldGrid.SpawnStreamName)
+            && sim.Streams.Has(MachineSystem.StreamName));
+
+        main.QueueFree();
     }
 
     /// <summary>
@@ -152,6 +194,33 @@ public partial class SimSmokeTest : Node
         sim.SetSpeed(2);
         Check("the speed setting is not sim state", SimStateHash.Of(sim) == ticked);
         sim.SetSpeed(0);
+
+        // A speed that is not a number at all. Infinity is the dangerous one:
+        // it is neither NaN nor negative, so it slips past a bare NaN check,
+        // and it does not merely run fast — it makes the accumulator infinite
+        // for good, since taking any finite backlog off infinity leaves
+        // infinity. The clock would then tick the per-frame cap every frame
+        // forever and overflow DroppedTicks through a saturating cast.
+        var poisoned = new SimClock();
+        foreach (double bad in new[]
+                 { double.PositiveInfinity, double.NegativeInfinity, double.NaN, -1.0 })
+        {
+            poisoned.Speed = bad;
+            Check($"a speed of {bad} is refused", poisoned.Speed == 0.0);
+        }
+
+        poisoned.Speed = double.PositiveInfinity;
+        poisoned.Advance(1.0);
+        poisoned.Speed = 1.0;
+        Check("and having been refused, it left the clock usable",
+            poisoned.Advance(poisoned.TickDelta) == 1 && poisoned.DroppedTicks == 0);
+
+        // The other door into the same arithmetic.
+        var deltaPoisoned = new SimClock { Speed = 1.0 };
+        deltaPoisoned.Advance(double.PositiveInfinity);
+        Check("an infinite frame delta is ignored rather than banked",
+            deltaPoisoned.TickCount == 0 && deltaPoisoned.DroppedTicks == 0
+            && deltaPoisoned.Advance(deltaPoisoned.TickDelta) == 1);
 
         // Registration order. Two sources, registered both ways round: the walk
         // over them is a fold, so the order cannot reach the result. This is

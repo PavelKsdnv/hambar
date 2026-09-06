@@ -58,14 +58,22 @@ public sealed class SimClock
     /// snapping, and a paused world holds still rather than creeping on a stale
     /// blend.
     ///
-    /// Negative and NaN are clamped to 0 rather than rejected: the setter's
-    /// callers are UI and inspector exports, and a paused game is a safer
-    /// answer to a bad number than time running backwards.
+    /// Negative and non-finite values are clamped to 0 rather than rejected:
+    /// the setter's callers are UI and inspector exports, and a paused game is
+    /// a safer answer to a bad number than time running backwards.
+    ///
+    /// <b>Infinity has to be caught here, not later.</b> It is not NaN and not
+    /// negative, so a bare NaN check lets it through, and one infinite speed
+    /// poisons <see cref="Advance"/> permanently: the accumulator goes infinite
+    /// and stays there (subtracting any finite backlog from ∞ leaves ∞), so
+    /// every frame afterwards runs exactly <see cref="MaxTicksPerFrame"/> ticks
+    /// and the saturating <c>(long)</c> conversion overflows
+    /// <see cref="DroppedTicks"/>. There is no recovery short of a new clock.
     /// </summary>
     public double Speed
     {
         get => _speed;
-        set => _speed = double.IsNaN(value) || value < 0.0 ? 0.0 : value;
+        set => _speed = !double.IsFinite(value) || value < 0.0 ? 0.0 : value;
     }
 
     /// <summary>Whether the schedule is stopped — no tick will run until <see cref="Speed"/> moves.</summary>
@@ -127,7 +135,9 @@ public sealed class SimClock
     /// </summary>
     public int Advance(double realDelta)
     {
-        if (realDelta > 0.0 && !double.IsNaN(realDelta))
+        // Finite, not merely non-NaN: an infinite delta poisons the
+        // accumulator exactly the way an infinite Speed does.
+        if (realDelta > 0.0 && double.IsFinite(realDelta))
         {
             _accumulator += realDelta * _speed;
         }
