@@ -145,6 +145,12 @@ public partial class ScreenshotTest : Node
         // every earlier view should photograph the world it always did.
         await ShowCropStages(main, rig);
 
+        // The field panel, which nothing before it can show: it is only on
+        // screen while something is selected, and only a field with a crop in
+        // the ground gives it numbers to print. It reads the fields the section
+        // above grew, so it costs one selection and two frames.
+        await ShowFieldPanel(main, rig);
+
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
     }
@@ -336,6 +342,67 @@ public partial class ScreenshotTest : Node
         await ZoomTo(rig, ZoomOutSteps - ZoomOutSteps / 2, zoomIn: false);
         Capture("17-crop-stages-far",
             $"the same six at the rig's far limit — ortho size {Zoom(rig):0.0}");
+    }
+
+    /// <summary>
+    /// The field panel, open on a field, in the two states a still picture can
+    /// tell apart: counting down, and stalled. Both are claims about pixels —
+    /// that the numbers are legible over the world, and that a crop banking
+    /// nothing prints the word "stalled" where a countdown would otherwise be.
+    ///
+    /// <b>Selected, not clicked.</b> There is no cursor in a screenshot run, so
+    /// the selection is made through the panel's own door with an explicit
+    /// cell, exactly as the hover readout is pinned to an explicit pixel.
+    ///
+    /// <b>The stall is real.</b> The date is moved into winter, where the
+    /// shipped season table is zero, rather than a stalled state being written
+    /// in — the same "set the date rather than wait for it" move the time
+    /// controls' view makes. It is put back afterwards.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowFieldPanel(Node main, CameraRig rig)
+    {
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var sim = main.GetNodeOrNull<Simulation>("Sim");
+        var panel = main.GetNodeOrNull<FieldInspector>("Hud/FieldInspector");
+        if (world == null || sim == null || panel == null)
+        {
+            GD.Print("FAIL: field panel — no World, Sim or FieldInspector in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        // The field that is mid-growth, so the panel has a countdown to print
+        // rather than a dash. Asked of the world, never taken by index.
+        Field? found = null;
+        foreach (Field field in world.Fields)
+        {
+            if (world.Crops.StageOf(field.Crop) == CropStage.Growing)
+            {
+                found = field;
+                break;
+            }
+        }
+
+        if (found is not { } subject)
+        {
+            GD.Print("FAIL: field panel — no growing field to open it on");
+            _failed = true;
+            return;
+        }
+
+        panel.Select(subject.Cells[0]);
+        rig.Position = world.CellToWorld(subject.Cells[0]);
+        await ZoomTo(rig, ZoomOutSteps, zoomIn: true);
+        Capture("18-field-panel",
+            $"panel open on {panel.TitleText} — stage {panel.StageText}, "
+            + $"next {panel.TimingText}, yield {panel.YieldText}, stored {panel.StoredText}");
+
+        sim.Calendar.SetDate(1, Season.Winter, 1);
+        await Settle(0.3f);
+        Capture("19-field-panel-stalled",
+            $"the same field with its growth rate at zero — next {panel.TimingText}, "
+            + $"stage still {panel.StageText}");
+        sim.Calendar.SetDate(1, Season.Spring, 1);
     }
 
     /// <summary>

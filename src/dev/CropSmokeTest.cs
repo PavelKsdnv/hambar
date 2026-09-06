@@ -63,10 +63,12 @@ public partial class CropSmokeTest : Node
     /// </summary>
     private const int SearchRadius = 24;
 
+    private Node _main = null!;
     private WorldGrid _world = null!;
     private GridMap _gridMap = null!;
     private Simulation _sim = null!;
     private CropSystem _crops = null!;
+    private FieldInspector _panel = null!;
     private Field? _field;
 
     /// <summary>Every stage the field was seen in, in order — the sequence asserted at the end.</summary>
@@ -86,6 +88,9 @@ public partial class CropSmokeTest : Node
     /// in the buffer days later — a projection that drifts is worse than none.
     /// </summary>
     private int _promised;
+
+    /// <summary>Rendered frames since the run started — see <see cref="_Process"/>.</summary>
+    private int _frame;
 
     private bool _done;
     private bool _failed;
@@ -108,28 +113,59 @@ public partial class CropSmokeTest : Node
         world.CropSeasonGrowth = [1f, 1f, 1f, 1f];
         AddChild(main);
 
+        _main = main;
         _world = world;
         _gridMap = world.GetNode<GridMap>("GridMap");
         _sim = main.GetNode<Simulation>("Sim");
         _crops = world.Crops;
+        _panel = main.GetNode<FieldInspector>("Hud/FieldInspector");
 
         // Nothing may tick from the wall clock: from here every tick is one
         // this test asked for.
         _sim.SetSpeed(0);
     }
 
+    /// <summary>
+    /// Two passes. The lifecycle runs on the first frame, because none of it
+    /// waits for anything the view does. The field panel waits a few frames
+    /// more: where its box sits on screen is one of the claims asserted about
+    /// it, and a container has not laid itself out on the frame it was built
+    /// on. That is the one wait in this file counted in <i>frames</i> rather
+    /// than in ticks, and it is about the HUD rather than about the sim.
+    /// </summary>
     public override void _Process(double delta)
     {
         if (_done)
         {
             return;
         }
-        _done = true;
 
+        _frame++;
+        if (_frame == 1)
+        {
+            CheckTheCropLifecycle();
+            return;
+        }
+        if (_frame < 5 || _done)
+        {
+            return;
+        }
+
+        _done = true;
+        CheckTheFieldPanelReportsTheField();
+
+        GD.Print(_failed ? "CROP SMOKE TEST FAILED" : "CROP SMOKE TEST PASSED");
+        GetTree().Quit(_failed ? 1 : 0);
+    }
+
+    /// <summary>Everything the field itself does, from marked ground to stubble.</summary>
+    private void CheckTheCropLifecycle()
+    {
         CheckANewFieldStartsFallow();
         if (_field == null)
         {
             // Nothing below can say anything without a field to say it about.
+            _done = true;
             GD.Print("CROP SMOKE TEST FAILED");
             GetTree().Quit(1);
             return;
@@ -154,9 +190,6 @@ public partial class CropSmokeTest : Node
         CheckFertilityIsAveragedByChunk();
         CheckAFertileFieldOutgrowsAPoorOne();
         CheckAZeroFactorStallsTheCrop();
-
-        GD.Print(_failed ? "CROP SMOKE TEST FAILED" : "CROP SMOKE TEST PASSED");
-        GetTree().Quit(_failed ? 1 : 0);
     }
 
     /// <summary>
@@ -802,6 +835,177 @@ public partial class CropSmokeTest : Node
     }
 
     /// <summary>
+    /// <b>The field panel, read for a field whose state this test set.</b> The
+    /// numbers on it are the milestone's promise to the player, so they are
+    /// asserted the way any other output is — not merely that the panel opens.
+    ///
+    /// Two of them are the whole reason the section exists. The countdown is
+    /// checked against the field's <i>own</i> rate rather than the nominal
+    /// schedule, and then against reality: the run steps the ticks the panel
+    /// promised and requires the field to still be waiting a few ticks before
+    /// them and to have moved on a few ticks after. And a crop banking nothing
+    /// has to come back <b>stalled</b> with no countdown at all — a zero rate
+    /// turned into a division is how a panel ends up promising a harvest in
+    /// eight thousand days.
+    ///
+    /// The ground is searched, like every other cell in this file, and the best
+    /// patch within reach is taken so the waits stay short.
+    /// </summary>
+    private void CheckTheFieldPanelReportsTheField()
+    {
+        Check("the panel starts closed, because nothing is selected",
+            !_panel.IsOpen && !_panel.Panel.Visible && _panel.Current == null);
+
+        (Vector2I Rich, Vector2I Poor)? ground = FindRichAndPoorRects();
+        Check("the map has ground for the panel's field, and bare ground beside it",
+            ground != null);
+        if (ground is not { } patch)
+        {
+            return;
+        }
+
+        Field? marked = MarkRect(patch.Rich);
+        Check("the panel's field is marked", marked != null);
+        if (marked is not { } field)
+        {
+            return;
+        }
+
+        EntityId row = field.Crop;
+        Camera3D? camera = GetViewport().GetCamera3D();
+        Check("there is a camera to click through", camera != null);
+        if (camera == null)
+        {
+            ClearAll(field);
+            return;
+        }
+
+        // Selection is a click, and a click is a pixel: this goes through the
+        // shared CellPicker, so what the panel opens on is what the cursor was
+        // over. Headless has no cursor, so the cell's own pixel is projected
+        // and driven back through the picker, as the hover readout's test does.
+        Vector2 pixel = camera.UnprojectPosition(_world.CellToWorld(field.Cells[0]));
+        Check("clicking a field cell selects that field",
+            _panel.SelectAt(pixel) == field && _panel.Selected == field);
+        Check("the panel opens, and titles itself with the field",
+            _panel.IsOpen && _panel.Panel.Visible && _panel.TitleText == field.Name);
+
+        // A view, and only a view: opening and repainting it moves no sim state.
+        ulong before = HashOf(_crops);
+        _panel.Refresh();
+        Check("reading the panel changes nothing in the sim", HashOf(_crops) == before);
+
+        // Where the box sits is a visual claim, so it is checked as one — the
+        // same way the money readout and the palette bar are.
+        Rect2 screen = GetViewport().GetVisibleRect();
+        Rect2 box = _panel.Panel.GetGlobalRect();
+        Check("the whole panel is on screen", screen.Encloses(box));
+        Check("it does not cover the cell readout",
+            !box.Intersects(_main.GetNode<Label>("Hud/CellReadout").GetGlobalRect()));
+        Check("it does not cover the build palette",
+            !box.Intersects(_main.GetNode<BuildPalette>("Hud/BuildPalette").Bar.GetGlobalRect()));
+        GD.Print($"field panel: {box} on a {screen.Size} screen");
+
+        Check("a field nobody has worked reads as fallow", _panel.StageText == "fallow");
+        Check("nothing counts down on it, because only work moves it on",
+            _panel.Current?.NextStage == null && _panel.TimingText == "—");
+        Check("and it promises no yield, rather than a yield of nothing",
+            _panel.Current?.Yield == 0 && _panel.YieldText == "—");
+        Check("its buffer is named as empty and not as absent",
+            _panel.StoredText == $"0 / {Output(row).Capacity}");
+
+        // Sown: the first countdown. DaysToSprout is the nominal figure; the
+        // ground is not perfect, so the honest answer is strictly longer.
+        _crops.Plough(row);
+        _crops.Sow(row);
+        _panel.Refresh();
+        FieldReport sown = _panel.Current!.Value;
+        float rate = _crops.GrowthPerTick(row);
+        float owed = (_crops.TicksToSprout - _crops.GrowthOf(row)) / rate / _crops.TicksPerDay;
+        Check("a sown field counts down to sprouting",
+            sown.NextStage == CropStage.Growing && sown.CountingDown && sown.Stalled == false);
+        Check("the countdown is the days its own rate needs", Near(sown.DaysRemaining, owed));
+        Check("which on ground that is not perfect is longer than the nominal schedule",
+            _crops.FertilityOf(row) >= 1f || sown.DaysRemaining > _crops.DaysToSprout);
+        Check("and the panel says so in days",
+            _panel.TimingText.StartsWith("growing in ") && _panel.TimingText.EndsWith(" days"));
+        GD.Print($"panel on a sown field: stage \"{_panel.StageText}\", "
+            + $"next \"{_panel.TimingText}\", yield \"{_panel.YieldText}\"");
+
+        // The countdown against reality, which is the only check that catches a
+        // number that is self-consistent and wrong.
+        int eta = (int)Math.Ceiling(sown.DaysRemaining * _crops.TicksPerDay);
+        _sim.Step(Math.Max(1, eta - 6));
+        Check("the field has not sprouted a few ticks before the panel said it would",
+            _crops.StageOf(row) == CropStage.Sown);
+        _sim.Step(12);
+        Check("and has sprouted a few ticks after", _crops.StageOf(row) == CropStage.Growing);
+
+        _panel.Refresh();
+        FieldReport growing = _panel.Current!.Value;
+        Check("a growing field counts down to ripe, without being told to refresh",
+            growing.NextStage == CropStage.Harvestable && _panel.StageText == "growing"
+            && growing.DaysRemaining > 0f);
+        Check("the projected yield is the harvest's own number, not a second formula",
+            growing.Yield == _crops.ProjectedYield(row)
+            && growing.Yield == ExpectedYield(_crops, row)
+            && _panel.YieldText == $"{growing.Yield} {_crops.HarvestItem.Name}");
+
+        // Stalled. Dead ground is the factor the world can actually move under a
+        // standing crop; which factor it is does not matter, and the panel is
+        // not allowed to say anyway.
+        float wasFertile = _crops.FertilityOf(row);
+        _crops.SetGround(row, 0f, field.CellCount);
+        _panel.Refresh();
+        FieldReport stalled = _panel.Current!.Value;
+        Check("a crop banking nothing is reported stalled",
+            stalled.Stalled && !stalled.CountingDown && _panel.TimingText == "stalled");
+        Check("with no countdown at all, rather than an enormous one",
+            stalled.DaysRemaining == 0f);
+        CropStage held = _crops.StageOf(row);
+        _sim.Step(_crops.TicksPerDay * 5);
+        _panel.Refresh();
+        Check("five days on it is still where it was, and the panel still says stalled",
+            _crops.StageOf(row) == held && _panel.TimingText == "stalled");
+
+        _crops.SetGround(row, wasFertile, field.CellCount);
+        _panel.Refresh();
+        Check("ground worth growing on restarts the countdown",
+            _panel.Current?.CountingDown == true);
+
+        // Ripe, cut, and the promise kept: what the panel showed before the cut
+        // is what the buffer holds after it.
+        int budget = TickBudget(_crops.GrowthPerTick(row));
+        for (int tick = 0; tick < budget && _crops.StageOf(row) != CropStage.Harvestable; tick++)
+        {
+            _sim.Step();
+        }
+        _panel.Refresh();
+        Check("a ripe field waits rather than counting down",
+            _crops.StageOf(row) == CropStage.Harvestable && _panel.StageText == "harvestable"
+            && _panel.Current?.NextStage == null && _panel.TimingText == "—");
+
+        int promised = _panel.Current!.Value.Yield;
+        Check("the cut is taken", _crops.Harvest(row) == CropOpResult.Ok);
+        _panel.Refresh();
+        Check("what the panel promised is what the field is holding",
+            promised > 0 && Output(row).Total == promised
+            && _panel.StoredText == $"{promised} / {Output(row).Capacity}");
+        Check("cut ground promises nothing until it is sown again",
+            _panel.StageText == "stubble" && _panel.YieldText == "—");
+
+        // Closing, both ways round.
+        Check("clicking ground no field owns closes the panel",
+            _panel.Select(patch.Poor) == null && !_panel.IsOpen
+            && !_panel.Panel.Visible && _panel.Current == null);
+        Check("clicking the field again reopens it", _panel.Select(field.Cells[0]) == field);
+        ClearAll(field);
+        _panel.Refresh();
+        Check("a field bulldozed out from under the panel closes it",
+            !_panel.IsOpen && !_panel.Panel.Visible && _panel.Current == null);
+    }
+
+    /// <summary>
     /// Ploughs, sows and runs a bare system for <paramref name="days"/> days —
     /// true if the crop banked nothing at all and never left the sown stage.
     /// </summary>
@@ -836,6 +1040,9 @@ public partial class CropSmokeTest : Node
 
     /// <summary>The field's output buffer. Only called where the field is known live.</summary>
     private ItemBuffer Output() => _crops.OutputOf(Row)!;
+
+    /// <summary>Any row's output buffer. Only called where that row is known live.</summary>
+    private ItemBuffer Output(EntityId row) => _crops.OutputOf(row)!;
 
     /// <summary>
     /// The yield the ground says the field owes, spelled out here rather than

@@ -36,6 +36,7 @@ Last updated: 2026-09-06.
 | `### Money and build costs` | touching prices, the balance or affordability |
 | `## Cell picking` | mapping screen to cell |
 | `## Hover readout` | touching the debug readout |
+| `## Field panel` | touching what a field reports to the player |
 | `## Dev smoke tests` | writing or fixing a test — **read before writing one** |
 | `## Not yet implemented` | before assuming something is missing by accident |
 
@@ -80,9 +81,8 @@ Why `SimClock` and the `Simulation` node that drives it are shaped this way:
   arithmetic can fall a hair short in doubles, and the remainder rounds to 1 in
   single precision. Clamped and harmless — but for the same reason, measure sim
   time as *ticks + alpha*, never as whole ticks alone.
-- **Found by group, not `NodePath`**: entities are instanced at runtime, so an
-  exported path cannot reach them. It ticks at `ProcessPriority = -100`, so a
-  transform read this frame is the pose the sim just produced.
+- **Found by group, not `NodePath`**: entities are instanced at runtime. It ticks
+  at `ProcessPriority = -100`, so a transform read this frame is the sim's.
 - **Registration during a tick is unsupported** — an entity that wants to stop
   goes idle inside its own `Tick`.
 
@@ -92,9 +92,8 @@ Sim entities are rows in flat arrays, not nodes. What forces it is not frame
 cost but **walkability** (`### State hashing`): a scene subtree gives an order
 that depends on spawn history, plus an allocation per entity.
 
-- **`EntityStore` owns liveness and nothing else.** It hands out and recycles
-  slots; each system keeps its own parallel arrays indexed by `EntityId.Index`.
-  No component registry, no archetypes, no queries — tech.md asks for a
+- **`EntityStore` owns liveness and nothing else**, each system keeping its own
+  parallel arrays. No component registry, no archetypes, no queries — tech.md asks for a
   data-oriented *layout*, not an ECS framework, and generalising before M5 has
   said what components exist would be guessing.
 - **The generation is the point of the handle.** Slots are reused, so an index
@@ -142,8 +141,7 @@ it and a correct rebuild would then fail the comparison; the cost is a machine
 planning a *different* route showing one tick late. Floats go in **by their
 bits**: determinism is bit-exact, and rounding hides the drift.
 
-**`Simulation.Step(n)` is the offline door** — exactly n ticks, no wall clock —
-so a comparison runs at CPU speed inside one frame; feeding `_Process` a
+**`Simulation.Step(n)` is the offline door**, because feeding `_Process` a
 synthetic delta measures the accumulator rather than the sim.
 
 **Trap for M10:** the entity free list is not hashed, only *which* slots are
@@ -166,7 +164,6 @@ reordered, because a save writes the number.
 Rejected: per-good limits, needing a rule for splitting a mixed buffer's room
 that nothing has asked for. Contents are **never dropped to fit** a capacity
 lowered under them — that is grain vanishing because a corner got bulldozed.
-Stacks sit ascending by type id, so the hash walk is canonical without a fold.
 
 ## Game calendar (`src/sim/GameCalendar.cs`, `src/ui/TimeControls.cs`)
 
@@ -226,9 +223,8 @@ save that must replay after a runtime upgrade cannot rest on it. Against
 xoshiro/xorshift, PCG wins the two points that matter: **every 64-bit value is a
 legal state**, so a restore can never land in the all-zeros trap, and **the
 increment is a stream selector**, so deriving it from the name gives a system
-its own sequence rather than an offset into one shared cycle. State is a single
-`ulong`, so restoring is an assignment to it *mid-sequence*, while `Reseed`
-means *new world*, not *load*.
+its own sequence rather than an offset into one shared cycle. Restoring is an assignment to its single
+`ulong` *mid-sequence*, while `Reseed` means *new world*, not *load*.
 
 **A class, not a struct:** a mutable value type advances a *copy* as soon as it
 is passed or pulled out of a collection, surfacing as a determinism failure
@@ -251,8 +247,8 @@ hash is FNV-1a over the bytes, pinned to golden values in the smoke test.
 
 ## Camera (`src/camera/CameraRig.cs`)
 
-**Structure.** The rig yaws; its child camera is fixed at true-isometric pitch
-(35.264° = atan(1/√2)), starting at 45° so 90° steps keep the iso diamond.
+**Structure.** The rig yaws; the camera under it is fixed at true-isometric
+pitch (35.264° = atan(1/√2)), at 45° so 90° steps keep the iso diamond.
 
 **The three things to know before changing it:**
 
@@ -271,9 +267,8 @@ Four entity kinds: **roads** are tiles; **fields** and **structures** are a tile
 placed; **machines** are sim rows and deliberately not grid cells. A field is
 both — a registry entry here and a crop row in the sim (`### Crops`).
 
-**Data/view split.** `WorldGrid` owns the state; its child `GridMap` is
-presentation only and must **never be read back** — every mutator keeps it in
-sync. `## Simulation` states the same rule for entities.
+**Data/view split.** The child `GridMap` is presentation only and must
+**never be read back** — every mutator keeps it in sync (`## Simulation`).
 
 **Two layers, stored separately.** What the land *is* (terrain plus fertility,
 from the seed) and what the player *built* (`TileType`, sparse) never share
@@ -290,15 +285,14 @@ throwing, so "not on the map" is one call.
   low is water, high is rock, the rest soil — so water and rock deliberately
   never border each other. Fertility is **0 on rock and water**: it means "how
   good is this soil".
-- Storage is **flat arrays** indexed by cell, not a dictionary — every in-bounds
-  cell has a value. The extent the arrays were built with is cached, so changing
-  `MapHalfExtent` at runtime can never index past them.
+- Storage is **flat arrays** indexed by cell: the extent they were built with is
+  cached, so moving `MapHalfExtent` at runtime can never index past them.
 - Re-running it is **bit-exact** for a seed and never touches the placement
   layer. The starting road strip (z = 0, x = -16..16) is **carved** to soil
   rather than biasing the noise, so the seed still owns every other cell.
 
-**How the two layers render.** One `GridMap` draws both, the placed tile winning
-where a cell has one — placement *hides* terrain rather than overwriting it.
+**How the two layers render.** One `GridMap` draws both, placement *hiding*
+terrain rather than overwriting it.
 
 **A field cell draws its crop stage** (`### Crops`): one MeshLibrary item per
 `CropStage`, consecutive from a base id, the arithmetic the fertility tiers
@@ -333,15 +327,14 @@ rather than about a vehicle:
   orthogonal cells so the footprint stays 4-connected, and the connector cell
   **alternates sides** on successive diagonals so the staircase stays centred on
   the true line; without that, machines drive hugging one edge of the band.
-- `RectCells` — filled and inclusive, row-major from the minimum, so the list
-  depends on the rectangle and not on the corner the drag started from.
+- `RectCells` — row-major from the minimum, so the list depends on the
+  rectangle and not on the corner the drag started from.
 
-**Mutators.** `SetTile` is the single write path and maintains both entity
-registries. `MarkField`, `PlaceStructure` and `BuildRoadLine` are the
-**unvalidated** doors, for start layout, dev keys and tests; anything the
-*player* places goes through a `BuildTool` and so `PlacementRules`. `Clear` is
-the one removal path, returning **null** — not an empty `Removal` — for a cell
-that held nothing, which is load-bearing below.
+**Mutators.** `SetTile` is the single write path; `MarkField`,
+`PlaceStructure` and `BuildRoadLine` are the **unvalidated** doors, for start
+layout, dev keys and tests, while anything the *player* places goes through a
+`BuildTool` and so `PlacementRules`. `Clear` returns **null** — not an empty
+`Removal` — for a cell that held nothing, which is load-bearing below.
 
 Two asymmetries in `SetTile` that everything downstream inherits: a field cell
 written over detaches **just that cell** (and a field with no cells is dropped),
@@ -359,12 +352,10 @@ system, because machines run on the road queries it already owns.
   each frame from the row's last two sim poses; `SimPosition` is where the
   machine is. The exports are spawn *input*, read once off the instanced scene
   and copied into the arrays — changing one on a live node does nothing.
-- **Dev model:** a box whose forward is **−Z**, meshes under a `Model` child
-  carrying the visual scale, so resizing the art never touches movement code.
 - **Behavior:** wander. Smoothing keeps a stair-stepped diagonal road from being
-  driven as a zigzag; one stranded off-road warns and parks. A tick spends a
-  travel budget (`Speed·dt`) across waypoints so corners lose no distance, and
-  the previous pose is snapshotted for *every* machine — a parked one drifts.
+  driven as a zigzag. A tick spends a travel budget (`Speed·dt`) across waypoints
+  so corners lose no distance, and the previous pose is snapshotted for *every*
+  machine — a parked one drifts.
 - **Freeing the node despawns the row.** `Machine._ExitTree` is the one place a
   view touches sim state — lifecycle, not a state write. Nothing else notices a
   freed node, and an orphan row is an invisible machine still driving the roads.
@@ -378,9 +369,9 @@ system, because machines run on the road queries it already owns.
 > other HUD bar copies (`## Game calendar` is the second): one button per entry
 > from an exported list, one selection path, and a repaint every frame.
 
-**Built in code from the exported `Tools` list**, in bar order, so putting M5's
-silo on the bar is adding it to that list; each button reads its name, icon and
-price off the tool, so the bar cannot quote a number the click does not charge.
+**Built in code from the exported `Tools` list**, so putting M5's silo on the bar
+is adding it to that list; each button reads its name, icon and price off the
+tool, so the bar cannot quote a number the click does not charge.
 
 **It is not a second source of truth.** Which tool is armed is a fact about the
 tools (`BuildTool.Active`, kept unique by the `build_tools` group), repainted
@@ -405,17 +396,15 @@ otherwise swallow every click meant for the world.
 ## Dev shortcuts (`src/ui/DevShortcuts.cs`)
 
 What is left of the old number-key menu, none of it a build tool: the keys sit
-at the *top* of the number row because the palette claims it from the bottom up,
-and nothing here reaches a tool. Key 7 is the hand M5 replaces — it runs whatever
+at the *top* of the number row because the palette claims it from the bottom
+up. Key 7 is the hand M5 replaces — it runs whatever
 the field under the cursor is waiting for, through the door an order will take.
 
 ## Build tools (`src/ui/build/`, `src/world/PlacementRules.cs`)
 
 Every mouse-driven placement tool sits on one base, `BuildTool`, whose point is
 that an illegal placement is refused *before* the click rather than by it;
-copying `RoadBuildTool` is how the next tool gets written. Fields and structures
-override `Apply`, the default writing tiles alone and so leaving farmland
-nothing could address.
+copying `RoadBuildTool` is how the next tool gets written.
 
 **The rules** are a `[Flags]` set (`PlacementRule`) — add a flag rather than
 re-code a check in a tool — and the near-duplicates in it are the point.
@@ -458,9 +447,6 @@ palette on purpose: a new tool gets it free, and the palette knows no rule.
   a rectangle can never be drawn over ground another field holds, even partly.
 - **Touching fields are never merged**, because each is separately named, worked
   and harvested. So **enlarging a field means marking another one**.
-- **A field owns its cells rather than deriving them from the tile layer**, so
-  it survives an irregular shape: the rectangle is how one is *drawn*, not what
-  a field may be.
 - **Road access is deliberately not required** to mark a field: nothing works
   one until M5 gives machines jobs, which is when the rule (if any) belongs.
 
@@ -501,7 +487,7 @@ rains, but dropping the term makes whoever adds rain re-open product and hash.
 
 **Fertility reaches the row as a column, never as a lookup** — `src/sim/` knows
 nothing of cells — and the number is the mean of the field's **chunk** means, a
-chunk being a `FertilityChunkSize`-cell square of the world (4 → 8 m). Rejected:
+chunk being a `FertilityChunkSize`-cell square. Rejected:
 the plain cell average, which lets a field lean its rate on whichever patch it
 clipped most of, so the same two patches answer differently depending where the
 drag started; equal weight per chunk makes the rate a property of the ground the
@@ -521,7 +507,7 @@ state machine has no stage for. **Yield is the ground, not the growth banked** �
 and is the same for every field that finished, while the ground pays fertility
 twice: good soil ripens sooner *and* cuts heavier. Season stays out on purpose,
 so winter delays a harvest instead of shrinking one. `ProjectedYield` is that
-same computation, so #30 cannot show a number the cut disagrees with. **Area is
+same computation (`## Field panel`). **Area is
 a second pushed-down column**, taken with fertility; it sizes the buffer at
 `FieldOutputHarvests` *perfect* harvests, so only an uncollected second cut bites.
 
@@ -549,9 +535,6 @@ mill, a save has to name it. `Id` is that handle — creation order, never reuse
 resolving to null once the building is gone, so an order pointing at a
 demolished mill fails loudly rather than hitting its replacement. Bolting the
 entity on later would have meant migrating every bare tile already stamped.
-
-**How a 2×2 lands without a rewrite.** A structure owns a *list* of cells though
-the tool hands it one, and every consumer already works a cell at a time.
 
 **Where a building parts company with a field** — the one deliberate asymmetry:
 a building is **atomic**. A field shrinks cell by cell; clearing *any* cell of a
@@ -596,9 +579,8 @@ per cleared cell** — clipping two cells of one building refunds it once.
 > before the click instead of the click discovering it. Money itself is a **stub
 > number** until M7 gives it a market: this is the plumbing, not the economy.
 
-`Economy` **owns the balance**, so there is one number, one place it changes and
-one thing to serialize; `TrySpend` takes the money **or refuses and changes
-nothing**, so it can never go negative however a caller is written.
+`Economy` **owns the balance**, so there is one number to serialize; `TrySpend`
+takes the money **or changes nothing**, so it cannot go negative.
 
 **Cost is a validation input, not a post-hoc check.** A tool's `CostPerCell` and
 the balance go into `PlacementRules.Check` as a `PlacementBudget` — a *value*,
@@ -630,7 +612,28 @@ The debug instrument that confirms the generated world is what the generator
 thinks it is. It names the owning `Field`/`Structure` — the entity, not the cell
 — and formats with `InvariantCulture`, so the text reads the same everywhere.
 **Off the map needs no bounds check**: the terrain layer answers `OutOfBounds`.
-Not the player-facing inspector; that is #30's, and M6's.
+Not the player-facing panel; that is `## Field panel`, and M6's.
+
+## Field panel (`src/ui/FieldInspector.cs`)
+
+> **It reports facts about the field and never points at the culprit.** A
+> stalled crop reads "stalled": no season named, no factor blamed, no advice.
+> M6's building panels inherit that rule under a much sharper version of it, and
+> a habit the cheapest panel in the game breaks is not one.
+
+**Days remaining are the growth model's live rate** (`GrowthPerTick`), never the
+nominal schedule — a countdown is read exactly when the ground or the season is
+why the schedule is wrong. **A zero rate is a word, not a division**: dividing
+by one is how a panel promises a harvest in eight thousand days, so `Stalled` is
+settled before the divide, and the stages time does not move get no countdown.
+
+**Yield is `ProjectedYield` itself, never a second formula** over the same inputs
+(`### Crops`), so what is shown and what lands cannot drift. The buffer line is
+there for the same reason: a full buffer refuses the next harvest whole, and
+nothing else shows that coming. **A view, and only a view**, repainted every
+frame like the time bar, so a countdown runs down and a bulldozed field closes
+the panel unprompted. Selection is `## Cell picking`; an **armed build tool owns
+the click**. **Deferred:** renaming a field, and every building panel — M6's.
 
 ## Dev smoke tests (`scenes/dev/`, `src/dev/`)
 
@@ -667,10 +670,6 @@ What is *not*, and costs an afternoon:
 PNGs of the canonical views, so a human — or an agent — can look at what the
 game actually draws.
 
-```bash
-godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>
-```
-
 **Must run windowed**: `--headless` gives a dummy rasterizer with no
 framebuffer, so `FramePostDraw` never fires. `_Ready` detects it and quits 1.
 
@@ -682,15 +681,16 @@ settle by **time**, not frame count, because the rig smooths on `delta`.
 
 ## Not yet implemented (deliberate)
 
-- **Nothing moves an item.** A harvest fills the field's output buffer and it
-  sits there — hauling is M5's — and no panel names what it holds (#30).
+- **Nothing moves an item, and no machine works a field.** A harvest fills the
+  field's own buffer, the panel names what is in it, and there it stays: hauling
+  and the work itself are M5's, and a full buffer is M4's only backpressure.
 - **Structures have no behavior** and there is one generic kind; the roster is
   M5's (silo) and M6's (cleaner, mill, bakery). They are also the last placed
   thing still a plain object in `WorldGrid`'s registries rather than an entity
   row, and move when M5 gives them state worth ticking.
-- **Player interaction is the palette plus four tools** and three dev keys. The
-  unlock *seam* exists (`ToolAvailability`) and none of the rules — M8's. The
-  HUD pass is M10's; the bar and two corner readouts are all the UI.
+- **Player interaction is the palette, four tools, the time bar and the field
+  panel**, plus three dev keys. The unlock *seam* exists (`ToolAvailability`)
+  and none of the rules — M8's; the HUD pass is M10's.
 - **Money is a stub number**: placements are charged and the balance is shown,
   but nothing puts money *in*, and every price is a tunable placeholder.
 - **Removing something refunds nothing**, on purpose: `RefundFor` has the shape
