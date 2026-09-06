@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `docs/arable-concept.html` — game concept map (core loop, systems)
 - `docs/tech.md` — engine/tech decisions (read this before making architectural choices)
-- `docs/implementation.md` — what's implemented so far and how (project layout, camera, world grid, machines, smoke tests); keep it updated as features land
+- `docs/implementation.md` — how what exists is shaped and *why*: the decisions, rejected alternatives, deferrals and traps that reading `src/` does not recover. **Read it by section, not whole** — its `## Index` maps subsystem to section, and one reads out with `sed -n '/^## World grid/,/^#/p' docs/implementation.md`. Keep it updated as features land, and keep it to the durable half: no member lists, no narration of what a test asserts, no restating what the code plainly says. Budget is ~120 lines per section and ~700 for the file; a section that outgrows it gets cut back in the same commit, not appended to.
 
 ## Engine & toolchain
 
@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Rendering: Forward Plus, D3D12 on Windows; physics: Jolt.
 - `dotnet build Arable.sln` compiles the game assembly (`Arable.csproj`/`Arable.sln` are hand-written; Godot's `--build-solutions` doesn't create them from scratch).
 - Verify changes with the headless smoke tests: `godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn` (and `WorldSmokeTest.tscn`) — they print PASS/FAIL and exit 0/1.
-- Check *visual* claims with `godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>`, which renders the canonical views to PNGs you (or an agent) can actually look at. **Must run windowed** — under `--headless` the rasterizer is a dummy, there is no framebuffer to read back, and the run hangs. Output dir defaults to `user://screenshots`; pass a scratchpad path to keep runs disposable.
+- Check *visual* claims with `godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>`, which renders the canonical views to PNGs you (or an agent) can actually look at. **Must run windowed** — under `--headless` the rasterizer is a dummy and there is no framebuffer to read back, so the scene detects it and exits 1 with `SCREENSHOT TEST FAILED: --headless cannot render`. Output dir defaults to `user://screenshots`; pass a scratchpad path to keep runs disposable.
 - Run the game from the CLI with the Godot .NET editor binary: `godot --path .` (add `--headless` for editor-less operations like `--build-solutions` or `--import`).
 - `.godot/` is generated cache — never edit or commit-worthy content lives there.
 

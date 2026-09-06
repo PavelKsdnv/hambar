@@ -1,4 +1,4 @@
-[gd_resource type="MeshLibrary" load_steps=17 format=3]
+[gd_resource type="MeshLibrary" load_steps=19 format=3]
 
 [sub_resource type="StandardMaterial3D" id="mat_road"]
 albedo_color = Color(0.32, 0.33, 0.35, 1)
@@ -27,6 +27,10 @@ albedo_color = Color(0.36, 0.5, 0.26, 1)
 [sub_resource type="StandardMaterial3D" id="mat_soil_3"]
 albedo_color = Color(0.24, 0.42, 0.2, 1)
 
+[sub_resource type="StandardMaterial3D" id="mat_structure"]
+albedo_color = Color(0.72, 0.29, 0.24, 1)
+roughness = 0.75
+
 [sub_resource type="BoxMesh" id="mesh_road"]
 material = SubResource("mat_road")
 size = Vector3(2, 0.1, 2)
@@ -42,6 +46,10 @@ size = Vector3(2, 0.7, 2)
 [sub_resource type="BoxMesh" id="mesh_water"]
 material = SubResource("mat_water")
 size = Vector3(2, 0.04, 2)
+
+[sub_resource type="BoxMesh" id="mesh_structure"]
+material = SubResource("mat_structure")
+size = Vector3(1.7, 1.4, 1.7)
 
 [sub_resource type="BoxMesh" id="mesh_soil_0"]
 material = SubResource("mat_soil_0")
@@ -92,3 +100,7 @@ item/7/name = "Soil 3 (rich)"
 item/7/mesh = SubResource("mesh_soil_3")
 item/7/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03, 0)
 item/7/shapes = []
+item/8/name = "Structure"
+item/8/mesh = SubResource("mesh_structure")
+item/8/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+item/8/shapes = []

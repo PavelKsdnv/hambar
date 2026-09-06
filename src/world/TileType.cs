@@ -14,6 +14,14 @@ public enum TileType
 
     /// <summary>Workable land.</summary>
     Field = 2,
+
+    /// <summary>
+    /// A cell covered by a placed building. Which building is a question for
+    /// <see cref="WorldGrid.GetStructure(Godot.Vector2I)"/> — this value only
+    /// says "something is built here", so the view can draw it and the
+    /// placement rules can call the cell occupied (see <see cref="Structure"/>).
+    /// </summary>
+    Structure = 3,
 }
 
 /// <summary>

@@ -9,7 +9,8 @@ namespace Arable;
 /// generated world is what the generator thinks it is; the player-facing
 /// inspector panels (fields, buildings) are separate, later work.
 ///
-/// Toggled with menu key 2, so it can be switched off for screenshots. Picking
+/// Toggled with dev key 8 (see <see cref="DevShortcuts"/>), so it can be
+/// switched off for screenshots. Picking
 /// goes through <see cref="CellPicker"/>, the same code path the build tools
 /// use, so the readout can never disagree with what a click would hit.
 /// </summary>
@@ -80,7 +81,8 @@ public partial class CellInspector : Node
 
     /// <summary>
     /// The readout text for a cell: coordinates, terrain (+ fertility, which
-    /// only soil has), and the placed tile. Off the map the terrain layer
+    /// only soil has), and the placed tile — plus the name of the field or
+    /// building that owns the cell, when one does. Off the map the terrain layer
     /// already answers <see cref="TerrainType.OutOfBounds"/>, so that case needs
     /// no extra bounds check — it just reads differently.
     /// </summary>
@@ -95,9 +97,22 @@ public partial class CellInspector : Node
         string fertility = terrain == TerrainType.Soil
             ? World.GetFertility(c).ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
             : "-";
+        // A placed cell names the entity that owns it, because the entity —
+        // not the cell — is what the game addresses farmland (see Field) and
+        // buildings (see Structure) by.
+        string tile = TileName(World.GetTile(c));
+        if (World.GetField(c) is { } field)
+        {
+            tile += $" ({field.Name})";
+        }
+        else if (World.GetStructure(c) is { } structure)
+        {
+            tile += $" ({structure.Name})";
+        }
+
         return $"cell: {c.X}, {c.Y}\n"
             + $"terrain: {TerrainName(terrain)}   fertility: {fertility}\n"
-            + $"tile: {TileName(World.GetTile(c))}";
+            + $"tile: {tile}";
     }
 
     private static string TerrainName(TerrainType terrain) => terrain switch
@@ -112,6 +127,7 @@ public partial class CellInspector : Node
     {
         TileType.Road => "road",
         TileType.Field => "field",
+        TileType.Structure => "structure",
         _ => "empty",
     };
 }
