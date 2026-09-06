@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Godot;
 
 namespace Arable;
@@ -118,15 +119,31 @@ public enum CropOpResult
 /// 1/600 lands a hair either side of 1.0 in single precision, and a crop that
 /// ripens a tick early or late depending on which way the last rounding fell is
 /// a bug nobody would find; adding whole numbers is exact until 2^24 ticks,
-/// which is far past the point a crop was harvested. It is a float rather than
-/// an int because #27's factors are fractional multipliers on that 1.
+/// which is far past the point a crop was harvested. It is a float because the
+/// growth factors below are fractional multipliers on that 1.
+///
+/// <b>Growth per tick is a product, and that is the whole design.</b> A tick
+/// adds <c>base x fertility x season x water</c>, so a factor at zero
+/// <i>stalls</i> the crop where it stands instead of slowing it: an untended
+/// field on dead ground, or a winter one, never quietly finishes, which is what
+/// keeps M5's labour worth programming. Summing the factors, or averaging them,
+/// would let a good one carry a zero — the one behaviour the milestone asked
+/// for. Every factor is a constructor input off an <c>[Export]</c>
+/// (<c>WorldGrid</c>), because M4's real question is the cadence and no answer
+/// to it should need a rebuild.
 ///
 /// <b>Not a Node</b> and, unlike <c>MachineSystem</c>, it holds no world
-/// either: nothing here knows what a cell is. <see cref="GrowthPerTick"/> is
-/// the single seam the next issue widens — #27 turns it into a product of
-/// factors (fertility, season, water), and the fertility a field is worth is
-/// input handed in at the row, not a lookup this class makes, so
-/// <c>src/sim/</c> stays free of the world.
+/// either: nothing here knows what a cell is. <b>Fertility is a column, handed
+/// in at <see cref="Create"/></b> — the world aggregates it over the field's
+/// cells (<c>WorldGrid.ChunkedFertility</c>) and pushes the number down, rather
+/// than this class reaching up for a cell it has no business knowing about. The
+/// season is the exception it is allowed: <see cref="GameCalendar"/> is sim
+/// state, not world state, so the date can be read here directly.
+///
+/// <b>Seam for #28:</b> <see cref="GrowthPerTick(EntityId)"/> and
+/// <see cref="FertilityOf"/> are public precisely so a projected yield can be
+/// computed before the harvest happens, from the ground and the rate rather
+/// than from a number this class would otherwise have to bank per row.
 /// </summary>
 public sealed class CropSystem : ISimSystem, IHashableState
 {
@@ -148,18 +165,59 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// </summary>
     public const int DefaultDaysToRipen = 5;
 
+    /// <summary>
+    /// Grown ticks a perfect tick banks: 1, so the schedule above reads in
+    /// plain days and every other factor is a fraction of a day's work. Moving
+    /// it rescales the whole game's crop tempo without touching the stage
+    /// thresholds — which is the knob to reach for first when a playtest says
+    /// the cycle is too slow.
+    /// </summary>
+    public const float DefaultBaseGrowthRate = 1f;
+
+    /// <summary>
+    /// <b>Water is not modelled.</b> There is no irrigation system anywhere in
+    /// the POC plan, so the factor is present, pinned at 1 and deliberately
+    /// inert: the alternative was leaving it out and having whoever adds
+    /// rainfall re-open the product, its exports and its hash. Costs one
+    /// multiply by a constant; buys the seam.
+    /// </summary>
+    public const float DefaultWaterGrowth = 1f;
+
+    /// <summary>
+    /// Growth multiplier per season, indexed by <see cref="Arable.Season"/>:
+    /// spring and summer full, autumn half, <b>winter nothing</b>. A fresh
+    /// array each read, because an <c>[Export]</c> default the inspector can
+    /// edit must not be a shared instance.
+    ///
+    /// Winter at 0 is the product's point made in the default configuration —
+    /// a crop left in the ground over winter stalls until spring rather than
+    /// ripening through it, so the sowing date is a decision. It is also the
+    /// number to soften first if playtests find the dead season too long.
+    /// </summary>
+    public static float[] DefaultSeasonGrowth => [1f, 1f, 0.5f, 0f];
+
     /// <summary>Slots the arrays start at; they grow by doubling from there.</summary>
     private const int InitialCapacity = 16;
 
     private readonly EntityStore _entities = new();
 
     private readonly CropStage _postHarvest;
+    private readonly float _baseGrowthRate;
+    private readonly float[] _seasonGrowth;
+    private readonly float _waterGrowth;
 
-    // Parallel component arrays, all sized to _entities.SlotCount. Three
-    // columns is the whole of a crop today; #27 adds the growth factors and
-    // #28 the output buffer, each in its own column beside these.
+    // The date, for the season factor only. Held rather than copied per tick
+    // because a cached season is a second copy that a date jump would leave
+    // stale; null is a system with no calendar (a bare test one), which grows
+    // as though every season were full.
+    private readonly GameCalendar? _calendar;
+
+    // Parallel component arrays, all sized to _entities.SlotCount. Fertility
+    // is a column and not a lookup because src/sim/ knows nothing of cells;
+    // #28's output buffer joins these the same way.
     private CropStage[] _stage = [];
     private float[] _growth = [];
+    private float[] _fertility = [];
     private int[] _owner = [];
 
     /// <param name="ticksPerDay">
@@ -171,11 +229,30 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// False makes harvest leave the field ready to sow again. See the class
     /// note for why the default is true.
     /// </param>
+    /// <param name="baseGrowthRate">
+    /// The first factor of the product: what a tick banks on perfect ground in
+    /// a perfect season.
+    /// </param>
+    /// <param name="seasonGrowth">
+    /// One multiplier per <see cref="Arable.Season"/>, in enum order. Null
+    /// takes <see cref="DefaultSeasonGrowth"/>; a wrong-length array is
+    /// repaired rather than thrown over, because it arrives from an inspector.
+    /// </param>
+    /// <param name="waterGrowth">Pinned at 1 — see <see cref="DefaultWaterGrowth"/>.</param>
+    /// <param name="calendar">
+    /// The date the season factor is read off, per tick. Null means no season
+    /// at all — every season full — which is what a system built without a sim
+    /// (a test, a tool) gets, rather than an arbitrary date to grow against.
+    /// </param>
     public CropSystem(
         int ticksPerDay,
         int daysToSprout = DefaultDaysToSprout,
         int daysToRipen = DefaultDaysToRipen,
-        bool stubbleNeedsPloughing = true)
+        bool stubbleNeedsPloughing = true,
+        float baseGrowthRate = DefaultBaseGrowthRate,
+        float[]? seasonGrowth = null,
+        float waterGrowth = DefaultWaterGrowth,
+        GameCalendar? calendar = null)
     {
         TicksPerDay = Math.Max(1, ticksPerDay);
         DaysToSprout = Math.Max(0, daysToSprout);
@@ -190,6 +267,37 @@ public sealed class CropSystem : ISimSystem, IHashableState
                 + $"({daysToSprout}); clamped to {DaysToRipen}.");
         }
         _postHarvest = stubbleNeedsPloughing ? CropStage.Stubble : CropStage.Ploughed;
+
+        // A negative factor would run a crop backwards through its own stages;
+        // clamping at zero keeps the worst any factor can do a stall.
+        _baseGrowthRate = Math.Max(0f, baseGrowthRate);
+        _waterGrowth = Math.Max(0f, waterGrowth);
+        _seasonGrowth = VetSeasonGrowth(seasonGrowth);
+        _calendar = calendar;
+    }
+
+    /// <summary>
+    /// Sizes the season table to the seasons that exist and clamps it, the way
+    /// <c>Simulation</c> vets its speed ladder: repair and complain, never take
+    /// the scene down over a number typed into an inspector. A short array is
+    /// padded with full growth so a half-filled one grows rather than stalls —
+    /// a silent world-wide stall is the harder bug of the two to spot.
+    /// </summary>
+    private static float[] VetSeasonGrowth(float[]? rates)
+    {
+        float[] source = rates ?? DefaultSeasonGrowth;
+        if (source.Length != GameCalendar.SeasonsPerYear && rates != null)
+        {
+            GD.PushWarning($"CropSystem: SeasonGrowth has {source.Length} entries, expected "
+                + $"{GameCalendar.SeasonsPerYear}; resized, padding any gap with full growth.");
+        }
+
+        var vetted = new float[GameCalendar.SeasonsPerYear];
+        for (int i = 0; i < vetted.Length; i++)
+        {
+            vetted[i] = i < source.Length ? Math.Max(0f, source[i]) : 1f;
+        }
+        return vetted;
     }
 
     /// <summary>Ticks that make one day here — the calendar's, copied at construction.</summary>
@@ -210,6 +318,25 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// <summary>The stage a harvest leaves behind — the pacing tunable.</summary>
     public CropStage PostHarvestStage => _postHarvest;
 
+    /// <summary>Grown ticks a tick banks with every factor at full — the first term of the product.</summary>
+    public float BaseGrowthRate => _baseGrowthRate;
+
+    /// <summary>The season table, indexed by <see cref="Arable.Season"/>. Always four long.</summary>
+    public IReadOnlyList<float> SeasonGrowth => _seasonGrowth;
+
+    /// <summary>The water factor. 1, and inert — see <see cref="DefaultWaterGrowth"/>.</summary>
+    public float WaterGrowth => _waterGrowth;
+
+    /// <summary>The season the growth rate is currently read against, or null with no calendar.</summary>
+    public Season? CurrentSeason => _calendar?.Season;
+
+    /// <summary>
+    /// The season's multiplier right now — 1 for a system with no calendar,
+    /// which is the whole of what "no season" means here.
+    /// </summary>
+    public float SeasonFactor =>
+        _calendar == null ? 1f : _seasonGrowth[(int)_calendar.Season];
+
     /// <summary>Fields with a crop row right now.</summary>
     public int Count => _entities.Count;
 
@@ -228,8 +355,13 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// <paramref name="fieldId"/> is the <c>Field.Id</c> that owns it, kept so a
     /// walk over the rows can name the field it is drawing or reporting on
     /// without a reverse index.
+    ///
+    /// <paramref name="fertility"/> (0..1) is <b>input, not a lookup</b>: the
+    /// world has already averaged the ground the field covers and hands the
+    /// answer down, so this class never learns what a cell is. It defaults to
+    /// perfect ground, which is what a system built without a world grows on.
     /// </summary>
-    public EntityId Create(int fieldId)
+    public EntityId Create(int fieldId, float fertility = 1f)
     {
         EntityId id = _entities.Create();
         EnsureCapacity(_entities.SlotCount);
@@ -238,6 +370,7 @@ public sealed class CropSystem : ISimSystem, IHashableState
         // Every column, because a recycled slot still holds the last field's.
         _stage[i] = CropStage.Fallow;
         _growth[i] = 0f;
+        _fertility[i] = Math.Clamp(fertility, 0f, 1f);
         _owner[i] = fieldId;
         return id;
     }
@@ -260,6 +393,40 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// grows the crop currently in it.
     /// </summary>
     public float GrowthOf(EntityId id) => _entities.IsAlive(id) ? _growth[id.Index] : 0f;
+
+    /// <summary>
+    /// The soil quality the field grows on, 0..1 — the aggregate the world
+    /// handed in, not a cell's. Zero is a stall, not slow going.
+    /// </summary>
+    public float FertilityOf(EntityId id) => _entities.IsAlive(id) ? _fertility[id.Index] : 0f;
+
+    /// <summary>
+    /// Rewrites the field's fertility. The one caller is the world, when a
+    /// field's cells change under it (bulldozing shrinks one), because the
+    /// aggregate is only true of the cells it was computed over. Deliberately
+    /// <b>not</b> a per-tick refresh: the ground does not move, and a value
+    /// pushed on change is one the sim can hash without asking the world.
+    /// False for a stale handle.
+    /// </summary>
+    public bool SetFertility(EntityId id, float fertility)
+    {
+        if (!_entities.IsAlive(id))
+        {
+            return false;
+        }
+        _fertility[id.Index] = Math.Clamp(fertility, 0f, 1f);
+        return true;
+    }
+
+    /// <summary>
+    /// Grown ticks this field banks per tick right now — the product, for a
+    /// caller that wants the rate rather than the result: #30's inspector shows
+    /// it, #28 projects a yield off it, and a test asserts one field outgrows
+    /// another with it. Zero for a dead handle, and zero for a stalled crop,
+    /// which are the same answer for different reasons.
+    /// </summary>
+    public float GrowthPerTick(EntityId id) =>
+        _entities.IsAlive(id) ? GrowthPerTick(id.Index, SeasonFactor) : 0f;
 
     /// <summary>The <c>Field.Id</c> the row belongs to, or 0 for a dead handle.</summary>
     public int OwnerOf(EntityId id) => _entities.IsAlive(id) ? _owner[id.Index] : 0;
@@ -353,6 +520,9 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// </summary>
     public void Tick(float dt)
     {
+        // Read once for the whole walk: the date cannot change mid-tick, and a
+        // per-row read would invite a future factor that does.
+        float season = SeasonFactor;
         for (int i = 0; i < _entities.SlotCount; i++)
         {
             if (!_entities.IsAliveSlot(i)
@@ -361,7 +531,7 @@ public sealed class CropSystem : ISimSystem, IHashableState
                 continue;
             }
 
-            _growth[i] += GrowthPerTick(i);
+            _growth[i] += GrowthPerTick(i, season);
             if (_stage[i] == CropStage.Sown && _growth[i] >= TicksToSprout)
             {
                 _stage[i] = CropStage.Growing;
@@ -374,13 +544,17 @@ public sealed class CropSystem : ISimSystem, IHashableState
     }
 
     /// <summary>
-    /// Grown ticks one tick adds to one field: 1 at full rate. <b>The seam #27
-    /// widens</b> — it becomes 1 times fertility, season and water, each factor
-    /// exported, so any of them at zero stalls the crop where it stands. Today
-    /// every field grows at full rate, which is why a crop nobody tends still
-    /// finishes: the thing the next issue is specifically there to stop.
+    /// Grown ticks one tick adds to one field: the product of every factor.
+    /// <b>Multiplied, not summed</b> — so any one of them at zero holds the
+    /// crop at the stage it is in for as long as that lasts, rather than
+    /// letting the other three carry it quietly to harvestable.
+    ///
+    /// The order of the multiplies is fixed in source and stays that way:
+    /// float multiplication is not associative, and a run that reorders it is a
+    /// run that hashes differently.
     /// </summary>
-    private static float GrowthPerTick(int slot) => 1f;
+    private float GrowthPerTick(int slot, float seasonFactor) =>
+        _baseGrowthRate * _fertility[slot] * seasonFactor * _waterGrowth;
 
     /// <summary>The name this system's state is filed under in a state hash.</summary>
     public string StateName => StateSourceName;
@@ -398,6 +572,19 @@ public sealed class CropSystem : ISimSystem, IHashableState
         hash.Write(DaysToRipen);
         hash.Write((int)_postHarvest);
 
+        // The factors are configuration, not state a tick moves — but two
+        // worlds tuned differently must not hash the same, and a season table
+        // is walked by index because its index *is* the season. The calendar
+        // itself is already in SimStateHash; only whether one is wired goes in
+        // here, since that is the difference between seasons mattering and not.
+        hash.Write(_baseGrowthRate);
+        hash.Write(_waterGrowth);
+        hash.Write(_calendar != null);
+        for (int i = 0; i < _seasonGrowth.Length; i++)
+        {
+            hash.Write(_seasonGrowth[i]);
+        }
+
         _entities.HashState(hash);
         for (int i = 0; i < _entities.SlotCount; i++)
         {
@@ -409,6 +596,7 @@ public sealed class CropSystem : ISimSystem, IHashableState
             hash.Write(i);
             hash.Write((int)_stage[i]);
             hash.Write(_growth[i]);
+            hash.Write(_fertility[i]);
             hash.Write(_owner[i]);
         }
     }
@@ -445,6 +633,7 @@ public sealed class CropSystem : ISimSystem, IHashableState
 
         Array.Resize(ref _stage, capacity);
         Array.Resize(ref _growth, capacity);
+        Array.Resize(ref _fertility, capacity);
         Array.Resize(ref _owner, capacity);
     }
 }

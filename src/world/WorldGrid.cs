@@ -50,6 +50,13 @@ public partial class WorldGrid : Node3D, IHashableState
     /// </summary>
     public const string SpawnStreamName = "world.spawn";
 
+    /// <summary>
+    /// Cells on a side of a fertility chunk: 4, so a chunk is 8 m square — a
+    /// patch of ground about the size of the smallest field worth marking, and
+    /// small enough that a big field still spans several of them.
+    /// </summary>
+    public const int DefaultFertilityChunkSize = 4;
+
     /// <summary>Names the two terrain noise fields derive their seeds from.</summary>
     private const string FertilityNoiseName = "world.terrain.fertility";
     private const string MaskNoiseName = "world.terrain.mask";
@@ -109,6 +116,38 @@ public partial class WorldGrid : Node3D, IHashableState
     /// leaves the field ready to sow and ploughing is a once-per-field job.
     /// </summary>
     [Export] public bool StubbleNeedsPloughing { get; set; } = true;
+
+    /// <summary>
+    /// What a crop banks per tick before any factor is applied — the first term
+    /// of <c>CropSystem</c>'s product, and the knob that rescales the whole
+    /// game's crop tempo at once. Raising it shortens every cycle without
+    /// touching what a "day of growth" means.
+    /// </summary>
+    [Export] public float CropBaseGrowthRate { get; set; } = CropSystem.DefaultBaseGrowthRate;
+
+    /// <summary>
+    /// The growth multiplier per season, in <see cref="Season"/> order:
+    /// spring, summer, autumn, winter. Winter is 0 by default, which is what
+    /// makes an over-wintered crop stall instead of ripening through the dead
+    /// season — see <see cref="CropSystem.DefaultSeasonGrowth"/>.
+    /// </summary>
+    [Export] public float[] CropSeasonGrowth { get; set; } = CropSystem.DefaultSeasonGrowth;
+
+    /// <summary>
+    /// The water factor. <b>Pinned at 1 and inert</b>: nothing in the POC plan
+    /// irrigates or rains, so this is the seam the system that eventually does
+    /// writes into, not a knob with a meaning today. See
+    /// <see cref="CropSystem.DefaultWaterGrowth"/>.
+    /// </summary>
+    [Export] public float CropWaterGrowth { get; set; } = CropSystem.DefaultWaterGrowth;
+
+    /// <summary>
+    /// Cells on a side of a fertility chunk — the granularity a field's ground
+    /// is averaged at (<see cref="ChunkedFertility"/>). 1 makes it the plain
+    /// per-cell mean; larger values weigh each patch of ground the field covers
+    /// equally, however many of its cells landed in that patch.
+    /// </summary>
+    [Export] public int FertilityChunkSize { get; set; } = DefaultFertilityChunkSize;
 
     private static readonly Color[] MachineColors =
     [
@@ -190,7 +229,8 @@ public partial class WorldGrid : Node3D, IHashableState
         // system, on the default day length.
         _crops = new CropSystem(
             _sim?.Calendar.TicksPerDay ?? GameCalendar.DefaultTicksPerDay,
-            CropDaysToSprout, CropDaysToRipen, StubbleNeedsPloughing);
+            CropDaysToSprout, CropDaysToRipen, StubbleNeedsPloughing,
+            CropBaseGrowthRate, CropSeasonGrowth, CropWaterGrowth, _sim?.Calendar);
         _sim?.Register(_crops);
 
         // The world is state, not a system: it has nothing to tick, but a
@@ -275,6 +315,87 @@ public partial class WorldGrid : Node3D, IHashableState
     /// </summary>
     public float GetFertility(Vector2I cell) => InBounds(cell) ? _fertility[Index(cell)] : 0f;
 
+    /// <summary>
+    /// The one soil-quality number a whole field grows at: the mean of its
+    /// <b>chunk</b> means, where a chunk is a
+    /// <see cref="FertilityChunkSize"/>-cell square of the world.
+    ///
+    /// <b>Why chunks rather than the plain average of the cells.</b> A field is
+    /// a region of ground, and what makes one worth farming is the patches it
+    /// covers, not how many cells of each it happens to contain: averaging by
+    /// cell lets a field lean its rate on whichever patch it clipped most of,
+    /// so the same two patches give a different answer depending on where the
+    /// drag started. Weighing each chunk equally makes the answer a property of
+    /// the ground the field spans. It is also the granularity later work wants
+    /// — #28's yield and M9's hazards are per patch, not per cell — and setting
+    /// the size to 1 collapses it back to the exact cell mean, which is the
+    /// knob's "off".
+    ///
+    /// Chunks are aligned to the <b>world origin</b>, not to the field's own
+    /// corner, so the same ground always falls in the same chunks whoever marks
+    /// it. Walked over a flat array in ascending chunk order and never over a
+    /// dictionary: float addition is not associative, so an enumeration order
+    /// that depended on insertion history would be a determinism bug that only
+    /// showed up as a crop ripening a tick late.
+    ///
+    /// <b>Trap:</b> a row is given this number when the field is marked and
+    /// when its cells change (see <c>ReleaseFieldCell</c>) — never per tick. So
+    /// moving <see cref="FertilityChunkSize"/> at runtime re-aggregates the
+    /// fields marked after it, not the ones already standing.
+    /// </summary>
+    public float ChunkedFertility(IReadOnlyList<Vector2I> cells)
+    {
+        if (cells.Count == 0)
+        {
+            return 0f;
+        }
+
+        int size = Math.Max(1, FertilityChunkSize);
+        Vector2I min = ChunkOf(cells[0], size);
+        Vector2I max = min;
+        for (int i = 1; i < cells.Count; i++)
+        {
+            Vector2I chunk = ChunkOf(cells[i], size);
+            min = new Vector2I(Mathf.Min(min.X, chunk.X), Mathf.Min(min.Y, chunk.Y));
+            max = new Vector2I(Mathf.Max(max.X, chunk.X), Mathf.Max(max.Y, chunk.Y));
+        }
+
+        int width = max.X - min.X + 1;
+        var sums = new float[width * (max.Y - min.Y + 1)];
+        var counts = new int[sums.Length];
+        foreach (Vector2I cell in cells)
+        {
+            Vector2I chunk = ChunkOf(cell, size);
+            int i = (chunk.Y - min.Y) * width + (chunk.X - min.X);
+            sums[i] += GetFertility(cell);
+            counts[i]++;
+        }
+
+        float total = 0f;
+        int occupied = 0;
+        for (int i = 0; i < sums.Length; i++)
+        {
+            if (counts[i] == 0)
+            {
+                continue;
+            }
+            total += sums[i] / counts[i];
+            occupied++;
+        }
+        return occupied == 0 ? 0f : total / occupied;
+    }
+
+    /// <summary>
+    /// The chunk a cell falls in. Floor division, not C#'s truncation, or the
+    /// chunks either side of an axis would be half-width and the origin's
+    /// would be double.
+    /// </summary>
+    private static Vector2I ChunkOf(Vector2I cell, int size) =>
+        new(FloorDiv(cell.X, size), FloorDiv(cell.Y, size));
+
+    private static int FloorDiv(int value, int divisor) =>
+        value >= 0 ? value / divisor : -((divisor - 1 - value) / divisor);
+
     /// <summary>Whether the terrain is workable ground.</summary>
     public bool IsSoil(Vector2I cell) => GetTerrain(cell) == TerrainType.Soil;
 
@@ -316,9 +437,12 @@ public partial class WorldGrid : Node3D, IHashableState
 
         _fieldsCreated++;
         // The crop row is opened before the field so the handle can be
-        // constructor input: a Field is never observable without one.
+        // constructor input: a Field is never observable without one. The
+        // ground it stands on is aggregated here and pushed down, because the
+        // sim has no idea what a cell is.
         var field = new Field(
-            _fieldsCreated, $"Field {_fieldsCreated}", cells, _crops.Create(_fieldsCreated));
+            _fieldsCreated, $"Field {_fieldsCreated}", cells,
+            _crops.Create(_fieldsCreated, ChunkedFertility(cells)));
         _fields.Add(field);
         foreach (Vector2I cell in cells)
         {
@@ -441,14 +565,22 @@ public partial class WorldGrid : Node3D, IHashableState
             return;
         }
         field.RemoveCell(cell);
-        if (field.CellCount == 0)
+        if (field.CellCount > 0)
         {
-            _fields.Remove(field);
-            // The row goes with the field, which is what makes every handle to
-            // it answer NoSuchField rather than address whatever field is
-            // marked into the recycled slot next.
-            _crops.Destroy(field.Crop);
+            // The aggregate is only true of the cells it was taken over, so a
+            // field that lost its best corner grows slower from now on. Pushed
+            // on change rather than read per tick: the ground itself never
+            // moves, and the sim must be able to hash the number without
+            // asking the world for it.
+            _crops.SetFertility(field.Crop, ChunkedFertility(field.Cells));
+            return;
         }
+
+        _fields.Remove(field);
+        // The row goes with the field, which is what makes every handle to it
+        // answer NoSuchField rather than address whatever field is marked into
+        // the recycled slot next.
+        _crops.Destroy(field.Crop);
     }
 
     /// <summary>

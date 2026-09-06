@@ -4,16 +4,10 @@ What exists in the codebase today and how it fits together. Companion to
 `tech.md` (the engine decisions) — this documents how those were realized, and
 the design decisions taken since.
 
-**How to read it.** Every section is written to be read *alone*: find the
-subsystem in the index, read that section, stop (`sed -n '/^## World
-grid/,/^#/p'`).
-
-**What belongs in it.** Inventory — member lists, tile art, what a test asserts
-— is deliberately thin, because the source says it better and cannot go stale.
-What is written at length is what reading `src/` does not recover: why a thing
-is shaped as it is, what was rejected, what is deferred. A section grown into a
-transcript of its own source file is **cut back, not extended**; the budget is
-in `.claude/skills/milestone/SKILL.md`.
+**Every section is written to be read *alone*** — find it in the index, read
+it, stop (`sed -n '/^## World grid/,/^#/p'`). It holds only what reading `src/`
+does not recover: why a thing is shaped as it is, what was rejected, what is
+deferred. CLAUDE.md carries the rest of the rule and the budget.
 
 Last updated: 2026-09-06.
 
@@ -52,9 +46,8 @@ Last updated: 2026-09-06.
 
 ## Project layout
 
-`src/` splits by concern with the namespace flat `Arable` throughout, so moving
-a file between folders is free. `dev/` is test scenes, not the game, and
-`scenes/Main.tscn` is the entry point.
+The namespace is flat `Arable` throughout, so moving a file between folders is
+free. `dev/` is test scenes, not the game; `scenes/Main.tscn` is the entry point.
 
 **Gotcha (hand-written .tscn):** a Node-typed export serialized as
 `World = NodePath("../World")` only resolves if the `[node]` header also carries
@@ -171,15 +164,14 @@ number of ticks elapses per simulated day at every speed" true by construction
 rather than by arithmetic somebody keeps honest: 3× only runs them sooner.
 
 **The numbers, and why.** Day = **600 ticks** (30 s at 20 Hz), season = **12
-days**, year = 48 days ≈ 24 min at 1×. Thirty seconds is about how long a
-machine takes to cross the 97-cell map, so a day is roughly one haul end to end
-— a unit the player already feels — and short enough that a five-minute playtest
-sees ten of them, which is what makes day-scale effects (M7's price drift, M8's
-deadlines) observable in a sitting. 600 factorises hard (2³·3·5²) and 12 divides
-by 2, 3, 4 and 6, so sub-day schedules and M4's whole-day growth stages both
-land without remainder. Both are `[Export]`s on `Simulation` — M4 calls crop
-cadence the tempo of the entire game, so expect them to move. The season *count*
-stays at four: which seasons exist is content, their length is the tempo knob.
+days**, year = 48 days ≈ 24 min at 1×. Thirty seconds is about one haul end to
+end across the 97-cell map, so the day is a unit the player already feels, and
+short enough that a five-minute playtest sees ten — which is what makes day-scale
+effects (M7's price drift, M8's deadlines) observable in a sitting. 600
+factorises hard (2³·3·5²) and 12 divides by 2, 3, 4 and 6, so sub-day schedules
+and whole-day growth stages land without remainder. Both are `[Export]`s on
+`Simulation`, and expect them to move. The season *count* stays at four: which
+seasons exist is content, their length is the tempo knob.
 
 **The whole of the calendar's state is one `long`**; everything else is
 division, because #25 must hash sim state and M10 must save it and an integer is
@@ -200,11 +192,11 @@ paused world still has to be lookable-around). `MaxTicksPerFrame` is deliberatel
 than promised, visibly via `DroppedTicks` — never by shortening a day. And
 **speed is not sim state** (`### State hashing`); the calendar is the opposite.
 
-**The controls copy the palette** (`## Build palette`), bottom-right. **Step 0
-is always pause**: the ladder is otherwise free-form, but the code must find the
-stop, so one not starting at 0 is repaired at load with a warning. **Deferred:**
-a pause *key* (the number row is the palette's) and anything reacting to the
-season — #27's growth, M9's hazards.
+**The controls copy the palette** (`## Build palette`). **Step 0 is always
+pause**: the ladder is otherwise free-form, but the code must find the stop, so
+one not starting at 0 is repaired at load with a warning. `### Crops` is the
+first thing to read the season. **Deferred:** a pause *key* (the number row is
+the palette's) and M9's seasonal hazards.
 
 ## Randomness (`src/sim/RandomStream.cs`, `RandomStreams.cs`)
 
@@ -250,9 +242,6 @@ hash is FNV-1a over the bytes, pinned to golden values in the smoke test.
 **Deferred:** nothing writes a stream anywhere yet (M10).
 
 ## Camera (`src/camera/CameraRig.cs`)
-
-RTS-style isometric camera, per tech.md: orthographic, fixed pitch, pan + zoom +
-90°-step rotation.
 
 **Structure.** The rig yaws; its child camera is fixed at true-isometric pitch
 (35.264° = atan(1/√2)), starting at 45° so 90° steps keep the iso diamond.
@@ -304,7 +293,7 @@ throwing, so "not on the map" is one call.
 
 **How the two layers render.** One `GridMap` draws both, the placed tile's mesh
 winning where a cell has one, so placement *hides* terrain rather than
-overwriting it. Dev art gives soil four shades, so fertility is legible in view.
+overwriting it; the soil shades are the fertility layer, made legible.
 
 **Road-network queries live here**, because they are questions about the grid
 rather than about a vehicle:
@@ -368,9 +357,9 @@ system, because machines run on the road queries it already owns.
 > controls, with one selection path and a repaint every frame.
 
 **Built in code from the exported `Tools` list**, in bar order, so the order is
-a design decision rather than an accident of tree order — putting M5's silo on
-the bar is adding it to that list. Each button reads its name, icon and price
-off the tool, so the bar can never quote a number the click does not charge.
+a design decision and putting M5's silo on the bar is adding it to that list.
+Each button reads its name, icon and price off the tool, so the bar can never
+quote a number the click does not charge.
 
 **It is not a second source of truth.** Which tool is armed is a fact about the
 tools (`BuildTool.Active`, kept unique by the `build_tools` group), repainted
@@ -405,10 +394,9 @@ for, through the door a machine order will take.
 
 Every mouse-driven placement tool sits on one base, `BuildTool`, whose point is
 that an illegal placement is refused *before* the click rather than by it;
-copying `RoadBuildTool` is how the next tool gets written. Fields and
-structures override `Apply` because the
-default writes tiles and would leave farmland or a building nothing could
-address; `BulldozeTool` is the one subclass that bends the base.
+copying `RoadBuildTool` is how the next tool gets written. Fields and structures
+override `Apply`, the default writing tiles alone and so leaving farmland or a
+building nothing could address.
 
 **The rules** (`PlacementRule`, a `[Flags]` set — add a flag rather than
 re-coding a check in a tool); each exists for its own reason:
@@ -457,10 +445,9 @@ gets it for free, and the palette knows neither the list nor the rule.
 ### Fields (`src/world/Field.cs`, `src/ui/build/FieldBuildTool.cs`)
 
 > **Farmland is addressed by one `Field` entity per marked rectangle — never by
-> the cell.** One drag creates exactly one `Field`; the cells get
-> `TileType.Field` only so the `GridMap` can draw them. Jobs and yields hang off
-> the entity, reached with `WorldGrid.GetField`; what a crop is doing on it is
-> one step further out again (`### Crops`).
+> the cell.** Jobs and yields hang off the entity, reached with
+> `WorldGrid.GetField`; what a crop is doing on it is one step further out
+> again (`### Crops`).
 
 `Field` ids are creation order and never reused. What that commits us to:
 
@@ -470,9 +457,7 @@ gets it for free, and the palette knows neither the list nor the rule.
   and harvested. So **enlarging a field means marking another one**.
 - **A field owns its cells rather than deriving them from the tile layer**, so
   it survives an irregular shape: the rectangle is how the player *draws* one,
-  not what a field is allowed to be. Bulldozing shrinks one cell by cell, and a
-  field that loses its last cell is dropped — an empty field is not something
-  the player can still address.
+  not what a field is allowed to be.
 - **Road access is deliberately not required** to mark a field: nothing works
   one until M5 gives machines jobs, which is when the rule (if any) belongs.
 
@@ -489,10 +474,10 @@ gets it for free, and the palette knows neither the list nor the rule.
 
 **Crop state left `Field` for the entity arrays** (`### Entity storage`). An
 enum and a float on `Field` would have hashed fine through `WorldGrid`'s
-registry fold — and left #27's growth factors, #28's buffer and M5's jobs
-walking a `List` whose order a load need not reproduce. `Field` still owns the
-cells and the name and holds a `Crop` handle, hashed from both ends because
-neither side derives the other.
+registry fold — and left the growth factors, #28's buffer and M5's jobs walking
+a `List` whose order a load need not reproduce. `Field` keeps the cells, the
+name and a `Crop` handle, hashed from both ends because neither derives the
+other.
 
 **Harvest leaves stubble, to be ploughed in again.** Rejected: returning the
 field straight to sowable, which makes ploughing a once-per-field job when M5
@@ -502,16 +487,45 @@ pacing lever, hence the `WorldGrid.StubbleNeedsPloughing` tunable.
 **Growth accumulates in whole ticks, not days**: adding 1/600 of a day a tick
 lands a hair either side of the threshold in single precision, so a crop would
 ripen a tick early or late by whichever way the last rounding fell — invisible,
-and untestable. Still a `float`, because #27's factors are fractional
-multipliers on that 1; `GrowthPerTick` is the seam it widens, and the fertility
-a field is worth belongs in a *column* — `src/sim/` knows nothing of cells.
+and untestable. A full-rate tick banks 1; the factors are fractions of it.
+
+**A tick banks `base × fertility × season × water`, and multiplying is the
+point.** A factor at zero *stalls* the crop where it stands instead of slowing
+it, which is what stops an untended field quietly finishing and keeps M5's
+labour worth programming; summing would let three good ones carry a zero. Every
+factor is an `[Export]` on `WorldGrid`: M4's question is the cadence, and no
+answer to it should need a rebuild. Shipped seasons run full, full, half,
+**nothing** — winter at 0 makes *when* to sow a decision, and is the first
+number to soften if the dead season plays long. **Water is inert**: nothing in
+the POC irrigates or rains, but dropping the term would make whoever adds
+rainfall re-open the product, its exports and its hash.
+
+**Fertility reaches the row as a column, never as a lookup** — `src/sim/` knows
+nothing of cells — and the number is the mean of the field's **chunk** means, a
+chunk being a `FertilityChunkSize`-cell square of the world (4 → 8 m). Rejected:
+the plain cell average, which lets a field lean its rate on whichever patch it
+clipped most of, so the same two patches answer differently depending where the
+drag started; equal weight per chunk makes the rate a property of the ground the
+field spans, at the granularity #28's yield and M9's hazards will want. Chunks
+align to the world origin, so the same ground falls in the same chunks whoever
+marks it, and size 1 is the exact cell mean — the knob's off position. The
+season is read live instead, off `GameCalendar`: that is sim state, and one
+copied at startup is wrong the first time a save loads in autumn.
+
+**Traps.** A row takes its fertility at `MarkField` and whenever the field's
+cells change, never per tick — so moving `FertilityChunkSize` at runtime
+re-aggregates fields marked *after* it, not those already standing. Neither the
+multiply order nor the chunk walk may be reordered (float arithmetic is not
+associative), which is why that walk is a flat array and not a dictionary. The
+factors hash beside the thresholds, or two differently tuned worlds hash alike.
+**Seam for #28:** `GrowthPerTick` and `FertilityOf` are public so a projected
+yield is computable before the harvest.
 
 ### Structures (`src/world/Structure.cs`, `src/ui/build/StructureBuildTool.cs`)
 
-> **A building is addressed by one `Structure` entity — never by the cell.** The
-> cells get `TileType.Structure` only so the `GridMap` can draw them and
-> `PlacementRules` can call them occupied; reach the building itself with
-> `WorldGrid.GetStructure`.
+> **A building is addressed by one `Structure` entity — never by the cell**,
+> reached with `WorldGrid.GetStructure`; the cells carry `TileType.Structure`
+> only so the view can draw them and `PlacementRules` can call them occupied.
 
 **Why an entity and not just a tile value.** `TileType.Structure` says that *a*
 building is here, not *which*, and a building needs an identity long before it
@@ -590,10 +604,8 @@ about money, so a drag into water is refused for the water.
 nothing else in the tool touches money: however long a drag is held and however
 often the ghost is recomputed, nothing moves — and a refused click is free.
 
-**The knobs are exported and wired in Main.tscn**, so tuning is an editor change
-and the scene value wins over a tool's placeholder. A tool with **no** `Economy`
-wired builds for free — that is "there is no money in this scene", not "the
-player is broke", and it keeps a dev scene working.
+A tool with **no** `Economy` wired builds for free — that is "there is no money
+in this scene", not "the player is broke", and it keeps a dev scene working.
 
 ## Cell picking (`src/ui/CellPicker.cs`)
 
@@ -622,15 +634,8 @@ the player-facing inspector: field inspection is #30, buildings M6.
 Headless end-to-end checks, each printing `PASS`/`FAIL` lines and exiting 0/1.
 **Run all of them** — the older ones are the regression net for the newer ones.
 
-```bash
-godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn
-godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
-godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
-godot --headless --path . res://scenes/dev/SimSmokeTest.tscn
-godot --headless --path . res://scenes/dev/CropSmokeTest.tscn
-```
-
-What each asserts is in the test file. What is *not*, and costs an afternoon:
+Each runs as `godot --headless --path . res://scenes/dev/<name>.tscn`; CLAUDE.md
+names them. What each asserts is in the test file. What is *not*, and costs an afternoon:
 
 - **Synthetic input needs the right door.** `Input.ActionPress` works for held
   actions, but event-driven ones only reach `_UnhandledInput` via
@@ -676,15 +681,12 @@ own: views settle by **time**, not frame count, because the rig smooths on
 
 ## Not yet implemented (deliberate)
 
-- **Nothing reads fertility or the season yet**: `### Crops` grows every field
-  at one rate and the calendar advances unwatched — the next M4 issue. Harvest
-  produces nothing (#28), and no stage shows in the view (#29) or a panel (#30).
+- **A crop grows and stalls, and that is all it does**: harvest produces
+  nothing (#28), and no stage shows in the view (#29) or a panel (#30).
 - **Structures have no behavior** and there is one generic kind; the roster is
   M5's (silo) and M6's (cleaner, mill, bakery). They are also the last placed
   thing still a plain object in `WorldGrid`'s registries rather than an entity
   row, and move when M5 gives them state worth ticking.
-- **Validation lives in the tools, not the data layer.** `SetTile` still writes
-  anywhere, off the map included, which is what start layout and tests want.
 - **Player interaction is the palette plus four tools** and three dev keys. The
   unlock *seam* exists (`ToolAvailability`) and none of the rules — that is M8's.
   The HUD pass is M10's; the bar and two corner readouts are all the UI.
@@ -696,5 +698,3 @@ own: views settle by **time**, not frame count, because the rig smooths on
   driving it or has it in an already-computed route, and nothing re-checks a
   building's road access when the road beside it goes. Both are real M5 cases;
   the notes sit on `WorldGrid.Clear`, where whoever writes M5 will be standing.
-- **Flow fields**: BFS per machine is fine at this scale; revisit when mover
-  count grows.

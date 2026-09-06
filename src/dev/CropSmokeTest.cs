@@ -27,13 +27,34 @@ namespace Arable;
 /// downstream would ever notice.
 ///
 /// The cells are searched, never written in, so a seed change cannot quietly
-/// turn an assertion into a test of something else.
+/// turn an assertion into a test of something else — and the fertile and poor
+/// patches the growth comparison needs are searched for by <i>fertility</i>,
+/// not picked off the map by eye.
+///
+/// <b>Growth is no longer one tick per tick</b>, so nothing here counts ticks
+/// against a hard-coded schedule: a field's rate is read from the system
+/// (<see cref="CropSystem.GrowthPerTick(EntityId)"/>) and every wait is
+/// budgeted from it. The invariant asserted instead is the one that cannot
+/// drift — a stage is exactly the growth banked against its threshold.
+///
+/// <b>The season table is flattened for this world</b> (see
+/// <see cref="_Ready"/>) so the lifecycle walk runs at one rate from end to
+/// end; the season's own effect, and the winter stall the game ships with, are
+/// asserted on bare systems where the date can be put where the assertion
+/// needs it instead of waited for.
 /// </summary>
 public partial class CropSmokeTest : Node
 {
     /// <summary>Size of the rectangle marked as the test's field.</summary>
     private const int FieldWidth = 3;
     private const int FieldHeight = 2;
+
+    /// <summary>
+    /// How far from the start the fertility search looks. Wide enough that the
+    /// noise field has both a good and a poor patch inside it, and small enough
+    /// that both are somewhere a player would plausibly farm.
+    /// </summary>
+    private const int SearchRadius = 24;
 
     private WorldGrid _world = null!;
     private Simulation _sim = null!;
@@ -54,6 +75,14 @@ public partial class CropSmokeTest : Node
         // Machines have nothing to do with crops yet (that is M5), and a world
         // without them keeps the hash checks below about the crop rows.
         world.MachineCount = 0;
+
+        // Set before the world is in the tree, because _Ready is what builds
+        // the crop system out of these. A flat season table takes the calendar
+        // out of the lifecycle walk: the run below spans tens of game days, so
+        // with the shipped table it would cross into autumn mid-crop and every
+        // timing assertion would be measuring the date instead of the schedule.
+        // Seasons get their own sections, on systems whose date is set outright.
+        world.CropSeasonGrowth = [1f, 1f, 1f, 1f];
         AddChild(main);
 
         _world = world;
@@ -93,6 +122,10 @@ public partial class CropSmokeTest : Node
         CheckThePostHarvestStageIsTunable();
         CheckGrowthIsCountedInTicksNotSeconds();
         CheckBulldozingClosesTheRow();
+        CheckTheSeasonIsWiredIntoTheWorld();
+        CheckFertilityIsAveragedByChunk();
+        CheckAFertileFieldOutgrowsAPoorOne();
+        CheckAZeroFactorStallsTheCrop();
 
         GD.Print(_failed ? "CROP SMOKE TEST FAILED" : "CROP SMOKE TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
@@ -174,32 +207,53 @@ public partial class CropSmokeTest : Node
     }
 
     /// <summary>
-    /// The two timed transitions, each checked on the tick either side of its
-    /// threshold — an off-by-one here is a crop that ripens a day early for the
-    /// rest of the game, and no other assertion would catch it.
+    /// The two timed transitions. The rate is no longer 1, so the schedule is
+    /// asserted twice over: as the invariant that cannot drift — the stage is
+    /// exactly which side of its threshold the banked growth is on, checked
+    /// every tick of the run — and as the tick count the field's own rate
+    /// predicts, which is what catches a factor being quietly dropped from the
+    /// product rather than merely misapplied.
     /// </summary>
     private void CheckItGrowsOnSchedule()
     {
-        _sim.Step(_crops.TicksToSprout - 1);
-        Check("a sown field has not come up the tick before it is due",
-            Stage() == CropStage.Sown);
-        _sim.Step();
-        Record();
-        Check($"and is growing after {_crops.DaysToSprout} day(s)", Stage() == CropStage.Growing);
+        float rate = _crops.GrowthPerTick(Row);
+        Check($"the field grows at {rate:F3} of a tick per tick — the product of "
+            + $"base {_crops.BaseGrowthRate:F2}, soil {_crops.FertilityOf(Row):F3}, "
+            + $"season {_crops.SeasonFactor:F2} and water {_crops.WaterGrowth:F2}",
+            Near(rate, _crops.BaseGrowthRate * _crops.FertilityOf(Row)
+                * _crops.SeasonFactor * _crops.WaterGrowth));
+        Check("which is real ground, so it is slower than a perfect tick and not zero",
+            rate > 0f && rate < 1f);
 
-        _sim.Step(_crops.TicksToRipen - _crops.TicksToSprout - 1);
-        Check("a growing crop is not ripe the tick before it is due",
-            Stage() == CropStage.Growing);
-        RefuseAllBut(null, "growing");
-        _sim.Step();
-        Record();
-        Check($"and is harvestable after {_crops.DaysToRipen} day(s)",
-            Stage() == CropStage.Harvestable);
-        // Exactly, not approximately: a full-rate tick adds a whole 1, so a
-        // crop that ripened a tick early or late would show up here as a number
-        // that is off by one rather than as a rounding difference.
-        Check("having banked exactly the growth the schedule asked for",
-            _crops.GrowthOf(Row) == _crops.TicksToRipen);
+        int sprouted = -1;
+        int ripened = -1;
+        bool stageTracksGrowth = true;
+        for (int tick = 1; tick <= TickBudget(rate) && ripened < 0; tick++)
+        {
+            _sim.Step();
+            stageTracksGrowth &= StageMatchesBankedGrowth();
+            if (sprouted < 0 && Stage() == CropStage.Growing)
+            {
+                sprouted = tick;
+                Record();
+                RefuseAllBut(null, "growing");
+            }
+            if (Stage() == CropStage.Harvestable)
+            {
+                ripened = tick;
+                Record();
+            }
+        }
+
+        Check("through the whole run, the stage is exactly which side of its "
+            + "threshold the banked growth is on", stageTracksGrowth);
+        Check($"it came up after {sprouted} ticks, the {_crops.DaysToSprout} grown "
+            + "day(s) the schedule asks for at that rate",
+            sprouted > 0 && Near(sprouted, _crops.TicksToSprout / rate));
+        Check($"and ripened after {ripened}, the {_crops.DaysToRipen} grown day(s)",
+            ripened > 0 && Near(ripened, _crops.TicksToRipen / rate));
+        Check("having banked at least the growth the schedule asked for",
+            _crops.GrowthOf(Row) >= _crops.TicksToRipen);
     }
 
     /// <summary>
@@ -266,10 +320,8 @@ public partial class CropSmokeTest : Node
 
         // Put the field back where the cycle left it, so the bulldoze section
         // below is not quietly testing a different stage.
-        _sim.Step(_crops.TicksToRipen);
         Check("the second crop ripened the same way the first did",
-            Stage() == CropStage.Harvestable
-            && _crops.Harvest(Row) == CropOpResult.Ok);
+            Ripen() && _crops.Harvest(Row) == CropOpResult.Ok);
     }
 
     /// <summary>
@@ -352,6 +404,270 @@ public partial class CropSmokeTest : Node
         _sim.Step(_crops.TicksPerDay);
         Check("and a day of ticking over an empty system changes nothing",
             _crops.Count == 0 && !_crops.IsAlive(row));
+    }
+
+    /// <summary>
+    /// The season factor comes off the live calendar, not a copy taken when
+    /// the world was built — otherwise a date jump (M10's load, a scenario
+    /// opening in autumn) would grow crops at last year's season forever.
+    /// </summary>
+    private void CheckTheSeasonIsWiredIntoTheWorld()
+    {
+        Check("the world hands its exported season table to the crops",
+            SameTable(_crops.SeasonGrowth, _world.CropSeasonGrowth));
+        Check("and the calendar, so growth is read against the date the sim is on",
+            _crops.CurrentSeason == _sim.Calendar.Season);
+
+        long was = _sim.Calendar.Ticks;
+        _sim.Calendar.SetDate(1, Season.Autumn, 1);
+        Check("which follows the date rather than a copy taken at startup",
+            _crops.CurrentSeason == Season.Autumn
+            && _crops.SeasonFactor == _crops.SeasonGrowth[(int)Season.Autumn]);
+        _sim.Calendar.SetTicks(was);
+    }
+
+    /// <summary>
+    /// A field is a region of ground, not a cell, so the number it grows at is
+    /// an aggregate — the mean of its chunk means. The two properties worth
+    /// pinning are the knob's off position (a chunk of one cell is the plain
+    /// cell mean) and that the answer is one the ground could actually have
+    /// produced, never outside the range of the cells it covered.
+    /// </summary>
+    private void CheckFertilityIsAveragedByChunk()
+    {
+        Vector2I? anchor = FindClearSoilRect();
+        Check("there is still a clear patch to aggregate over", anchor != null);
+        if (anchor == null)
+        {
+            return;
+        }
+
+        Vector2I far = anchor.Value + new Vector2I(FieldWidth - 1, FieldHeight - 1);
+        List<Vector2I> cells = WorldGrid.RectCells(anchor.Value, far);
+        int chunkSize = _world.FertilityChunkSize;
+
+        float low = float.MaxValue;
+        float high = float.MinValue;
+        float total = 0f;
+        foreach (Vector2I cell in cells)
+        {
+            float fertility = _world.GetFertility(cell);
+            low = Math.Min(low, fertility);
+            high = Math.Max(high, fertility);
+            total += fertility;
+        }
+
+        _world.FertilityChunkSize = 1;
+        Check("a chunk of one cell is the plain average of the cells",
+            Near(_world.ChunkedFertility(cells), total / cells.Count));
+
+        _world.FertilityChunkSize = 2;
+        float chunked = _world.ChunkedFertility(cells);
+        Check($"a {_world.FertilityChunkSize}-cell chunking stays inside the range of "
+            + $"the ground it covered ({low:F3}..{high:F3})",
+            chunked >= low - 0.001f && chunked <= high + 0.001f);
+
+        _world.FertilityChunkSize = chunkSize;
+        Field? field = _world.MarkField(cells);
+        Check("a new field's crop row carries the aggregate of its ground",
+            field != null
+            && Near(_crops.FertilityOf(field.Crop), _world.ChunkedFertility(cells)));
+        if (field == null)
+        {
+            return;
+        }
+
+        _world.Clear(cells[0]);
+        Check("and it is taken again when bulldozing takes a cell off the field",
+            Near(_crops.FertilityOf(field.Crop), _world.ChunkedFertility(field.Cells)));
+        ClearAll(field);
+    }
+
+    /// <summary>
+    /// <b>The milestone's question, as an assertion.</b> Two fields sown on the
+    /// same tick and left for the same number of ticks: the one on better
+    /// ground has to be further along, and by the ratio of the ground rather
+    /// than by some flat bonus — which is what says fertility is a factor of
+    /// the product and not an addend.
+    ///
+    /// Both patches are searched for by fertility, so a seed change moves where
+    /// they are without turning this into a test of two identical fields.
+    /// </summary>
+    private void CheckAFertileFieldOutgrowsAPoorOne()
+    {
+        (Vector2I Rich, Vector2I Poor)? patches = FindRichAndPoorRects();
+        Check("the map offers a fertile patch and a poor one to compare", patches != null);
+        if (patches == null)
+        {
+            return;
+        }
+
+        Field? rich = MarkRect(patches.Value.Rich);
+        Field? poor = MarkRect(patches.Value.Poor);
+        Check("both are markable", rich != null && poor != null);
+        if (rich == null || poor == null)
+        {
+            return;
+        }
+
+        float good = _crops.FertilityOf(rich.Crop);
+        float bad = _crops.FertilityOf(poor.Crop);
+        Check($"and they are meaningfully different ground: {good:F3} against {bad:F3}",
+            good > bad + 0.1f && bad > 0f);
+
+        foreach (Field field in new[] { rich, poor })
+        {
+            Check($"{field.Name} is ploughed and sown",
+                _crops.Plough(field.Crop) == CropOpResult.Ok
+                && _crops.Sow(field.Crop) == CropOpResult.Ok);
+        }
+
+        // One grown day for the better field, which leaves both still in the
+        // ground: a comparison of banked growth means nothing once one of them
+        // has ripened and stopped accumulating.
+        int ticks = Math.Max(1, (int)(_crops.TicksToSprout / _crops.GrowthPerTick(rich.Crop)));
+        _sim.Step(ticks);
+
+        float grownRich = _crops.GrowthOf(rich.Crop);
+        float grownPoor = _crops.GrowthOf(poor.Crop);
+        Check($"over the same {ticks} ticks the fertile field outgrew the poor one "
+            + $"({grownRich:F0} against {grownPoor:F0} grown ticks)", grownRich > grownPoor);
+        Check("by the ratio of their soil, because fertility multiplies rather than adds",
+            Near(grownRich / grownPoor, good / bad));
+        Check("and neither has ripened, so it is growth being compared and not stages",
+            _crops.StageOf(rich.Crop) != CropStage.Harvestable
+            && _crops.StageOf(poor.Crop) != CropStage.Harvestable);
+
+        ClearAll(rich);
+        ClearAll(poor);
+    }
+
+    /// <summary>
+    /// <b>The other half of the milestone's question.</b> The factors multiply,
+    /// so any one of them at zero has to hold the crop at the stage it is in
+    /// rather than merely slow it — an untended crop that finishes anyway would
+    /// make M5's whole labour system optional. Checked on bare systems, one per
+    /// factor, because the point is that it does not matter which one is zero.
+    /// </summary>
+    private void CheckAZeroFactorStallsTheCrop()
+    {
+        const int days = 10;
+        Check("the season table the game ships with stops growth in winter outright",
+            CropSystem.DefaultSeasonGrowth[(int)Season.Winter] == 0f);
+
+        var dead = new CropSystem(_crops.TicksPerDay, 1, 2);
+        Check($"a crop on dead ground is still where it was sown {days} days later",
+            Stalls(dead, dead.Create(1, fertility: 0f), days));
+
+        var dry = new CropSystem(_crops.TicksPerDay, 1, 2, true, waterGrowth: 0f);
+        Check("and so is one with the water factor at zero — the seam nothing writes yet",
+            Stalls(dry, dry.Create(1, fertility: 1f), days));
+
+        var calendar = new GameCalendar(_crops.TicksPerDay);
+        calendar.SetDate(1, Season.Winter, 1);
+        var wintered = new CropSystem(
+            _crops.TicksPerDay, 1, 2, true, 1f, CropSystem.DefaultSeasonGrowth, 1f, calendar);
+        EntityId row = wintered.Create(1, fertility: 1f);
+        Check("and so is perfect ground in winter, which is the product's whole point",
+            Stalls(wintered, row, days));
+
+        // Stalled, not dead: the same crop finishes once the season turns, so
+        // an over-wintered field is a delay the player can plan around rather
+        // than a loss they cannot see coming.
+        calendar.SetDate(2, Season.Spring, 1);
+        for (int tick = 0; tick < wintered.TicksToRipen; tick++)
+        {
+            wintered.Tick(1f / 20f);
+        }
+        Check("and it picks up again when the season turns, rather than being lost",
+            wintered.StageOf(row) == CropStage.Harvestable);
+    }
+
+    /// <summary>
+    /// Ploughs, sows and runs a bare system for <paramref name="days"/> days —
+    /// true if the crop banked nothing at all and never left the sown stage.
+    /// </summary>
+    private static bool Stalls(CropSystem crops, EntityId row, int days)
+    {
+        crops.Plough(row);
+        crops.Sow(row);
+        for (int tick = 0; tick < days * crops.TicksPerDay; tick++)
+        {
+            crops.Tick(1f / 20f);
+        }
+        return crops.GrowthPerTick(row) == 0f && crops.GrowthOf(row) == 0f
+            && crops.StageOf(row) == CropStage.Sown;
+    }
+
+    /// <summary>
+    /// Whether the field's stage is exactly which side of its thresholds the
+    /// banked growth is on. The schedule assertion that survives a fractional
+    /// rate: a tick count can drift by a rounding, this cannot.
+    /// </summary>
+    private bool StageMatchesBankedGrowth()
+    {
+        float grown = _crops.GrowthOf(Row);
+        return Stage() switch
+        {
+            CropStage.Sown => grown < _crops.TicksToSprout,
+            CropStage.Growing => grown >= _crops.TicksToSprout && grown < _crops.TicksToRipen,
+            CropStage.Harvestable => grown >= _crops.TicksToRipen,
+            _ => true,
+        };
+    }
+
+    /// <summary>Ticks the field needs to ripen at <paramref name="rate"/>, with slack.</summary>
+    private int TickBudget(float rate) =>
+        rate > 0f ? (int)(_crops.TicksToRipen / rate) + 16 : 0;
+
+    /// <summary>Runs the field to ripe at whatever rate it grows at. False if it never got there.</summary>
+    private bool Ripen()
+    {
+        int budget = TickBudget(_crops.GrowthPerTick(Row));
+        for (int tick = 0; tick < budget && Stage() != CropStage.Harvestable; tick++)
+        {
+            _sim.Step();
+        }
+        return Stage() == CropStage.Harvestable;
+    }
+
+    /// <summary>Marks the standard rectangle anchored at the cell.</summary>
+    private Field? MarkRect(Vector2I anchor) => _world.MarkField(WorldGrid.RectCells(
+        anchor, anchor + new Vector2I(FieldWidth - 1, FieldHeight - 1)));
+
+    /// <summary>Bulldozes a field away, so the next section searches a clean map.</summary>
+    private void ClearAll(Field field)
+    {
+        foreach (Vector2I cell in new List<Vector2I>(field.Cells))
+        {
+            _world.Clear(cell);
+        }
+    }
+
+    /// <summary>
+    /// Within 1%, floored at a whole unit. Growth is accumulated one fractional
+    /// multiplier at a time over thousands of ticks, so an exact comparison
+    /// against <c>threshold / rate</c> would be asserting single-precision
+    /// summation order rather than the schedule; 1% still catches a factor
+    /// dropped from the product, which moves the answer by half or double.
+    /// </summary>
+    private static bool Near(float actual, float expected) =>
+        Math.Abs(actual - expected) <= Math.Max(0.01f, Math.Abs(expected) * 0.01f);
+
+    private static bool SameTable(IReadOnlyList<float> actual, IReadOnlyList<float> expected)
+    {
+        if (actual.Count != expected.Count)
+        {
+            return false;
+        }
+        for (int i = 0; i < actual.Count; i++)
+        {
+            if (actual[i] != expected[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -465,6 +781,78 @@ public partial class CropSmokeTest : Node
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// The best and worst patches of ground within reach of the start, as two
+    /// rectangles that do not overlap — the pair the fertility comparison needs.
+    /// <b>Searched by fertility rather than written in</b>, and searched with
+    /// the same aggregate a field would actually be given, so what the
+    /// assertion compares is exactly what the sim would grow at. Null when the
+    /// map has nowhere to put two fields.
+    /// </summary>
+    private (Vector2I Rich, Vector2I Poor)? FindRichAndPoorRects()
+    {
+        List<Vector2I> anchors = FindClearSoilRects(SearchRadius);
+        if (anchors.Count < 2)
+        {
+            return null;
+        }
+
+        Vector2I rich = anchors[0];
+        float best = Aggregate(rich);
+        foreach (Vector2I anchor in anchors)
+        {
+            float fertility = Aggregate(anchor);
+            if (fertility > best)
+            {
+                best = fertility;
+                rich = anchor;
+            }
+        }
+
+        // The poorest of the rectangles that do not overlap the best one:
+        // two fields cannot share a cell, and the worst patch is often right
+        // beside the best where a noise field is steep.
+        var taken = new Rect2I(rich, new Vector2I(FieldWidth, FieldHeight));
+        Vector2I? poor = null;
+        float worst = float.MaxValue;
+        foreach (Vector2I anchor in anchors)
+        {
+            if (taken.Intersects(new Rect2I(anchor, new Vector2I(FieldWidth, FieldHeight))))
+            {
+                continue;
+            }
+            float fertility = Aggregate(anchor);
+            if (fertility < worst)
+            {
+                worst = fertility;
+                poor = anchor;
+            }
+        }
+        return poor == null ? null : (rich, poor.Value);
+    }
+
+    /// <summary>The fertility a field marked at this anchor would be given.</summary>
+    private float Aggregate(Vector2I anchor) => _world.ChunkedFertility(WorldGrid.RectCells(
+        anchor, anchor + new Vector2I(FieldWidth - 1, FieldHeight - 1)));
+
+    /// <summary>Every markable anchor within the radius, in the ring order above.</summary>
+    private List<Vector2I> FindClearSoilRects(int radius)
+    {
+        var found = new List<Vector2I>();
+        for (int y = -radius; y <= radius; y++)
+        {
+            for (int x = -radius; x <= radius; x++)
+            {
+                var anchor = new Vector2I(x, y);
+                if (IsClearSoilRect(anchor))
+                {
+                    found.Add(anchor);
+                }
+            }
+        }
+        return found;
     }
 
     private bool IsClearSoilRect(Vector2I anchor)
