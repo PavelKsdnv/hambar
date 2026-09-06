@@ -1,7 +1,8 @@
-[gd_scene load_steps=20 format=3]
+[gd_scene load_steps=21 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
+[ext_resource type="Script" path="res://src/sim/Simulation.cs" id="17_sim"]
 [ext_resource type="MeshLibrary" path="res://assets/dev/tile_library.tres" id="3_tiles"]
 [ext_resource type="PackedScene" path="res://scenes/world/Machine.tscn" id="4_machine"]
 [ext_resource type="Script" path="res://src/ui/DevShortcuts.cs" id="5_devkeys"]
@@ -42,6 +43,11 @@ shadow_enabled = true
 
 [node name="Ground" type="MeshInstance3D" parent="."]
 mesh = SubResource("mesh_ground")
+
+[node name="Sim" type="Node" parent="."]
+script = ExtResource("17_sim")
+TickRate = 20
+MaxTicksPerFrame = 5
 
 [node name="World" type="Node3D" parent="."]
 script = ExtResource("2_world")

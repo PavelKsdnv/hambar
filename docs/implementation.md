@@ -29,6 +29,7 @@ Last updated: 2026-09-05.
 |---|---|
 | `## Building & running` | building, running or adding a scene |
 | `## Project layout` | looking for where something lives |
+| `## Simulation` | touching the tick, sim state, or anything the view draws |
 | `## Camera` | touching `CameraRig`, projection or input |
 | `## World grid` | touching world state, terrain, tiles or road queries |
 | `## Machines` | touching vehicles or movement |
@@ -46,13 +47,11 @@ Last updated: 2026-09-05.
 
 ## Building & running
 
-- **Godot 4.7 stable (.NET/mono build)**, C# on **.NET SDK 8**. Renderer Forward
-  Plus on D3D12, physics Jolt (both set in `project.godot`).
+- **Godot 4.7 stable (.NET/mono build)**, C# on **.NET SDK 8**. Forward Plus on
+  D3D12, physics Jolt (both in `project.godot`).
 - `dotnet build Arable.sln` — the `.csproj`/`.sln` are hand-written because
-  Godot's `--build-solutions` will not create them from scratch
-  (`Godot.NET.Sdk/4.7.0`, `net8.0`, nullable enabled).
-- Run with `godot --path .`. Main scene is
-  `scenes/Main.tscn`.
+  Godot's `--build-solutions` will not create them from scratch.
+- Run with `godot --path .`. Main scene is `scenes/Main.tscn`.
 
 ## Project layout
 
@@ -62,6 +61,7 @@ assets/icons/      toolbar/ — build-tool icons (white SVGs, tinted per state)
 docs/              design docs (concept, tech decisions, this file)
 scenes/            Main.tscn is the entry point; world/ holds instanced
                    scenes; dev/ holds test scenes, not part of the game
+src/sim/           the fixed tick and the sim/view contracts
 src/camera/        the camera rig
 src/ui/            HUD, input handling and screen-to-cell picking
 src/ui/build/      the build-tool base and its placement-tool subclasses
@@ -77,19 +77,58 @@ committed.
 `node_paths=PackedStringArray("World")`. Without that marker the property loads
 as null.
 
+## Simulation (`src/sim/`)
+
+> **The view reads sim state; it never writes it.** The same rule `WorldGrid`
+> holds over its `GridMap`, one level up and now enforced by types:
+> `ISimSystem.Tick` is the only place sim state may change, `ISimView.Interpolate`
+> is handed an alpha and poses visuals from state it must treat as read-only. A
+> node that is still both (a `Machine`) implements both halves and keeps them in
+> separate methods.
+
+`SimClock` is the accumulator — real seconds in, whole ticks out, leftover
+fraction kept as `Alpha`; `Simulation` is the `Node` that drives it and holds
+the registrations. Why it is shaped this way:
+
+- **20 Hz, and deliberately not 60.** Matching Godot's physics rate would let a
+  coupling bug hide behind the coincidence; at 20 Hz anything accidentally
+  running per physics step is off by 3×. It is an export, not a constant, so the
+  cost of the rate stays measurable.
+- **Fed from `_Process`, not `_PhysicsProcess`.** `_PhysicsProcess` is already a
+  fixed step owned by the frame loop, so clocking the sim off it would make the
+  sim a divisor of the render rate — exactly the coupling this removes.
+- **Overrun is dropped, not owed.** Past `MaxTicksPerFrame` (5 = 0.25 s of sim)
+  the surplus is discarded and counted in `DroppedTicks`; a backlog would make
+  the next frame slower still, which is the spiral of death. So a sim that
+  cannot keep up runs **slow**, never at a variable step: determinism survives
+  and only the tie to the wall clock is lost. `DroppedTicks > 0` is the signal.
+- **The view lags one tick.** The blend ends at the *current* state, so the
+  picture is up to 50 ms behind. Extrapolating instead would mispredict corners.
+- **`Alpha` can be exactly 1.** Deltas summing to a whole tick in real
+  arithmetic can fall a hair short in doubles, and the remainder rounds to 1 in
+  single precision. Clamped and harmless — but for the same reason, measure sim
+  time as *ticks + alpha*, never as whole ticks alone.
+- **Found by group, not `NodePath`.** Entities are instanced at runtime, so an
+  exported path cannot reach them; `Simulation.For(node)` is the one lookup, run
+  once per entity in `_Ready`. The node ticks at `ProcessPriority = -100`, so a
+  transform read this frame is the pose the sim just produced.
+- **Deferred:** state still lives in the entity nodes rather than flat arrays
+  (next, M3); pause, time scale, calendar and replay hashing are later M3
+  issues. Registration during a tick is unsupported — an entity that wants to
+  stop goes idle inside its own `Tick`.
+
 ## Camera (`src/camera/CameraRig.cs`)
 
-RTS-style isometric camera, per the tech.md decision: orthographic `Camera3D`,
-fixed pitch, pan + zoom + 90°-step rotation.
+RTS-style isometric camera, per tech.md: orthographic, fixed pitch, pan + zoom +
+90°-step rotation.
 
 **Structure.** The `CameraRig` node sits on the ground plane and only ever yaws;
 its child `Camera3D` holds everything else fixed — true-isometric pitch
 (35.264° = atan(1/√2)), orthographic projection, a distance offset. The rig
 starts at 45° yaw, so 90° steps always keep the classic iso diamond.
 
-**Controls** (actions in the `[input]` section of `project.godot`): WASD/arrows
-pan relative to yaw, middle-drag pans 1:1, wheel zooms (×1.15/step, clamped
-6–80), Q/E rotate in 90° steps.
+**Controls** (actions live in `project.godot`): WASD/arrows pan relative to yaw,
+middle-drag pans 1:1, wheel zooms, Q/E rotate in 90° steps.
 
 **The three things to know before changing it:**
 
@@ -115,8 +154,8 @@ cells.
 **Data/view split.** `WorldGrid` (a `Node3D` named `World` in Main.tscn) owns
 the logical world state; its child `GridMap` is presentation only. Game logic
 goes through `WorldGrid` and must **never read the `GridMap` back** — every
-mutator keeps the view in sync. This is the first step toward tech.md's rule
-that the sim is decoupled from rendering.
+mutator keeps the view in sync. `## Simulation` states the same rule for
+entities.
 
 **Two layers, stored separately.** What the land *is* and what the player
 *built* are different things, and they never share storage:
@@ -181,20 +220,13 @@ rather than about a vehicle:
   row-major from the minimum, so the list depends on the rectangle and not on
   which corner the drag started from.
 
-**Mutators.** `SetTile` is the single write path, and it maintains both entity
-registries so that no caller has to remember to:
-
-| Mutator | Does |
-|---|---|
-| `MarkField(cells)` | creates **one** `Field`, stamps tiles, indexes cell → field |
-| `PlaceStructure(cells)` | the twin: **one** `Structure`, tiles, cell → structure |
-| `BuildRoadLine(from, to)` | stamps the `LineCells` road |
-| `Clear(cell)` | the one removal path; returns a `Removal` describing what came off, or **null** when the cell held nothing |
-
-The three placing mutators are the **unvalidated** entry points, for start
-layout, dev keys and tests: they overwrite whatever held the cells rather than
-refusing. Anything the *player* places goes through a `BuildTool`, and therefore
-through `PlacementRules`.
+**Mutators.** `SetTile` is the single write path and maintains both entity
+registries, so no caller has to remember to. `MarkField`, `PlaceStructure` and
+`BuildRoadLine` are the **unvalidated** entry points, for start layout, dev keys
+and tests: they overwrite whatever held the cells rather than refusing. Anything
+the *player* places goes through a `BuildTool`, and therefore through
+`PlacementRules`. `Clear` is the one removal path, and returns **null** — not an
+empty `Removal` — when the cell held nothing.
 
 Two asymmetries in `SetTile` that everything downstream inherits: writing over a
 field cell detaches **just that cell**, and a field that loses its last cell is
@@ -216,17 +248,21 @@ vehicles will be standing.
 A machine is any vehicle — tractor, combine, truck. One generic scene/script for
 now, varied per instance by exported `Speed`, `TurnSpeed`, `BodyColor`.
 
-- **Dev model:** box body, white cab, four cylinder wheels; forward is **−Z**.
-  The meshes sit under a `Model` child that carries the visual scale, so the
-  root's transform stays purely sim state (position + yaw) and resizing the art
-  never touches movement code.
+- **Dev model:** a box vehicle whose forward is **−Z**. The meshes sit under a
+  `Model` child carrying the visual scale, so the root transform stays position
+  + yaw and resizing the art never touches movement code.
 - **Behavior:** wander the road network — pick a random road cell, `FindRoadPath`
   to it, run that through `SmoothRoadPath`, drive the waypoints, repeat. The
   smoothing is what keeps driving on a stair-stepped diagonal road from
   zigzagging. A machine that finds itself off-road warns and parks.
-- **Movement** runs in `_PhysicsProcess` (fixed 60 Hz, per tech.md). Each tick
-  spends a travel budget (`Speed·dt`) across waypoints so corners do not lose
-  distance; yaw turns smoothly toward the travel direction.
+- **Movement** runs on the sim tick (`Tick`), spending a travel budget
+  (`Speed·dt`) across waypoints each tick so corners do not lose distance; yaw
+  turns toward the travel direction with frame-rate-independent smoothing, so
+  changing the tick rate does not change how fast it looks like it turns.
+- **The node transform is a drawing, not a position.** `Interpolate` writes it
+  every frame from the last two sim poses; read `SimPosition` for where the
+  machine actually is. The transform is spawn *input* only until `_Ready`
+  snapshots it, which is why `SpawnMachine` can still just set `Position`.
 - **Determinism:** each machine gets a seeded `System.Random` from `WorldGrid`,
   and spawn positions come from a fixed-seed counter, so any spawn sequence is
   reproducible.
@@ -301,26 +337,15 @@ the click, and the anchor → preview → place → cancel interaction.
 `RoadBuildTool` is 30 lines, most of them comment — copying it is how the next
 tool gets written.
 
-**What a subclass supplies** (the whole contract):
+A subclass supplies only what differs: the tile it writes, the rules it opts
+into, the footprint a drag covers, and — where the default is wrong — how the
+placement is applied, whether it needs an anchor, how verdicts add up, and how
+the ghost is coloured. The abstract members of `BuildTool` are the whole
+contract.
 
-| Member | Meaning |
-|---|---|
-| `TileType PlacedTile` | what the tool writes |
-| `PlacementRule Rules` | the legality rules it opts into |
-| `Footprint(anchor, cell)` | cells a drag covers (`LineCells`, `RectCells`, or one cell) |
-| `Apply(PlacementPlan)` *(virtual)* | writes the placement; the default stamps `PlacedTile` over every cell |
-| `NeedsAnchor` *(virtual, true)* | false for single-click tools, which ghost as soon as the cursor moves |
-| `Policy` *(virtual, `EveryCell`)* | how per-cell verdicts add up over a footprint |
-| `GhostColorFor(plan, i)` *(virtual)* | how the ghost paints cell `i` |
-
-**The four tools** (`CostPerCell` is exported; every number is a placeholder):
-
-| Tool | Key | Places | Costs | Rules | Footprint |
-|---|---|---|---|---|---|
-| `RoadBuildTool` | **1** | `Road` | 5/cell | `BuildableTerrain` + `NoOverlap` | `LineCells` |
-| `FieldBuildTool` | **2** | `Field` | 10/cell | `BuildableTerrain` + `VacantCell` | `RectCells` |
-| `StructureBuildTool` | **3** | `Structure` | 250 | `BuildableTerrain` + `VacantCell` + `TouchesRoad` | the hovered cell |
-| `BulldozeTool` | **4** | *removes* | 0 | `InBounds` + `OccupiedCell`, `Policy` = `AnyCell` | `RectCells` |
+**The four tools** are road (line drag), field (rect drag), structure (single
+click, `TouchesRoad`) and bulldoze (rect drag, `AnyCell`); each declares its own
+tile, rules and footprint, and `CostPerCell` is an export holding a placeholder.
 
 Fields and structures override `Apply` to call `MarkField`/`PlaceStructure`,
 because the default would write tiles and leave farmland or a building that
@@ -394,9 +419,7 @@ purpose: a new tool gets it for free, and the palette has to know neither the
 list nor the rule.
 
 **Driving a tool without a cursor.** Every state-changing entry point is public
-and cell-driven (`SetActive`/`Toggle`, `HoverAt`, `ClickCell`, `Cancel`,
-`PlanFor`), and the preview reads back through `Preview`, `PreviewLegal`,
-`GhostCellCount`, `GhostColor(i)`, `CursorColor`. That is how the headless tests
+and cell-driven, and the whole preview reads back, so the headless tests can
 assert what the player would see; see **Dev smoke tests** for the two traps.
 
 ### Fields (`src/world/Field.cs`, `src/ui/build/FieldBuildTool.cs`)
@@ -407,10 +430,8 @@ assert what the player would see; see **Dev smoke tests** for the two traps.
 > refers to "that field cell". Crops, jobs, yields and M4's output buffer hang
 > off the entity, reached with `WorldGrid.GetField(cell)`.
 
-`Field` holds `Id` (creation order, never reused), `Name` (defaulted, settable,
-no rename UI yet), its `Cells`, `CellCount`, `Contains` and `Bounds`.
-
-What that choice commits us to — all of it deliberate:
+`Field` ids are creation order and are never reused. What that choice commits us
+to — all of it deliberate:
 
 - **Exactly one owner per cell.** `GetField` answers with one field or null,
   which is why the tool opts into `VacantCell`: a rectangle can never be drawn
@@ -572,10 +593,9 @@ drive a known pixel.
 ## Hover readout (`src/ui/CellInspector.cs`)
 
 The debug instrument that confirms the generated world is what the generator
-thinks it is: a screen-corner `Label` naming the cell under the cursor —
-coordinates, terrain, fertility, placed tile, and the owning `Field`/`Structure`
-by name where there is one, because the entity is what the game addresses
-farmland and buildings by.
+thinks it is: a screen-corner `Label` naming everything about the cell under the
+cursor, including the owning `Field`/`Structure` *by name* — the entity, because
+that is what the game addresses farmland and buildings by.
 
 Fertility prints only for soil (rock and water have none by definition), and
 everything is formatted with `InvariantCulture` so the text is identical on
@@ -594,10 +614,8 @@ simulated seconds, prints `PASS`/`FAIL` lines and exits 0/1. **Run all of them**
 — the older ones are the regression net for the newer ones.
 
 ```bash
-godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn  # rig pans, rotates, zooms
-godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn   # terrain, seed determinism, layer
-                                                                 # independence, machines, and the
-                                                                 # picker/inspector pixel round trip
+godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn
+godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
 godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 ```
 
@@ -613,6 +631,9 @@ What each one asserts is in the test file, and is not re-narrated here. What is
 - **`GhostColor` reads the tints the tool handed the mesh, not the mesh.** Under
   `--headless` the dummy renderer keeps no per-instance colours, and
   `GetInstanceColor` answers black.
+- **Wait on sim ticks, not frame counts.** Anything the sim moves has to be
+  asserted after *N ticks*, since a frame number now says nothing about how far
+  it got. The clock itself is testable as plain arithmetic — it is not a node.
 - **Cells are searched, never hard-coded.** The tests find the nearest rock, a
   clear soil run, a run ending in water, free soil beside a road, and so on, at
   the point of use — so a seed change cannot quietly turn an assertion into a
@@ -672,8 +693,8 @@ For a visual check without a window grab, movie-maker mode renders frames:
   of a refund and none of the economics, which are M7's.
 - **Nothing stops a road being bulldozed out from under a machine** that is
   driving it or has it in a route. A real case from M5, not an impossible one.
-- **The simulation still lives in Godot nodes**; the standalone deterministic
-  sim core (ECS-like layout, save/replay) comes when there is real sim state to
-  own.
+- **Sim state still lives in the entity nodes.** The fixed tick and the
+  view/sim split exist (`## Simulation`); the flat-array entity layout, spatial
+  hash, calendar, RNG streams and determinism hashing are the rest of M3.
 - **Flow fields**: BFS per machine is fine at this scale; revisit when mover
   count grows.

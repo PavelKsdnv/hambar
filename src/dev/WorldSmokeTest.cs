@@ -7,9 +7,10 @@ namespace Arable;
 /// Headless smoke test for the world grid and machines: instances Main.tscn and
 /// asserts the generated terrain (seeded, bounded, varied, deterministic) and
 /// the starting road, that terrain and placement are independent layers, then
-/// spawns a machine via dev key 9 and asserts it drives the road, exercises
-/// the road-build tool (armed from the build palette, then anchor click + place
-/// click → straight road with diagonal steps), and drives known screen pixels
+/// spawns a machine via dev key 9 and asserts it drives the road on the fixed
+/// sim tick with the view interpolating behind it, exercises the road-build
+/// tool (armed from the build palette, then anchor click + place click →
+/// straight road with diagonal steps), and drives known screen pixels
 /// through the shared cell picker to check the hover readout (dev key 8). Run
 /// with:
 /// godot --headless res://scenes/dev/WorldSmokeTest.tscn
@@ -20,15 +21,25 @@ public partial class WorldSmokeTest : Node
     /// <summary>The road tool's place on the build palette — its first entry.</summary>
     private const int RoadEntry = 0;
 
+    /// <summary>
+    /// Sim ticks to let the machine drive before checking it moved. Counted in
+    /// ticks, not frames: the sim runs on its own clock now, so a frame number
+    /// says nothing about how far anything got.
+    /// </summary>
+    private const long DriveTicks = 60;
+
     private WorldGrid _world = null!;
     private GridMap _gridMap = null!;
     private RoadBuildTool _roadTool = null!;
     private BuildPalette _palette = null!;
     private CellInspector _inspector = null!;
     private Label _readout = null!;
+    private Simulation _sim = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
     private bool _failed;
+    private bool _sawInterpolatedPose;
+    private bool _sawViewBetweenSimStates = true;
 
     public override void _Ready()
     {
@@ -40,6 +51,7 @@ public partial class WorldSmokeTest : Node
         _palette = main.GetNode<BuildPalette>("Hud/BuildPalette");
         _inspector = main.GetNode<CellInspector>("CellInspector");
         _readout = main.GetNode<Label>("Hud/CellReadout");
+        _sim = main.GetNode<Simulation>("Sim");
     }
 
     public override void _Process(double delta)
@@ -50,6 +62,7 @@ public partial class WorldSmokeTest : Node
             CheckTerrain();
             CheckLayersAreIndependent();
             CheckStartRoad();
+            CheckSimClock();
 
             // Dev key 9 spawns a machine — one of the two shortcuts left over
             // from the number-key menu the build palette replaced.
@@ -62,6 +75,7 @@ public partial class WorldSmokeTest : Node
                 _startPositions[(Machine)node] = ((Machine)node).Position;
             }
             Check("dev key 9 spawned a machine", _startPositions.Count == 1);
+            Check("the machine registered with the sim", _sim.SystemCount == 1);
 
             // The build palette is how a tool is armed: the first entry is the
             // road tool, and Select is the same call its button makes.
@@ -122,17 +136,127 @@ public partial class WorldSmokeTest : Node
             Check("dev key 8 switches the readout back on",
                 _inspector.Enabled && _readout.Visible);
         }
-        else if (_frame == 190)
+        else if (_frame > 30)
         {
-            foreach ((Machine machine, Vector3 start) in _startPositions)
+            SampleViewAgainstSimState();
+            if (_sim.TickCount >= DriveTicks)
             {
-                Check($"{machine.Name} moved", machine.Position.DistanceTo(start) > 1f);
-                Check($"{machine.Name} is on a road",
-                    _world.IsRoad(_world.WorldToCell(machine.Position)));
+                CheckMachinesDrove();
+                GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
+                GetTree().Quit(_failed ? 1 : 0);
             }
-            GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
-            GetTree().Quit(_failed ? 1 : 0);
         }
+    }
+
+    /// <summary>
+    /// The tick schedule itself, exercised as plain arithmetic — the one part
+    /// of the split a headless run cannot show by changing its own frame rate.
+    /// The same total real time, delivered in wildly different frame sizes,
+    /// must advance the clock by the same amount of sim time; that is what
+    /// "fixed timestep, independent of frame rate" means.
+    ///
+    /// Measured as ticks *plus* alpha, not ticks alone: a second delivered as
+    /// thirty 1/30 s doubles sums a hair under 1.0, so the honest answer is
+    /// "19 ticks and 0.9999 of the next", and an exact-equality test on the
+    /// tick count alone would call that a failure.
+    /// </summary>
+    private void CheckSimClock()
+    {
+        Check("the sim tick rate is not the physics tick rate",
+            _sim.Clock.TickRate == 20 && _sim.Clock.TickRate != (int)Engine.PhysicsTicksPerSecond);
+
+        (long Ticks, double Advanced) fast = AdvanceBy(Frames(1.0 / 300.0, 300));
+        (long Ticks, double Advanced) slow = AdvanceBy(Frames(1.0 / 30.0, 30));
+        (long Ticks, double Advanced) jittery = AdvanceBy(new[]
+        {
+            0.004, 0.031, 0.007, 0.058, 0.019, 0.003, 0.041, 0.137, 0.200, 0.090, 0.160,
+            0.150, 0.100,
+        });
+        GD.Print($"clock: one second = {fast.Ticks} ticks at 300 fps, "
+            + $"{slow.Ticks} at 30 fps, {jittery.Ticks} on jittery frames");
+        Check("one simulated second advances the clock 20 ticks at any frame rate",
+            Mathf.Abs(fast.Advanced - 20.0) < 0.001
+            && Mathf.Abs(slow.Advanced - 20.0) < 0.001
+            && Mathf.Abs(jittery.Advanced - 20.0) < 0.001);
+        Check("frame rate does not change how many whole ticks run",
+            fast.Ticks == 20 && jittery.Ticks == 20 && slow.Ticks >= 19);
+
+        // Spiral guard: a stalled frame runs the cap and throws the rest away,
+        // so the next frame is an ordinary one rather than 195 ticks of
+        // catch-up that would stall the next frame in turn.
+        var stalled = new SimClock();
+        int burst = stalled.Advance(10.0);
+        int next = stalled.Advance(1.0 / 60.0);
+        Check($"a stalled frame runs at most {stalled.MaxTicksPerFrame} ticks",
+            burst == stalled.MaxTicksPerFrame);
+        Check("time past the cap is discarded, not owed",
+            stalled.DroppedTicks > 190 && next <= 1);
+    }
+
+    private static double[] Frames(double delta, int count)
+    {
+        var frames = new double[count];
+        for (int i = 0; i < count; i++)
+        {
+            frames[i] = delta;
+        }
+        return frames;
+    }
+
+    /// <summary>
+    /// Runs a fresh clock through the frames and reports both the whole ticks
+    /// it ran and the sim time it advanced, in ticks (whole ticks + alpha).
+    /// </summary>
+    private static (long Ticks, double Advanced) AdvanceBy(double[] frames)
+    {
+        var clock = new SimClock();
+        long ticks = 0;
+        foreach (double frame in frames)
+        {
+            ticks += clock.Advance(frame);
+        }
+        return (ticks, ticks + clock.Alpha);
+    }
+
+    /// <summary>
+    /// The ownership rule, watched every frame: the node transform is a view of
+    /// the sim state, so it must always sit on the segment between the last two
+    /// sim positions — and at least once must sit strictly between them, which
+    /// is the frame that could not have happened without interpolation.
+    /// </summary>
+    private void SampleViewAgainstSimState()
+    {
+        foreach (Machine machine in _startPositions.Keys)
+        {
+            Vector3 previous = machine.PreviousSimPosition;
+            Vector3 current = machine.SimPosition;
+            float span = previous.DistanceTo(current);
+            if (span < 0.0001f)
+            {
+                continue;
+            }
+            float detour = machine.Position.DistanceTo(previous)
+                + machine.Position.DistanceTo(current) - span;
+            _sawViewBetweenSimStates &= detour < 0.001f;
+            _sawInterpolatedPose |= machine.Position.DistanceTo(current) > 0.001f;
+        }
+    }
+
+    private void CheckMachinesDrove()
+    {
+        GD.Print($"sim: {_sim.TickCount} ticks over {_frame} frames, "
+            + $"{_sim.Clock.DroppedTicks} dropped");
+        Check("the sim ran on its own clock, not once per frame",
+            _sim.TickCount >= DriveTicks && _sim.TickCount < _frame);
+        Check("the sim kept up without dropping ticks", _sim.Clock.DroppedTicks == 0);
+        foreach ((Machine machine, Vector3 start) in _startPositions)
+        {
+            Check($"{machine.Name} moved", machine.SimPosition.DistanceTo(start) > 1f);
+            Check($"{machine.Name} is on a road",
+                _world.IsRoad(_world.WorldToCell(machine.SimPosition)));
+        }
+        Check("the view stays between the last two sim states", _sawViewBetweenSimStates);
+        Check("the view draws poses between ticks", _sawInterpolatedPose);
     }
 
     /// <summary>
