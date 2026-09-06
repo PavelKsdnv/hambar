@@ -91,6 +91,25 @@ public partial class WorldGrid : Node3D, IHashableState
     /// <summary>Mask values above this become rock.</summary>
     [Export] public float RockLevel { get; set; } = 0.34f;
 
+    /// <summary>
+    /// Grown days from sowing to the crop showing above ground. Exported with
+    /// the two below because crop cadence is the tempo M4 is trying to find,
+    /// and a playtest that wants to argue about it should not need a rebuild.
+    /// See <see cref="CropSystem"/> for what the numbers mean.
+    /// </summary>
+    [Export] public int CropDaysToSprout { get; set; } = CropSystem.DefaultDaysToSprout;
+
+    /// <summary>Grown days from sowing to ripe — cumulative, not on top of the sprout.</summary>
+    [Export] public int CropDaysToRipen { get; set; } = CropSystem.DefaultDaysToRipen;
+
+    /// <summary>
+    /// Whether a harvested field has to be ploughed again before it can be
+    /// sown. <b>The pacing decision M4 owns</b>: on (the default) harvest
+    /// leaves stubble and every cycle costs a ploughing pass; off, harvest
+    /// leaves the field ready to sow and ploughing is a once-per-field job.
+    /// </summary>
+    [Export] public bool StubbleNeedsPloughing { get; set; } = true;
+
     private static readonly Color[] MachineColors =
     [
         new(0.75f, 0.22f, 0.17f), // tractor red
@@ -146,6 +165,12 @@ public partial class WorldGrid : Node3D, IHashableState
     // class already owns the road queries the machines run on, and there is
     // exactly one world.
     private MachineSystem _machines = null!;
+
+    // Crop state is entity rows too, for the reason machine state is: it is
+    // walked and hashed every tick, and a List of Fields is not an order a
+    // load has to reproduce. The registry of *which* cells a field covers stays
+    // above; only what changes with time went down there.
+    private CropSystem _crops = null!;
     private Simulation? _sim;
 
     public override void _Ready()
@@ -158,6 +183,15 @@ public partial class WorldGrid : Node3D, IHashableState
         _spawnRng = Streams.For(SpawnStreamName);
         _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
         _sim?.Register(_machines);
+
+        // The crop schedule is read against the calendar's day, so the tempo
+        // knob moves crop timing with it rather than quietly redefining how
+        // long a wheat crop takes. A scene with no sim still gets a working
+        // system, on the default day length.
+        _crops = new CropSystem(
+            _sim?.Calendar.TicksPerDay ?? GameCalendar.DefaultTicksPerDay,
+            CropDaysToSprout, CropDaysToRipen, StubbleNeedsPloughing);
+        _sim?.Register(_crops);
 
         // The world is state, not a system: it has nothing to tick, but a
         // determinism run and a save both have to see the map the player built.
@@ -176,6 +210,7 @@ public partial class WorldGrid : Node3D, IHashableState
     public override void _ExitTree()
     {
         _sim?.Unregister(_machines);
+        _sim?.Unregister(_crops);
         _sim?.UnregisterState(this);
     }
 
@@ -280,7 +315,10 @@ public partial class WorldGrid : Node3D, IHashableState
         }
 
         _fieldsCreated++;
-        var field = new Field(_fieldsCreated, $"Field {_fieldsCreated}", cells);
+        // The crop row is opened before the field so the handle can be
+        // constructor input: a Field is never observable without one.
+        var field = new Field(
+            _fieldsCreated, $"Field {_fieldsCreated}", cells, _crops.Create(_fieldsCreated));
         _fields.Add(field);
         foreach (Vector2I cell in cells)
         {
@@ -406,6 +444,10 @@ public partial class WorldGrid : Node3D, IHashableState
         if (field.CellCount == 0)
         {
             _fields.Remove(field);
+            // The row goes with the field, which is what makes every handle to
+            // it answer NoSuchField rather than address whatever field is
+            // marked into the recycled slot next.
+            _crops.Destroy(field.Crop);
         }
     }
 
@@ -927,6 +969,12 @@ public partial class WorldGrid : Node3D, IHashableState
             member.Reset();
             member.Write(field.Id);
             member.Write(field.Name);
+            // Which row the field's crop state lives in. Not derivable from
+            // either side: the row knows the field id and the field knows the
+            // slot, and a load that paired them differently would be a
+            // different world however identical both registries looked.
+            member.Write(field.Crop.Index);
+            member.Write(field.Crop.Generation);
             foreach (Vector2I cell in field.Cells)
             {
                 member.Write(cell);
@@ -962,6 +1010,12 @@ public partial class WorldGrid : Node3D, IHashableState
     /// <see cref="Simulation"/>; the <see cref="Machine"/> nodes only draw it.
     /// </summary>
     public MachineSystem Machines => _machines;
+
+    /// <summary>
+    /// Every field's crop state, in flat arrays. Reached from a cell through
+    /// <c>GetField(cell).Crop</c>; ticked by the <see cref="Simulation"/>.
+    /// </summary>
+    public CropSystem Crops => _crops;
 
     /// <summary>
     /// Spawns one machine at a random road cell: a row in

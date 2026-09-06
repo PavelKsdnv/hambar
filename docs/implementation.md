@@ -35,6 +35,7 @@ Last updated: 2026-09-06.
 | `## Dev shortcuts` | adding a dev key |
 | `## Build tools` | adding or changing a placement tool, or a placement rule |
 | `### Fields` | touching farmland |
+| `### Crops` | touching the crop lifecycle, a stage or growth |
 | `### Structures` | touching buildings |
 | `### Bulldozing` | touching removal or refunds |
 | `### Money and build costs` | touching prices, the balance or affordability |
@@ -45,17 +46,15 @@ Last updated: 2026-09-06.
 
 ## Building & running
 
-- **Godot 4.7 stable (.NET/mono build)**, C# on **.NET SDK 8**; Forward Plus on
-  D3D12 and Jolt physics, both in `project.godot`.
-- `dotnet build Arable.sln` — the `.csproj`/`.sln` are hand-written because
-  Godot's `--build-solutions` will not create them from scratch.
+- **Godot 4.7 stable (.NET/mono build)**, C# on **.NET SDK 8**. The
+  `.csproj`/`.sln` are hand-written: `--build-solutions` will not create them
+  from scratch.
 
 ## Project layout
 
-`src/` splits by concern — `sim/`, `world/`, `ui/` (with `build/`), `camera/`,
-`dev/` — with the namespace flat `Arable` throughout, so moving a file between
-them is free. `dev/` is test scenes, not the game; `scenes/Main.tscn` is the
-entry point and `.godot/` is generated cache, never edited or committed.
+`src/` splits by concern with the namespace flat `Arable` throughout, so moving
+a file between folders is free. `dev/` is test scenes, not the game, and
+`scenes/Main.tscn` is the entry point.
 
 **Gotcha (hand-written .tscn):** a Node-typed export serialized as
 `World = NodePath("../World")` only resolves if the `[node]` header also carries
@@ -69,9 +68,7 @@ as null.
 > `ISimSystem.Tick` is the only place sim state may change; a node that is still
 > both (a `Machine`) implements both halves in separate methods.
 
-`SimClock` is the accumulator — real seconds in, whole ticks out, leftover
-fraction kept as `Alpha`; `Simulation` is the `Node` that drives it and holds
-the registrations. Why it is shaped this way:
+Why `SimClock` and the `Simulation` node that drives it are shaped this way:
 
 - **20 Hz, and deliberately not 60.** Matching Godot's physics rate would let a
   coupling bug hide behind the coincidence; at 20 Hz anything accidentally
@@ -94,9 +91,8 @@ the registrations. Why it is shaped this way:
 - **Found by group, not `NodePath`**: entities are instanced at runtime, so an
   exported path cannot reach them. The node ticks at `ProcessPriority = -100`,
   so a transform read this frame is the pose the sim just produced.
-- **Deferred:** nothing — pause and the calendar landed with #23, RNG streams
-  with #24, state hashing with #25. Registration during a tick is unsupported —
-  an entity that wants to stop goes idle inside its own `Tick`.
+- **Registration during a tick is unsupported** — an entity that wants to stop
+  goes idle inside its own `Tick`.
 
 ### Entity storage (`src/sim/EntityStore.cs`, `EntityId.cs`, `SpatialHash.cs`)
 
@@ -128,11 +124,11 @@ that depends on spawn history, plus an allocation per entity.
 ### State hashing (`src/sim/SimStateHash.cs`, `StateHash.cs`, `IHashableState.cs`)
 
 > **Determinism is a claim nobody can eyeball, so it is a number.**
-> `SimStateHash.Of(sim)` walks all sim state into 64 bits; `SimSmokeTest` takes
-> it after *every* tick of two runs from one seed, because one hash at the end
-> answers "did they diverge" with a boolean and bisecting by hand is the
-> afternoon this prevents. M10 takes the same number either side of a save/load
-> cycle — hence a `Simulation` argument and nothing test-shaped.
+> `SimStateHash.Of(sim)` walks all sim state into 64 bits, taken after *every*
+> tick of two runs from one seed because one hash at the end answers "did they
+> diverge" with a boolean and bisecting by hand is the afternoon this prevents.
+> M10 takes the same number either side of a save/load cycle — hence a
+> `Simulation` argument and nothing test-shaped.
 
 **Order independence is the whole difficulty**: two runs holding identical state
 can enumerate a `Dictionary` differently, so hashing that walk in order reports
@@ -142,9 +138,9 @@ tiles, the field and structure registries, the state sources — is folded with 
 commutative *add* of mixed member hashes, plus a count. Xor was rejected: it
 cancels a member against its duplicate.
 
-**State hashes itself** (`IHashableState`) instead of a walker reaching into
-everyone's arrays, so the milestone that adds a column adds one line in the file
-it is already editing.
+**State hashes itself** (`IHashableState`) rather than a walker reaching into
+everyone's arrays, so the milestone that adds a column adds one line where it is
+already editing.
 
 **Left out on purpose.** Speed, the accumulator behind `Alpha` and
 `DroppedTicks` are real-time quantities — hashing them fails the harness on a
@@ -204,11 +200,11 @@ paused world still has to be lookable-around). `MaxTicksPerFrame` is deliberatel
 than promised, visibly via `DroppedTicks` — never by shortening a day. And
 **speed is not sim state** (`### State hashing`); the calendar is the opposite.
 
-**The controls copy the palette** (`## Build palette`), bottom-right, the date
-in the same panel as the buttons that move it. **Step 0 is always
-pause**: the ladder is otherwise free-form, but the code must find the stop, so
-one not starting at 0 is repaired at load with a warning. **Deferred:** a pause *key*
-(the number row is the palette's) and season reactions — M4 growth, M9 hazards.
+**The controls copy the palette** (`## Build palette`), bottom-right. **Step 0
+is always pause**: the ladder is otherwise free-form, but the code must find the
+stop, so one not starting at 0 is repaired at load with a warning. **Deferred:**
+a pause *key* (the number row is the palette's) and anything reacting to the
+season — #27's growth, M9's hazards.
 
 ## Randomness (`src/sim/RandomStream.cs`, `RandomStreams.cs`)
 
@@ -258,12 +254,9 @@ hash is FNV-1a over the bytes, pinned to golden values in the smoke test.
 RTS-style isometric camera, per tech.md: orthographic, fixed pitch, pan + zoom +
 90°-step rotation.
 
-**Structure.** The `CameraRig` sits on the ground plane and only ever yaws; its
-child `Camera3D` holds the rest fixed — true-isometric pitch (35.264° =
-atan(1/√2)), orthographic, offset back. The rig starts at 45° yaw, so 90° steps
-keep the classic iso diamond.
+**Structure.** The rig yaws; its child camera is fixed at true-isometric pitch
+(35.264° = atan(1/√2)), starting at 45° so 90° steps keep the iso diamond.
 
-**Controls** are actions in `project.godot`; tunables are `[Export]`ed.
 **The three things to know before changing it:**
 
 - Zoom changes the camera's orthographic `Size`, not its position, and keyboard
@@ -279,7 +272,8 @@ keep the classic iso diamond.
 
 Four entity kinds: **roads** are tiles; **fields** and **structures** are a tile
 *plus* an entity owning those cells, the tile saying only *that* something is
-placed; **machines** are sim rows and deliberately not grid cells.
+placed; **machines** are sim rows and deliberately not grid cells. A field is
+both by now — a registry entry here and a crop row in the sim (`### Crops`).
 
 **Data/view split.** `WorldGrid` owns the state; its child `GridMap` is
 presentation only and must **never be read back** — every mutator keeps it in
@@ -328,11 +322,11 @@ rather than about a vehicle:
   depends on the rectangle and not on the corner the drag started from.
 
 **Mutators.** `SetTile` is the single write path and maintains both entity
-registries; `MarkField`, `PlaceStructure` and `BuildRoadLine` are the
-**unvalidated** entry points, for start layout, dev keys and tests, while
-anything the *player* places goes through a `BuildTool` and so `PlacementRules`.
-`Clear` is the one removal path, returning **null** — not an empty `Removal` —
-when the cell held nothing, which is load-bearing below.
+registries. `MarkField`, `PlaceStructure` and `BuildRoadLine` are the
+**unvalidated** doors, for start layout, dev keys and tests; anything the
+*player* places goes through a `BuildTool` and so `PlacementRules`. `Clear` is
+the one removal path, returning **null** — not an empty `Removal` — when the
+cell held nothing, which is load-bearing below.
 
 Two asymmetries in `SetTile` that everything downstream inherits: writing over a
 field cell detaches **just that cell**, and a field that loses its last cell is
@@ -341,12 +335,10 @@ The null is what stops one building being refunded once per cell a drag clipped.
 
 ## Machines (`src/world/MachineSystem.cs`, `src/world/Machine.cs`)
 
-A machine is any vehicle. **State and drawing are two objects**: `MachineSystem`
-keeps every machine's row in parallel arrays (`### Entity storage`) and ticks all
-of them in one loop; the `Machine` node is an `ISimView` owning the mesh and
-nothing else. `WorldGrid`
-constructs the system and registers it with the `Simulation`, because machines
-run on the road queries it already owns and there is exactly one world.
+A machine is any vehicle. **State and drawing are two objects**: rows in
+`MachineSystem`'s arrays (`### Entity storage`), drawn by a `Machine` node that
+is an `ISimView` and nothing else. `WorldGrid` constructs and registers the
+system, because machines run on the road queries it already owns.
 
 - **The node transform is a drawing, not a position.** `Interpolate` writes it
   each frame from the row's last two sim poses; `SimPosition` is where the
@@ -362,9 +354,8 @@ run on the road queries it already owns and there is exactly one world.
   does not change how fast it looks like it turns. The previous pose is
   snapshotted for *every* live machine, parked included — a stale one drifts.
 - **Freeing the node despawns the row.** `Machine._ExitTree` is the one place a
-  view touches sim state, and it is lifecycle rather than a state write (the
-  exemption `Simulation.Register` has). Nothing else notices a freed node, and
-  an orphan row is an invisible machine still driving the roads.
+  view touches sim state — lifecycle, not a state write. Nothing else notices a
+  freed node, and an orphan row is an invisible machine still driving the roads.
 - **Determinism:** one named stream for the whole system (`## Randomness`), drawn
   in slot order. Spawn placement comes off the *world's* stream instead, so
   spawning a machine cannot reroute the ones already driving.
@@ -379,25 +370,22 @@ run on the road queries it already owns and there is exactly one world.
 **Built in code from the exported `Tools` list**, in bar order, so the order is
 a design decision rather than an accident of tree order — putting M5's silo on
 the bar is adding it to that list. Each button reads its name, icon and price
-off the tool, so the bar can never quote a number the click does not charge, and
-a tool with no icon falls back to its name rather than a blank square.
+off the tool, so the bar can never quote a number the click does not charge.
 
 **It is not a second source of truth.** Which tool is armed is a fact about the
-tools (`BuildTool.Active`, kept unique by the `build_tools` group); `Refresh()`
-repaints from that every frame, so a tool disarmed by *any* other route — Esc,
-right click, another tool arming, a dev script, a screenshot run — is right on
-the bar the same frame, with no palette-side copy that could disagree.
+tools (`BuildTool.Active`, kept unique by the `build_tools` group), repainted
+from that every frame — so a tool disarmed by *any* other route is right on the
+bar the same frame, with no palette-side copy that could disagree.
 
 **Keys are an accelerator for the bar, not a way around it.** Key *n* calls the
 same `Toggle` a button press calls, and the palette claims `menu_1` upwards so
 the range grows with the roster. `Select` is public so a headless test arms
 tools along the path a click takes, without synthesizing mouse events.
 
-**The M8 seam is `ToolAvailability`** — `Available`, `Locked` (greyed, still on
-the bar) or `Hidden`. A non-available entry is refused on **every** path in,
-because a seam only one path respects is decoration; and a tool that stops being
-available while the player holds it is disarmed on the spot. The *rules* are
-M8's: nothing here knows what an unlock is.
+**The M8 seam is `ToolAvailability`.** A non-available entry is refused on
+**every** path in, because a seam only one path respects is decoration; a tool
+that stops being available while the player holds it is disarmed on the spot.
+The *rules* are M8's: nothing here knows what an unlock is.
 
 **Two gotchas in the look.** Icons are tinted with a *modulate*, which
 multiplies, so **the source artwork has to be white** — a dark glyph would stay
@@ -407,16 +395,18 @@ otherwise swallow every click meant for the world.
 
 ## Dev shortcuts (`src/ui/DevShortcuts.cs`)
 
-What is left of the old number-key menu, and neither key is a build tool: both
-sit at the top of the number row because the palette claims it from the bottom
-up. Nothing here reaches a tool — after M2 the palette is the only way in.
+What is left of the old number-key menu, none of it a build tool: the keys sit
+at the *top* of the number row because the palette claims it from the bottom up.
+Nothing here reaches a tool — the palette is the only way in. Key 7 is the hand
+M5 replaces: it runs whatever operation the field under the cursor is waiting
+for, through the door a machine order will take.
 
 ## Build tools (`src/ui/build/`, `src/world/PlacementRules.cs`)
 
 Every mouse-driven placement tool sits on one base, `BuildTool`, whose point is
 that an illegal placement is refused *before* the click rather than by it;
-`RoadBuildTool` is 30 lines, most of them comment, and copying it is how the
-next tool gets written. Fields and structures override `Apply` because the
+copying `RoadBuildTool` is how the next tool gets written. Fields and
+structures override `Apply` because the
 default writes tiles and would leave farmland or a building nothing could
 address; `BulldozeTool` is the one subclass that bends the base.
 
@@ -450,15 +440,14 @@ opposite answers about a mixed region:
   failing ones are skipped. It is also what a placement is *priced* on — an
   `AnyCell` drag pays for the cells it acts on, not the ground it crossed.
 
-**What the player sees.** A hover square coloured by the verdict, then a ghost
-of the footprint. Its one promise is that **a legal-coloured cell is a cell
-something will happen to**, which is why `GhostColorFor` is virtual: under
+**What the player sees** is a ghost of the footprint whose one promise is that
+**a legal-coloured cell is a cell something will happen to**, which is why
+`GhostColorFor` is virtual: under
 `AnyCell` a legal plan still holds cells it will skip, and the bulldozer dims
 those.
 
-**Interaction.** The anchoring click is itself validated, and a refused click
-writes nothing *and keeps the anchor*, so the player re-aims. Right click / Esc
-drops the anchor first and leaves the tool second.
+**Interaction.** A refused click writes nothing *and keeps the anchor*, so the
+player re-aims; right click / Esc drops the anchor first, the tool second.
 
 **One armed tool at a time.** Every tool joins the `build_tools` group and
 `SetActive(true)` disarms the rest, so two tools can never listen to the same
@@ -469,24 +458,53 @@ gets it for free, and the palette knows neither the list nor the rule.
 
 > **Farmland is addressed by one `Field` entity per marked rectangle — never by
 > the cell.** One drag creates exactly one `Field`; the cells get
-> `TileType.Field` only so the `GridMap` can draw them. Crops, jobs, yields and
-> M4's output buffer hang off the entity, reached with `WorldGrid.GetField`.
+> `TileType.Field` only so the `GridMap` can draw them. Jobs and yields hang off
+> the entity, reached with `WorldGrid.GetField`; what a crop is doing on it is
+> one step further out again (`### Crops`).
 
 `Field` ids are creation order and never reused. What that commits us to:
 
-- **Exactly one owner per cell.** `GetField` answers with one field or null,
-  which is why the tool opts into `VacantCell`: a rectangle can never be drawn
-  over ground another field holds, not even partly.
-- **Touching fields are never merged.** Two adjacent rectangles stay two fields,
-  because each is separately named, worked and harvested. So **enlarging a field
-  means marking another one** — there is no grow operation, by design.
+- **Exactly one owner per cell**, which is why the tool opts into `VacantCell`:
+  a rectangle can never be drawn over ground another field holds, even partly.
+- **Touching fields are never merged**, because each is separately named, worked
+  and harvested. So **enlarging a field means marking another one**.
 - **A field owns its cells rather than deriving them from the tile layer**, so
   it survives an irregular shape: the rectangle is how the player *draws* one,
   not what a field is allowed to be. Bulldozing shrinks one cell by cell, and a
   field that loses its last cell is dropped — an empty field is not something
   the player can still address.
-- **Road access is deliberately not required** to mark a field: nothing works one
-  until M4 gives machines jobs, which is when the rule (if any) belongs.
+- **Road access is deliberately not required** to mark a field: nothing works
+  one until M5 gives machines jobs, which is when the rule (if any) belongs.
+
+### Crops (`src/sim/CropSystem.cs`)
+
+> **A field is a state machine, and the interesting half is what it refuses.**
+> Fallow → ploughed → sown → growing → harvestable → stubble → ploughed;
+> ploughing, sowing and harvesting are *work*, sprouting and ripening are
+> *time*, and `Apply` is the one door either kind takes. A refusal is its return
+> value, not a warning: M5 will ask "can this be sown" far more often than it
+> sows, and a line per refusal buries the log the first time a scheduler polls.
+> Wheat only, and no crop-kind column — a one-valued enum is a member every
+> later milestone keeps in step for nothing.
+
+**Crop state left `Field` for the entity arrays** (`### Entity storage`). An
+enum and a float on `Field` would have hashed fine through `WorldGrid`'s
+registry fold — and left #27's growth factors, #28's buffer and M5's jobs
+walking a `List` whose order a load need not reproduce. `Field` still owns the
+cells and the name and holds a `Crop` handle, hashed from both ends because
+neither side derives the other.
+
+**Harvest leaves stubble, to be ploughed in again.** Rejected: returning the
+field straight to sowable, which makes ploughing a once-per-field job when M5
+exists to program a *repeating* round of work. That extra pass per cycle is a
+pacing lever, hence the `WorldGrid.StubbleNeedsPloughing` tunable.
+
+**Growth accumulates in whole ticks, not days**: adding 1/600 of a day a tick
+lands a hair either side of the threshold in single precision, so a crop would
+ripen a tick early or late by whichever way the last rounding fell — invisible,
+and untestable. Still a `float`, because #27's factors are fractional
+multipliers on that 1; `GrowthPerTick` is the seam it widens, and the fertility
+a field is worth belongs in a *column* — `src/sim/` knows nothing of cells.
 
 ### Structures (`src/world/Structure.cs`, `src/ui/build/StructureBuildTool.cs`)
 
@@ -494,9 +512,6 @@ gets it for free, and the palette knows neither the list nor the rule.
 > cells get `TileType.Structure` only so the `GridMap` can draw them and
 > `PlacementRules` can call them occupied; reach the building itself with
 > `WorldGrid.GetStructure`.
-
-One generic placeholder building today; the roster — silo in M5, cleaner, mill
-and bakery in M6 — hangs off the same tool, the first single-click one.
 
 **Why an entity and not just a tile value.** `TileType.Structure` says that *a*
 building is here, not *which*, and a building needs an identity long before it
@@ -521,8 +536,8 @@ is the multi-tile question, not later when four cells make it urgent.
 ### Bulldozing (`src/ui/build/BulldozeTool.cs`, `src/world/Removal.cs`)
 
 > **Anything the player placed can be taken back off, and the terrain under it
-> is never touched** — the ground comes back exactly as it was, fertility and
-> all, because the two layers were never stored together.
+> is never touched** — the ground comes back as it was, fertility and all,
+> because the two layers were never stored together.
 
 **Legality is inverted, so it gets its own rules.** No building rule describes
 a removal — `BuildableTerrain` asks whether soil could be built on, `VacantCell`
@@ -542,12 +557,11 @@ bulldozing ever feels fiddly in play.
 **The refund seam is an M7 stub.** Every removal passes through one function,
 `RefundFor(Removal)`, whose return `Apply` credits to the `Economy` — so the day
 M7 puts a fraction of a build cost in that expression is the day refunds appear.
-It pays **nothing** today, deliberately rather than unfinished: the economics are
-M7's. The seam already carries what a real rule needs — the tile kind, the entity
-(kept as the object, so a building can be priced by *what* it is), the cells
-freed, and the cell the player hit.
-`Removals` is the ledger, **one entry per removal, not per cleared cell**, which
-is why clipping two cells of the same building refunds it once.
+It pays **nothing** today, deliberately rather than unfinished: the economics
+are M7's. The seam already carries what a real rule needs, the entity kept as
+the object so a building can be priced by *what* it is. `Removals` is the ledger,
+**one entry per removal, not per cleared cell**, which is why clipping two cells
+of the same building refunds it once.
 
 ### Money and build costs (`src/world/Economy.cs`)
 
@@ -556,10 +570,9 @@ is why clipping two cells of the same building refunds it once.
 > before the click instead of the click discovering it. Money itself is a **stub
 > number** until M7 gives it a market: this is the plumbing, not the economy.
 
-`Economy` is **the one thing that owns the balance**, so there is one number,
-one place it changes, and one thing to serialize when saves arrive. `TrySpend`
-takes the money **or refuses and changes nothing**, so the balance can never go
-negative however a caller is written.
+`Economy` **owns the balance**, so there is one number, one place it changes and
+one thing to serialize; `TrySpend` takes the money **or refuses and changes
+nothing**, so it can never go negative however a caller is written.
 
 **Cost is a validation input, not a post-hoc check.** A tool's `CostPerCell` and
 the balance go into `PlacementRules.Check` as a `PlacementBudget` — a *value*,
@@ -575,7 +588,7 @@ about money, so a drag into water is refused for the water.
 
 **Charged on commit, never on preview.** `ClickCell` spends `plan.Cost` and
 nothing else in the tool touches money: however long a drag is held and however
-often the ghost is recomputed, nothing moves. A refused click is free.
+often the ghost is recomputed, nothing moves — and a refused click is free.
 
 **The knobs are exported and wired in Main.tscn**, so tuning is an editor change
 and the scene value wins over a tool's placeholder. A tool with **no** `Economy`
@@ -586,39 +599,35 @@ player is broke", and it keeps a dev scene working.
 
 One implementation of "which cell is under that pixel", shared by every
 mouse-driven tool and the hover readout, so the answer cannot drift between
-them. The camera ray meets the ground
-plane at y = 0 **analytically** — no physics bodies, no collision layers, no
-raycast query — so picking stays exact, deterministic and independent of what
-happens to be drawn on the cell (a tall rock mesh must not change which cell a
-pixel means). Picks are **not clamped** to the map: off-map picks come back as
-real coordinates, and callers ask `InBounds`/`GetTerrain` what that means.
+them. The camera ray meets the ground plane at y = 0 **analytically** — no
+physics bodies, no collision layers — so picking stays exact, deterministic and
+independent of what is drawn there (a tall rock mesh must not move a cell). Nor
+are picks **clamped**: off-map ones are real coordinates, and callers ask
+`InBounds`/`GetTerrain` what that means.
 
 ## Hover readout (`src/ui/CellInspector.cs`)
 
 The debug instrument that confirms the generated world is what the generator
-thinks it is. It names the owning `Field`/`Structure` *by name* — the entity,
-because that is what the game addresses farmland and buildings by.
+thinks it is. It names the owning `Field`/`Structure` *by name*, because the
+entity is what the game addresses farmland and buildings by, and formats with
+`InvariantCulture` so the text is identical on every machine. **Off the map
+needs no bounds check** — the terrain layer already answers `OutOfBounds`, which
+prints as `terrain: off the map` while the coordinates stay real.
 
-Everything is formatted with `InvariantCulture`, so the text is identical on
-every machine. **Off the map needs no bounds check** — the terrain layer already
-answers `OutOfBounds` there, which prints as `terrain: off the map` while the
-coordinates stay real.
-
-Toggled with dev key 8, and it starts **on**, because a dev instrument that
-needs arming isn't one. This is *not* the player-facing inspector — field
-inspection is M4, building inspection M6.
+It starts **on** (a dev instrument that needs arming isn't one) and is *not*
+the player-facing inspector: field inspection is #30, buildings M6.
 
 ## Dev smoke tests (`scenes/dev/`, `src/dev/`)
 
-Headless end-to-end checks. Each instances `Main.tscn`, drives it for a few
-simulated seconds, prints `PASS`/`FAIL` lines and exits 0/1. **Run all of them**
-— the older ones are the regression net for the newer ones.
+Headless end-to-end checks, each printing `PASS`/`FAIL` lines and exiting 0/1.
+**Run all of them** — the older ones are the regression net for the newer ones.
 
 ```bash
 godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn
 godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn
 godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 godot --headless --path . res://scenes/dev/SimSmokeTest.tscn
+godot --headless --path . res://scenes/dev/CropSmokeTest.tscn
 ```
 
 What each asserts is in the test file. What is *not*, and costs an afternoon:
@@ -648,41 +657,37 @@ What each asserts is in the test file. What is *not*, and costs an afternoon:
 
 ### Canonical views (`scenes/dev/ScreenshotTest.tscn`)
 
-The visual counterpart: PNGs of the canonical views, so a human — or an agent —
-can look at what the game actually draws.
+PNGs of the canonical views, so a human — or an agent — can look at what the
+game actually draws.
 
 ```bash
 godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>
 ```
 
-**Must run windowed.** Under `--headless` the rasterizer is a dummy with no
-framebuffer to read back, so `FramePostDraw` never fires; `_Ready` detects that,
-prints `SCREENSHOT TEST FAILED: --headless cannot render` and quits 1 rather
-than waiting for a frame that will not come.
+**Must run windowed**: `--headless` gives a dummy rasterizer with no
+framebuffer, so `FramePostDraw` never fires. `_Ready` detects it and quits 1.
 
 **A view earns its place by showing something no other view can** — a ghost
 verdict, a placed building, a paused clock. Each `PASS` line captions what the
 frame is meant to show; the caption, not the pixel colour, is what says which
-cell killed a drag. Conventions worth keeping: views settle by **time**, not
-frame count (the rig smooths on `delta`, so a frame count converges differently
-on a fast machine); anything cursor-driven is pinned with `SetProcess(false)`
-and fed an explicit cell, since a screenshot run has no mouse; and legal spots
-are **searched through the tool**, not hard-coded, for the same reason the smoke
-tests search.
+cell killed a drag. It keeps the smoke tests' conventions above, plus one of its
+own: views settle by **time**, not frame count, because the rig smooths on
+`delta` and a frame count converges differently on a fast machine.
 
 ## Not yet implemented (deliberate)
 
-- **Fields have no behavior** — a `Field` is a named region and nothing more.
-  Fertility is generated but nothing reads it; no crop, yield or rename UI. M4.
-- **Structures have no behavior** and there is only the one generic kind. The
-  roster and what buildings *do* is M5 (silo) and M6 (cleaner, mill, bakery).
-  Multi-tile footprints are unwritten but not designed out — `PlaceStructure`
-  already takes any footprint.
+- **Nothing reads fertility or the season yet**: `### Crops` grows every field
+  at one rate and the calendar advances unwatched — the next M4 issue. Harvest
+  produces nothing (#28), and no stage shows in the view (#29) or a panel (#30).
+- **Structures have no behavior** and there is one generic kind; the roster is
+  M5's (silo) and M6's (cleaner, mill, bakery). They are also the last placed
+  thing still a plain object in `WorldGrid`'s registries rather than an entity
+  row, and move when M5 gives them state worth ticking.
 - **Validation lives in the tools, not the data layer.** `SetTile` still writes
   anywhere, off the map included, which is what start layout and tests want.
-- **Player interaction is the palette plus four tools** and two dev keys. The
+- **Player interaction is the palette plus four tools** and three dev keys. The
   unlock *seam* exists (`ToolAvailability`) and none of the rules — that is M8's.
-  The full HUD pass is M10's; the bar and two corner readouts are all the UI.
+  The HUD pass is M10's; the bar and two corner readouts are all the UI.
 - **Money is a stub number**: placements are charged and the balance is shown,
   but nothing puts money *in*, and every price is a tunable placeholder.
 - **Removing something refunds nothing**, on purpose: `RefundFor` has the shape
@@ -691,10 +696,5 @@ tests search.
   driving it or has it in an already-computed route, and nothing re-checks a
   building's road access when the road beside it goes. Both are real M5 cases;
   the notes sit on `WorldGrid.Clear`, where whoever writes M5 will be standing.
-- **Only machines are on the entity arrays.** Fields and structures are still
-  plain objects in `WorldGrid`'s registries; they move when M4/M5 give them
-  state worth ticking — both are hashed where they are.
-- **Nothing reacts to the season** — the calendar advances and is drawn, and no
-  system reads it yet. M4's growth is the first that will.
 - **Flow fields**: BFS per machine is fine at this scale; revisit when mover
   count grows.
