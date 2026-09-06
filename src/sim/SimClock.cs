@@ -10,6 +10,9 @@ namespace Arable;
 /// Deliberately a plain class and not a <c>Node</c> — the tick schedule is
 /// arithmetic, and keeping it out of the scene tree is what lets a test feed it
 /// a frame pattern no real frame rate would produce.
+///
+/// This is the <i>scheduler</i>, not the calendar: it says when a tick runs,
+/// while <see cref="GameCalendar"/> says what date the tick lands on.
 /// </summary>
 public sealed class SimClock
 {
@@ -27,6 +30,7 @@ public sealed class SimClock
     public const int DefaultMaxTicksPerFrame = 5;
 
     private double _accumulator;
+    private double _speed = 1.0;
 
     public SimClock(int tickRate = DefaultTickRate,
         int maxTicksPerFrame = DefaultMaxTicksPerFrame)
@@ -35,6 +39,37 @@ public sealed class SimClock
         MaxTicksPerFrame = Math.Max(1, maxTicksPerFrame);
         TickDelta = 1.0 / TickRate;
     }
+
+    /// <summary>
+    /// The player's time scale: how much real time each real second books, and
+    /// so <b>how many ticks run per real second</b>. 1 is normal, 2 runs the
+    /// tick loop twice as often, 0 is paused.
+    ///
+    /// <b>It scales the schedule, never the step.</b> <see cref="TickDelta"/>
+    /// is untouched by it and every tick is the same size at every speed, which
+    /// is the whole reason speed control can exist at all in a deterministic
+    /// sim: 3× is "the same ticks, sooner", not "bigger ticks". A variable step
+    /// would make the result of a run depend on the speed the player happened
+    /// to be watching at, and there would be nothing left to hash (#25) or
+    /// replay.
+    ///
+    /// Pausing at 0 leaves the leftover accumulator and <see cref="Alpha"/>
+    /// exactly where they were, so unpausing resumes mid-tick instead of
+    /// snapping, and a paused world holds still rather than creeping on a stale
+    /// blend.
+    ///
+    /// Negative and NaN are clamped to 0 rather than rejected: the setter's
+    /// callers are UI and inspector exports, and a paused game is a safer
+    /// answer to a bad number than time running backwards.
+    /// </summary>
+    public double Speed
+    {
+        get => _speed;
+        set => _speed = double.IsNaN(value) || value < 0.0 ? 0.0 : value;
+    }
+
+    /// <summary>Whether the schedule is stopped — no tick will run until <see cref="Speed"/> moves.</summary>
+    public bool IsPaused => _speed <= 0.0;
 
     /// <summary>Ticks per simulated second.</summary>
     public int TickRate { get; }
@@ -80,12 +115,21 @@ public sealed class SimClock
     /// ever-growing debt it can never pay off. Every tick that does run is
     /// still exactly <see cref="TickDelta"/> long, so the sim stays
     /// deterministic — only its correspondence to real time is lost.
+    ///
+    /// <see cref="Speed"/> multiplies the time booked, so a frame at 3× asks
+    /// for three times the ticks. <see cref="MaxTicksPerFrame"/> is
+    /// deliberately <i>not</i> scaled with it: the cap is a guard on how much
+    /// work one frame may do, which is a real-time quantity, so at 3× it bites
+    /// at the frame rate where the machine is already in trouble (below ~12 fps)
+    /// and the sim then runs slower than the multiplier promises — visibly, via
+    /// <see cref="DroppedTicks"/>. What it never does is change how many ticks
+    /// make a day.
     /// </summary>
     public int Advance(double realDelta)
     {
         if (realDelta > 0.0 && !double.IsNaN(realDelta))
         {
-            _accumulator += realDelta;
+            _accumulator += realDelta * _speed;
         }
 
         int ticks = 0;

@@ -29,18 +29,35 @@ public partial class WorldSmokeTest : Node
     /// </summary>
     private const long DriveTicks = 60;
 
+    /// <summary>
+    /// How long to hold the pause, in <b>real milliseconds</b> rather than
+    /// frames. Headless runs hundreds of frames a second, so a frame count
+    /// could pause and resume inside a window where no tick was due anyway,
+    /// and "pause stops the sim" would pass without ever having been tested.
+    /// </summary>
+    private const ulong PauseMs = 400;
+
     private WorldGrid _world = null!;
     private GridMap _gridMap = null!;
     private RoadBuildTool _roadTool = null!;
     private BuildPalette _palette = null!;
     private CellInspector _inspector = null!;
     private Label _readout = null!;
+    private Label _moneyReadout = null!;
     private Simulation _sim = null!;
+    private TimeControls _time = null!;
+    private CameraRig _rig = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
     private bool _failed;
     private bool _sawInterpolatedPose;
     private bool _sawViewBetweenSimStates = true;
+    private bool _paused;
+    private ulong _pauseStartedMs;
+    private long _pausedTickCount;
+    private long _pausedCalendarTicks;
+    private float _pausedAlpha;
+    private Vector3 _pausedRigPosition;
 
     public override void _Ready()
     {
@@ -52,7 +69,10 @@ public partial class WorldSmokeTest : Node
         _palette = main.GetNode<BuildPalette>("Hud/BuildPalette");
         _inspector = main.GetNode<CellInspector>("CellInspector");
         _readout = main.GetNode<Label>("Hud/CellReadout");
+        _moneyReadout = main.GetNode<Label>("Hud/MoneyReadout");
         _sim = main.GetNode<Simulation>("Sim");
+        _time = main.GetNode<TimeControls>("Hud/TimeControls");
+        _rig = main.GetNode<CameraRig>("CameraRig");
     }
 
     public override void _Process(double delta)
@@ -64,6 +84,8 @@ public partial class WorldSmokeTest : Node
             CheckLayersAreIndependent();
             CheckStartRoad();
             CheckSimClock();
+            CheckGameCalendar();
+            CheckSpeedSchedule();
             CheckEntityStorage();
 
             // Dev key 9 spawns a machine — one of the two shortcuts left over
@@ -145,9 +167,23 @@ public partial class WorldSmokeTest : Node
         {
             Check("dev key 8 switches the readout back on",
                 _inspector.Enabled && _readout.Visible);
+
+            CheckTimeControls();
+            BeginPause();
         }
         else if (_frame > 30)
         {
+            if (_paused)
+            {
+                // The camera is panned throughout the pause; the point of the
+                // wait is that real time passes while sim time does not.
+                if (Time.GetTicksMsec() - _pauseStartedMs >= PauseMs)
+                {
+                    EndPause();
+                }
+                return;
+            }
+
             SampleViewAgainstSimState();
             if (_sim.TickCount >= DriveTicks)
             {
@@ -156,6 +192,233 @@ public partial class WorldSmokeTest : Node
                 GetTree().Quit(_failed ? 1 : 0);
             }
         }
+    }
+
+    /// <summary>
+    /// The time controls as the player sees them: one button per speed step,
+    /// the date on screen, and the panel clear of the rest of the HUD. Like the
+    /// palette, the bar is asserted to be a <i>view</i> of the sim -- it is
+    /// refreshed and then compared with what the sim says, never with a copy.
+    /// </summary>
+    private void CheckTimeControls()
+    {
+        _time.Refresh();
+        GD.Print($"time: {_time.DateText}, step {_time.ActiveIndex} of {_time.Count}, "
+            + $"speed {_sim.Speed}x, {_sim.Calendar.TicksPerDay} ticks/day, "
+            + $"{_sim.Calendar.DaysPerSeason} days/season");
+
+        Check("the calendar was built from the sim's exports",
+            _sim.Calendar.TicksPerDay == _sim.TicksPerDay
+            && _sim.Calendar.DaysPerSeason == _sim.DaysPerSeason);
+        Check("the panel has one button per speed step",
+            _time.Count == _sim.Speeds.Count && _time.Count >= 2);
+        Check("the first step is the stop and the rest are multipliers",
+            _time.Entry(0)?.LabelText == "pause"
+            && _time.Entry(0)?.Multiplier == 0f
+            && _time.Entry(1)?.LabelText == "1x");
+        Check("play opens running, not paused", !_sim.IsPaused && _sim.Speed > 0.0);
+        Check("the armed button is the step the sim is on",
+            _time.ActiveIndex == _sim.SpeedIndex
+            && _time.Entry(_sim.SpeedIndex) is { IsActive: true });
+        Check("the readout says exactly what the calendar says",
+            _time.DateText == _sim.Calendar.Describe() && _time.DateText.Length > 0);
+        Check("the readout names the season and the day",
+            _time.DateText.Contains(GameCalendar.Name(_sim.Calendar.Season))
+            && _time.DateText.Contains($"day {_sim.Calendar.Day}/"));
+
+        // The panel is a visual claim, so it is checked as one, the way the
+        // palette bar is: on the screen, in its own corner, over nothing else.
+        Rect2 screen = GetViewport().GetVisibleRect();
+        Rect2 panel = _time.Panel.GetGlobalRect();
+        GD.Print($"time panel at {panel} on a {screen.Size} screen");
+        Check("the time panel is visible", _time.Visible && _time.Panel.Visible);
+        Check("the whole panel is on screen", screen.Encloses(panel));
+        Check("the panel sits in the bottom-right corner",
+            panel.Position.Y > screen.Size.Y * 0.6f
+            && panel.GetCenter().X > screen.GetCenter().X);
+        Check("the panel does not overlap the build palette",
+            !panel.Intersects(_palette.Bar.GetGlobalRect()));
+        Check("the panel does not overlap the money readout",
+            !panel.Intersects(_moneyReadout.GetGlobalRect()));
+
+        // The button path reaches the clock, at a speed that is not 1.
+        int fastest = _sim.Speeds.Count - 1;
+        Check("selecting a step puts the clock on that multiplier",
+            _time.Select(fastest)
+            && _sim.SpeedIndex == fastest
+            && Mathf.Abs(_sim.Speed - _sim.Speeds[fastest]) < 0.0001
+            && _time.Entry(fastest) is { IsActive: true });
+        Check("changing speed never changes the size of a tick",
+            Mathf.Abs(_sim.Clock.TickDelta - 1.0 / _sim.Clock.TickRate) < 1e-12);
+        Check("an index off the ladder is refused and changes nothing",
+            !_time.Select(_sim.Speeds.Count) && _sim.SpeedIndex == fastest);
+
+        _sim.TogglePause();
+        Check("toggling pause stops the clock", _sim.IsPaused && _sim.SpeedIndex == 0);
+        _sim.TogglePause();
+        Check("toggling back returns to the speed it was running at",
+            !_sim.IsPaused && _sim.SpeedIndex == fastest);
+        _time.Select(1);
+        Check("the bar puts it back on 1x", _sim.SpeedIndex == 1 && _sim.Speed == 1.0);
+    }
+
+    /// <summary>Pauses from the bar and starts panning, so both halves are watched at once.</summary>
+    private void BeginPause()
+    {
+        Check("the pause button is accepted", _time.Select(0));
+        _pausedTickCount = _sim.TickCount;
+        _pausedCalendarTicks = _sim.Calendar.Ticks;
+        _pausedAlpha = _sim.Alpha;
+        _pausedRigPosition = _rig.Position;
+        _pauseStartedMs = Time.GetTicksMsec();
+        _paused = true;
+        Input.ActionPress("camera_forward");
+    }
+
+    /// <summary>
+    /// What the pause was for: real time passed and the camera moved through
+    /// it, while the tick count, the date and even the interpolation alpha
+    /// stood still -- a paused world holds its pose rather than creeping on a
+    /// stale blend.
+    /// </summary>
+    private void EndPause()
+    {
+        ulong held = Time.GetTicksMsec() - _pauseStartedMs;
+        GD.Print($"pause: held {held} ms, {_sim.TickCount - _pausedTickCount} ticks ran, "
+            + $"camera moved {_rig.Position.DistanceTo(_pausedRigPosition):F2} units");
+        Check("the pause lasted long enough that ticks were due",
+            held * (ulong)_sim.Clock.TickRate >= 2000);
+        Check("pause stops sim ticks", _sim.TickCount == _pausedTickCount);
+        Check("pause stops the calendar", _sim.Calendar.Ticks == _pausedCalendarTicks);
+        Check("a paused world holds its pose", Mathf.Abs(_sim.Alpha - _pausedAlpha) < 0.0001f);
+        Check("the camera still pans while the sim is paused",
+            _rig.Position.DistanceTo(_pausedRigPosition) > 0.5f);
+        Check("the bar draws pause as the armed step",
+            _time.ActiveIndex == 0 && _time.Entry(0) is { IsActive: true });
+
+        Input.ActionRelease("camera_forward");
+        _time.Select(1);
+        Check("the bar starts time again", !_sim.IsPaused && _sim.SpeedIndex == 1);
+        _paused = false;
+    }
+
+    /// <summary>
+    /// The calendar as plain arithmetic -- days into seasons into years -- on a
+    /// deliberately tiny year, so rollovers a real year would take twenty
+    /// minutes to reach happen in a handful of ticks.
+    /// </summary>
+    private void CheckGameCalendar()
+    {
+        const int TicksPerDay = 10;
+        const int DaysPerSeason = 3;
+        var calendar = new GameCalendar(TicksPerDay, DaysPerSeason);
+        Check("play opens on year 1, spring, day 1",
+            calendar.Ticks == 0 && calendar.Year == 1
+            && calendar.Season == Season.Spring && calendar.Day == 1);
+
+        calendar.Advance(TicksPerDay - 1);
+        Check("the day does not roll a tick early",
+            calendar.Day == 1 && calendar.TicksIntoDay == TicksPerDay - 1
+            && calendar.DayProgress > 0.8f);
+
+        calendar.Advance();
+        Check("the day rolls on exactly the tick that completes it",
+            calendar.Ticks == TicksPerDay && calendar.Day == 2
+            && calendar.TicksIntoDay == 0 && calendar.TotalDays == 1);
+
+        calendar.Advance(TicksPerDay * (DaysPerSeason - 1));
+        Check("days roll over into the next season",
+            calendar.Season == Season.Summer && calendar.Day == 1);
+
+        calendar.Advance(TicksPerDay * DaysPerSeason * 3);
+        Check("seasons roll over into the next year",
+            calendar.Year == 2 && calendar.Season == Season.Spring
+            && calendar.Day == 1 && calendar.DayOfYear == 1);
+
+        calendar.SetDate(3, Season.Winter, 2);
+        Check("a date can be set outright, the way a save or a scenario would",
+            calendar.Year == 3 && calendar.Season == Season.Winter && calendar.Day == 2
+            && calendar.TicksIntoDay == 0);
+        Check("the readout spells that date out",
+            calendar.Describe() == "year 3 · winter · day 2/3");
+
+        calendar.SetTicks(-5);
+        Check("a nonsense date is clamped, not thrown",
+            calendar.Ticks == 0 && calendar.Year == 1 && calendar.Day == 1);
+    }
+
+    /// <summary>
+    /// <b>The claim the speed control lives or dies by</b>: a multiplier changes
+    /// how many ticks run per real second and nothing else, so a simulated day
+    /// is the same number of ticks at every speed -- only sooner. Driven the way
+    /// <see cref="Simulation"/> drives it, one calendar tick per scheduled tick,
+    /// since that is where the day boundary is actually observed.
+    /// </summary>
+    private void CheckSpeedSchedule()
+    {
+        const double Frame = 1.0 / 60.0;
+        int ticksPerDay = _sim.Calendar.TicksPerDay;
+        double stepSize = -1.0;
+        bool sameTicksPerDay = true;
+        bool sameStep = true;
+        bool realTimeScaled = true;
+        var report = new List<string>();
+
+        foreach (float multiplier in _sim.Speeds)
+        {
+            if (multiplier <= 0f)
+            {
+                continue;
+            }
+
+            var clock = new SimClock { Speed = multiplier };
+            var calendar = new GameCalendar(ticksPerDay, _sim.Calendar.DaysPerSeason);
+            long rolloverTick = -1;
+            double realSeconds = 0.0;
+            while (rolloverTick < 0 && realSeconds < 600.0)
+            {
+                int ticks = clock.Advance(Frame);
+                realSeconds += Frame;
+                for (int i = 0; i < ticks && rolloverTick < 0; i++)
+                {
+                    calendar.Advance();
+                    if (calendar.TotalDays == 1)
+                    {
+                        rolloverTick = calendar.Ticks;
+                    }
+                }
+            }
+
+            sameTicksPerDay &= rolloverTick == ticksPerDay;
+            sameStep &= stepSize < 0.0 || Mathf.Abs(clock.TickDelta - stepSize) < 1e-12;
+            stepSize = clock.TickDelta;
+            // A day is ticksPerDay / TickRate simulated seconds, so at n x it
+            // has to arrive in about an n-th of that, give or take a frame.
+            double expected = ticksPerDay / (double)clock.TickRate / multiplier;
+            realTimeScaled &= Mathf.Abs(realSeconds - expected) < Frame * 2.0;
+            report.Add($"{multiplier}x: day 2 at tick {rolloverTick} "
+                + $"after {realSeconds:F2} real s");
+        }
+
+        GD.Print("speed: " + string.Join("; ", report));
+        Check($"a day is {ticksPerDay} ticks at every speed", sameTicksPerDay);
+        Check("no speed changes the size of a tick", sameStep);
+        Check("a higher speed reaches the same day in proportionally less real time",
+            realTimeScaled);
+
+        // Pause is the zero step of the same ladder, not a separate mechanism.
+        var stopped = new SimClock { Speed = 0.0 };
+        int ran = 0;
+        for (int i = 0; i < 600; i++)
+        {
+            ran += stopped.Advance(Frame);
+        }
+        Check("a paused clock schedules nothing however long it is fed",
+            ran == 0 && stopped.TickCount == 0 && stopped.DroppedTicks == 0
+            && stopped.IsPaused);
+        stopped.Speed = -3.0;
+        Check("a negative speed is clamped to paused rather than running backwards",
+            stopped.IsPaused && stopped.Speed == 0.0);
     }
 
     /// <summary>
@@ -335,6 +598,7 @@ public partial class WorldSmokeTest : Node
                 _world.Machines.CellOf(machine.Entity) == cell
                 && here.Count == 1 && here[0] == machine.Entity);
         }
+        Check("the sim ran again after the pause", _sim.TickCount > _pausedTickCount);
         Check("the view stays between the last two sim states", _sawViewBetweenSimStates);
         Check("the view draws poses between ticks", _sawInterpolatedPose);
     }

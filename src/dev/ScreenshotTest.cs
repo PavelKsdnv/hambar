@@ -133,8 +133,63 @@ public partial class ScreenshotTest : Node
         string readout = await ShowReadout(main);
         Capture("12-readout", $"hover readout at screen center — {readout.ReplaceLineEndings(" | ")}");
 
+        // The time controls and the date they drive, which no earlier view can
+        // show doing anything: the bar is on screen in all of them, but only
+        // here is it standing on a date other than the first morning of play,
+        // and only here does the picture say which speed is armed.
+        await ShowTimeControls(main);
+
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Captures the time controls in the two states a still picture can tell
+    /// apart: running at the fastest step, and paused. Which button is filled
+    /// amber is a claim about pixels rather than about state, and so is "the
+    /// season and the day are legible on screen" — the whole point of the
+    /// readout.
+    ///
+    /// The date is <b>set</b> rather than waited for. Reaching midsummer
+    /// honestly would take twenty minutes of real time even at 3x, and the
+    /// picture is about legibility, not about arithmetic the smoke test already
+    /// pins. Setting it also keeps the view deterministic: a date the run
+    /// drifted into would depend on how long the searches above happened to
+    /// take.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowTimeControls(Node main)
+    {
+        const int MidSeasonDay = 7;
+
+        var sim = main.GetNodeOrNull<Simulation>("Sim");
+        var controls = main.GetNodeOrNull<TimeControls>("Hud/TimeControls");
+        if (sim == null || controls == null)
+        {
+            GD.Print("FAIL: time controls — no Sim or Hud/TimeControls in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        sim.Calendar.SetDate(1, Season.Summer, MidSeasonDay);
+
+        int fastest = sim.Speeds.Count - 1;
+        controls.Select(fastest);
+        await Settle(0.3f);
+        Capture("13-time-running",
+            $"time controls running at {controls.Entry(fastest)?.LabelText} "
+            + $"— readout says \"{controls.DateText}\"");
+
+        controls.Select(0);
+        await Settle(0.3f);
+        Capture("14-time-paused",
+            $"time controls paused, the world still drawn — readout says "
+            + $"\"{controls.DateText}\", clock at tick {sim.TickCount}");
+
+        if (!sim.IsPaused || controls.ActiveIndex != 0)
+        {
+            GD.Print("FAIL: 14-time-paused — the pause button did not stop the clock");
+            _failed = true;
+        }
     }
 
     /// <summary>

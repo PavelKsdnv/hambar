@@ -1,4 +1,4 @@
-[gd_scene load_steps=21 format=3]
+[gd_scene load_steps=22 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
@@ -17,6 +17,7 @@
 [ext_resource type="Texture2D" path="res://assets/icons/toolbar/field.svg" id="14_icon_field"]
 [ext_resource type="Texture2D" path="res://assets/icons/toolbar/structure.svg" id="15_icon_structure"]
 [ext_resource type="Texture2D" path="res://assets/icons/toolbar/bulldozer.svg" id="16_icon_bulldozer"]
+[ext_resource type="Script" path="res://src/ui/TimeControls.cs" id="18_timecontrols"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -48,6 +49,10 @@ mesh = SubResource("mesh_ground")
 script = ExtResource("17_sim")
 TickRate = 20
 MaxTicksPerFrame = 5
+TicksPerDay = 600
+DaysPerSeason = 12
+SpeedSteps = PackedFloat32Array(0, 1, 2, 3)
+StartSpeedIndex = 1
 
 [node name="World" type="Node3D" parent="."]
 script = ExtResource("2_world")
@@ -125,6 +130,15 @@ grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("12_palette")
 Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../BulldozeTool")]
+
+[node name="TimeControls" type="Control" parent="Hud" node_paths=PackedStringArray("Sim")]
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("18_timecontrols")
+Sim = NodePath("../../Sim")
 
 [node name="CellInspector" type="Node" parent="." node_paths=PackedStringArray("World", "Readout")]
 script = ExtResource("7_inspector")

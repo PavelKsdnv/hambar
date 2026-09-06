@@ -21,6 +21,20 @@ namespace Arable;
 /// <c>_PhysicsProcess</c>: a sim clocked off Godot's 60 Hz physics step would
 /// be a divisor of the render loop, which is precisely the coupling this
 /// removes.
+///
+/// <b>Two clocks live here and they are not the same thing.</b>
+/// <see cref="Clock"/> (<see cref="SimClock"/>) is the tick scheduler — real
+/// seconds in, ticks out. <see cref="Calendar"/> (<see cref="GameCalendar"/>)
+/// is the date — ticks in, days and seasons out. The player's speed control
+/// moves the first and never the second, which is why 3× runs the game three
+/// times as fast without a day becoming any shorter in ticks.
+///
+/// <b>Speed is not sim state.</b> It decides <i>when</i> ticks happen in real
+/// time, never <i>what</i> a tick does, so it is deliberately outside anything
+/// #25 hashes or a replay reproduces: the same run at 1× and at 3× is the same
+/// sequence of ticks. Pausing simply stops scheduling them — the view and the
+/// camera keep running on their own <c>_Process</c>, so the player can still
+/// look around a stopped world.
 /// </summary>
 public partial class Simulation : Node
 {
@@ -42,9 +56,45 @@ public partial class Simulation : Node
     [Export] public int TickRate { get; set; } = SimClock.DefaultTickRate;
     [Export] public int MaxTicksPerFrame { get; set; } = SimClock.DefaultMaxTicksPerFrame;
 
+    /// <summary>
+    /// Ticks that make one in-game day. Exported because M4 calls crop cadence
+    /// the tempo of the entire game, and a playtest that wants to argue about
+    /// it should not need a rebuild to. See
+    /// <see cref="GameCalendar.DefaultTicksPerDay"/> for why 600.
+    /// </summary>
+    [Export] public int TicksPerDay { get; set; } = GameCalendar.DefaultTicksPerDay;
+
+    /// <summary>Days that make one season — the other half of the tempo knob.</summary>
+    [Export] public int DaysPerSeason { get; set; } = GameCalendar.DefaultDaysPerSeason;
+
+    /// <summary>
+    /// The speed ladder the player steps through, as multipliers on real time.
+    /// The UI builds one button per entry, in this order, so adding a 5× for a
+    /// playtest is editing this list — the same trick <c>BuildPalette</c> plays
+    /// with its tool list.
+    ///
+    /// <b>The first entry is pause.</b> A ladder whose first step is not 0 is
+    /// repaired at load (see <see cref="_EnterTree"/>): the list is otherwise
+    /// free-form, but the code has to be able to find the stop.
+    /// </summary>
+    [Export] public float[] SpeedSteps { get; set; } = [0f, 1f, 2f, 3f];
+
+    /// <summary>Which step play opens on. 1 is the first running speed, i.e. 1×.</summary>
+    [Export] public int StartSpeedIndex { get; set; } = 1;
+
     private SimClock _clock = new();
+    private GameCalendar _calendar = new();
     private readonly List<ISimSystem> _systems = new();
     private readonly List<ISimView> _views = new();
+    private float[] _speeds = [0f, 1f];
+    private int _speedIndex = 1;
+
+    /// <summary>
+    /// The step <see cref="TogglePause"/> comes back to. Pause is a round trip
+    /// for the player, so the game has to remember what it was doing — and this
+    /// is a UI convenience, not sim state: it changes nothing a tick does.
+    /// </summary>
+    private int _lastRunningIndex = 1;
 
     /// <summary>The sim node for a node's tree, or null if the scene has none.</summary>
     public static Simulation? For(Node node) =>
@@ -53,11 +103,30 @@ public partial class Simulation : Node
     /// <summary>The tick schedule. Read it; the loop below is what advances it.</summary>
     public SimClock Clock => _clock;
 
+    /// <summary>
+    /// The date. Ticks in, days and seasons out — see
+    /// <see cref="GameCalendar"/>, and do not confuse it with
+    /// <see cref="Clock"/>.
+    /// </summary>
+    public GameCalendar Calendar => _calendar;
+
     public long TickCount => _clock.TickCount;
 
     public float Alpha => _clock.Alpha;
 
     public int SystemCount => _systems.Count;
+
+    /// <summary>The speed ladder actually in force, after the export was vetted.</summary>
+    public IReadOnlyList<float> Speeds => _speeds;
+
+    /// <summary>Which step of <see cref="Speeds"/> is selected. Step 0 is pause.</summary>
+    public int SpeedIndex => _speedIndex;
+
+    /// <summary>The multiplier in force: how much faster than real time the sim is scheduled.</summary>
+    public double Speed => _clock.Speed;
+
+    /// <summary>Whether sim time is stopped. The view and the camera are not.</summary>
+    public bool IsPaused => _clock.IsPaused;
 
     public override void _EnterTree()
     {
@@ -67,6 +136,80 @@ public partial class Simulation : Node
         AddToGroup(GroupName);
         ProcessPriority = TicksFirst;
         _clock = new SimClock(TickRate, MaxTicksPerFrame);
+        _calendar = new GameCalendar(TicksPerDay, DaysPerSeason);
+        _speeds = VetSpeeds(SpeedSteps);
+        _lastRunningIndex = FirstRunningIndex();
+        if (!SetSpeed(StartSpeedIndex))
+        {
+            SetSpeed(_lastRunningIndex);
+        }
+    }
+
+    /// <summary>
+    /// <b>The one path a speed changes through</b> — the button, a key and a
+    /// test all take it, so nothing can end up with the clock running at a
+    /// speed the UI is not showing. Returns false, changing nothing, for an
+    /// index off the ladder.
+    /// </summary>
+    public bool SetSpeed(int index)
+    {
+        if (index < 0 || index >= _speeds.Length)
+        {
+            return false;
+        }
+
+        _speedIndex = index;
+        _clock.Speed = _speeds[index];
+        if (_speeds[index] > 0f)
+        {
+            _lastRunningIndex = index;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Stops sim time, or starts it again at whatever speed it was last
+    /// running. What a pause key (or a menu opening, later) calls.
+    /// </summary>
+    public void TogglePause() => SetSpeed(IsPaused ? _lastRunningIndex : 0);
+
+    /// <summary>
+    /// Vets the exported ladder the way <c>Economy</c> vets its starting
+    /// balance: repair and complain, never take the scene down over a number
+    /// typed in the inspector. Negative and NaN steps are dropped by
+    /// <see cref="SimClock.Speed"/> anyway, so all this has to guarantee is
+    /// that the list is non-empty and that step 0 is the stop.
+    /// </summary>
+    private static float[] VetSpeeds(float[]? steps)
+    {
+        if (steps == null || steps.Length == 0)
+        {
+            GD.PushWarning("Simulation: SpeedSteps is empty; falling back to pause/1x.");
+            return [0f, 1f];
+        }
+
+        if (steps[0] != 0f)
+        {
+            GD.PushWarning("Simulation: SpeedSteps must start with 0 (pause); prepending it.");
+            var repaired = new float[steps.Length + 1];
+            steps.CopyTo(repaired, 1);
+            return repaired;
+        }
+
+        return (float[])steps.Clone();
+    }
+
+    /// <summary>The first step that actually runs, so pause always has somewhere to come back to.</summary>
+    private int FirstRunningIndex()
+    {
+        for (int i = 0; i < _speeds.Length; i++)
+        {
+            if (_speeds[i] > 0f)
+            {
+                return i;
+            }
+        }
+        return 0;
     }
 
     /// <summary>
@@ -100,6 +243,9 @@ public partial class Simulation : Node
         var dt = (float)_clock.TickDelta;
         for (int t = 0; t < ticks; t++)
         {
+            // The date moves first, so a system reading it inside its own Tick
+            // sees the date of the tick it is running rather than the last one.
+            _calendar.Advance();
             for (int i = 0; i < _systems.Count; i++)
             {
                 _systems[i].Tick(dt);
