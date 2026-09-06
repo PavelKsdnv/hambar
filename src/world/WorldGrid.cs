@@ -10,7 +10,7 @@ namespace Arable;
 /// Two independent layers live here:
 /// <list type="bullet">
 /// <item><b>terrain</b> — what the land is (<see cref="TerrainType"/> plus a
-/// fertility scalar). Generated from <see cref="WorldSeed"/>, bounded by
+/// fertility scalar). Derived from <see cref="WorldSeed"/>, bounded by
 /// <see cref="MapHalfExtent"/>, and never edited by the player.</item>
 /// <item><b>placement</b> — what the player built (<see cref="TileType"/>).
 /// Sparse; clearing it back to <see cref="TileType.Empty"/> leaves the terrain
@@ -21,7 +21,7 @@ namespace Arable;
 /// machines. The GridMap is presentation only — game logic must always go
 /// through this class, never read the GridMap back.
 /// </summary>
-public partial class WorldGrid : Node3D
+public partial class WorldGrid : Node3D, IHashableState
 {
     private const int StartRoadHalfExtent = 16; // the starting road spans cells -16..16
 
@@ -42,10 +42,17 @@ public partial class WorldGrid : Node3D
     private const int StructureItem = 8;
 
     /// <summary>
-    /// Offset that derives the rock/water mask seed from the world seed, so a
-    /// single seed still describes the whole map.
+    /// The stream machine spawn placement draws from. Separate from
+    /// <c>MachineSystem.StreamName</c> on purpose: spawning is the world laying
+    /// the game out, wandering is a machine deciding what to do, and a debug
+    /// session that spawns an extra tractor should not reroute the ones already
+    /// driving.
     /// </summary>
-    private const int MaskSeedOffset = 7919;
+    public const string SpawnStreamName = "world.spawn";
+
+    /// <summary>Names the two terrain noise fields derive their seeds from.</summary>
+    private const string FertilityNoiseName = "world.terrain.fertility";
+    private const string MaskNoiseName = "world.terrain.mask";
 
     [Export] public PackedScene? MachineScene { get; set; }
     [Export] public int MachineCount { get; set; } = 0;
@@ -58,8 +65,19 @@ public partial class WorldGrid : Node3D
     /// </summary>
     [Export] public int MapHalfExtent { get; set; } = 48;
 
-    /// <summary>Single seed for the whole map: both noise fields derive from it.</summary>
-    [Export] public int WorldSeed { get; set; } = 20260904;
+    /// <summary>
+    /// The world seed, which the <c>Simulation</c> owns (<see cref="Streams"/>)
+    /// — this is the door terrain code and the smoke tests already knew about,
+    /// kept so there is still exactly one number and not a world copy of it.
+    /// Setting it starts a different world: every stream jumps back to the
+    /// beginning of its sequence. It deliberately does <b>not</b> regenerate the
+    /// map — <see cref="GenerateTerrain"/> is a separate, explicit act.
+    /// </summary>
+    public int WorldSeed
+    {
+        get => Streams.WorldSeed;
+        set => Streams.Reseed(value);
+    }
 
     /// <summary>Noise frequency (per cell) of the fertility field.</summary>
     [Export] public float FertilityFrequency { get; set; } = 0.04f;
@@ -115,17 +133,84 @@ public partial class WorldGrid : Node3D
     /// </summary>
     private int _halfExtent = -1;
 
-    private readonly Random _spawnRng = new(1234);
+    private RandomStreams? _streams;
+
+    // Only ever used when there is no Simulation to ask; see Streams.
+    private RandomStreams? _fallbackStreams;
+    private RandomStream _spawnRng = null!;
     private int _machinesSpawned;
+
+    // Machines are sim entities, so their state lives in flat arrays rather
+    // than in the nodes that draw them (see MachineSystem). The registry lives
+    // here for the same reason the field and structure registries do: this
+    // class already owns the road queries the machines run on, and there is
+    // exactly one world.
+    private MachineSystem _machines = null!;
+    private Simulation? _sim;
 
     public override void _Ready()
     {
         _gridMap = GetNode<GridMap>("GridMap");
+        _sim = Simulation.For(this);
+
+        // The streams are taken once and held: they are the same objects for
+        // the life of the world, and a reseed rewrites them in place.
+        _spawnRng = Streams.For(SpawnStreamName);
+        _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
+        _sim?.Register(_machines);
+
+        // The world is state, not a system: it has nothing to tick, but a
+        // determinism run and a save both have to see the map the player built.
+        _sim?.RegisterState(this);
         GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
         {
             SpawnMachine();
+        }
+    }
+
+    // The machine system holds this world; leaving it registered would tick it
+    // against a freed WorldGrid — and leaving the world registered as state
+    // would hash a freed node.
+    public override void _ExitTree()
+    {
+        _sim?.Unregister(_machines);
+        _sim?.UnregisterState(this);
+    }
+
+    /// <summary>
+    /// The world's randomness, which the <c>Simulation</c> owns. Resolved
+    /// lazily rather than in <c>_Ready</c> because <see cref="WorldSeed"/> is
+    /// readable before the world is built; a scene with no sim node gets a
+    /// private registry and a warning, the way the rest of the codebase repairs
+    /// a bad scene instead of taking it down.
+    /// </summary>
+    private RandomStreams Streams
+    {
+        get
+        {
+            if (_streams != null)
+            {
+                return _streams;
+            }
+
+            RandomStreams? fromSim = Simulation.For(this)?.Streams;
+            if (fromSim == null)
+            {
+                GD.PushWarning("WorldGrid: no Simulation in the tree; "
+                    + "world randomness falls back to a private registry.");
+                // Deliberately not cached into _streams: an access from outside
+                // the tree must not decide the world's randomness for the rest
+                // of the run. Caching it here would leave _Ready building the
+                // world from a registry the Simulation does not own, and so
+                // outside SimStateHash — a world whose rolls are invisible to
+                // the determinism harness, which would still happily pass.
+                // The caveat that remains: a reseed made before the world
+                // enters the tree lands on this registry and is dropped.
+                return _fallbackStreams ??= new RandomStreams();
+            }
+            return _streams = fromSim;
         }
     }
 
@@ -453,7 +538,7 @@ public partial class WorldGrid : Node3D
         return new Vector2I(cell.X, cell.Z);
     }
 
-    public Vector2I RandomRoadCell(Random rng) => _roadCells[rng.Next(_roadCells.Count)];
+    public Vector2I RandomRoadCell(RandomStream rng) => _roadCells[rng.NextInt(_roadCells.Count)];
 
     /// <summary>
     /// Breadth-first shortest path over road cells, including both endpoints.
@@ -711,7 +796,7 @@ public partial class WorldGrid : Node3D
 
         var fertilityNoise = new FastNoiseLite
         {
-            Seed = WorldSeed,
+            Seed = Streams.DeriveSeed(FertilityNoiseName),
             NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
             Frequency = FertilityFrequency,
             FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
@@ -719,7 +804,7 @@ public partial class WorldGrid : Node3D
         };
         var maskNoise = new FastNoiseLite
         {
-            Seed = WorldSeed + MaskSeedOffset,
+            Seed = Streams.DeriveSeed(MaskNoiseName),
             NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
             Frequency = MaskFrequency,
             FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
@@ -793,10 +878,97 @@ public partial class WorldGrid : Node3D
         }
     }
 
+    /// <summary>The name the world's state is filed under in a state hash.</summary>
+    public string StateName => "world";
+
     /// <summary>
-    /// Spawns one machine at a random road cell. Position and behavior seeds
-    /// come from a fixed-seed spawn counter, so a given spawn sequence is
-    /// reproducible. Returns null when no machine scene is assigned.
+    /// Both layers of the map, plus the registries and the id counters that say
+    /// what the next placement will be called.
+    ///
+    /// <b>The terrain layer goes in even though it is regenerable from the
+    /// seed</b> — it is what makes "two runs from different seeds hash
+    /// differently" true on tick zero rather than whenever the divergence
+    /// happens to reach a machine, and re-running generation is bit-exact, so a
+    /// load that regenerates rather than restores still matches.
+    ///
+    /// <b>The placement layer is folded unordered</b>, because it is a
+    /// <c>Dictionary</c>: its enumeration order depends on insertion history
+    /// and capacity, so hashing that walk in order would report divergences
+    /// between two identical maps. The cell-to-owner lookups and the road-cell
+    /// list are left out entirely — all three are indexes derived from what is
+    /// hashed here.
+    /// </summary>
+    public void HashState(StateHash hash)
+    {
+        hash.Write(_halfExtent);
+        for (int i = 0; i < _terrain.Length; i++)
+        {
+            hash.Write((int)_terrain[i]);
+            hash.Write(_fertility[i]);
+        }
+
+        var member = new StateHash();
+        ulong fold = 0UL;
+        foreach (KeyValuePair<Vector2I, TileType> tile in _tiles)
+        {
+            member.Reset();
+            member.Write(tile.Key);
+            member.Write((int)tile.Value);
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _tiles.Count);
+
+        // Fields and structures are folded by identity for the same reason:
+        // their registries are lists today, but a load will not rebuild them in
+        // creation order and the hash has no business caring.
+        fold = 0UL;
+        foreach (Field field in _fields)
+        {
+            member.Reset();
+            member.Write(field.Id);
+            member.Write(field.Name);
+            foreach (Vector2I cell in field.Cells)
+            {
+                member.Write(cell);
+            }
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _fields.Count);
+
+        fold = 0UL;
+        foreach (Structure structure in _structures)
+        {
+            member.Reset();
+            member.Write(structure.Id);
+            member.Write(structure.Name);
+            foreach (Vector2I cell in structure.Cells)
+            {
+                member.Write(cell);
+            }
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _structures.Count);
+
+        // Counters, not derivable from the registries: a demolished building
+        // does not give its id back, and the next machine's colour depends on
+        // how many have ever spawned.
+        hash.Write(_fieldsCreated);
+        hash.Write(_structuresCreated);
+        hash.Write(_machinesSpawned);
+    }
+
+    /// <summary>
+    /// Every machine's sim state, in flat arrays. Ticked by the
+    /// <see cref="Simulation"/>; the <see cref="Machine"/> nodes only draw it.
+    /// </summary>
+    public MachineSystem Machines => _machines;
+
+    /// <summary>
+    /// Spawns one machine at a random road cell: a row in
+    /// <see cref="Machines"/> for the sim, and a node bound to it for the view.
+    /// The spot comes off the world's spawn stream, so a given spawn sequence is
+    /// reproducible for a world seed. Returns null when no machine scene is
+    /// assigned.
     /// </summary>
     public Machine? SpawnMachine()
     {
@@ -805,10 +977,14 @@ public partial class WorldGrid : Node3D
             return null;
         }
 
+        // The node is instanced first only to read the exports the scene
+        // carries — Speed and TurnSpeed are spawn input to the arrays, and the
+        // sim never looks at the node again.
         var machine = MachineScene.Instantiate<Machine>();
-        machine.Setup(this, new Random(1000 + _machinesSpawned),
-            MachineColors[_machinesSpawned % MachineColors.Length]);
-        machine.Position = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
+        Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
+        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed);
+        machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
+        machine.Position = spawn;
         AddChild(machine);
         _machinesSpawned++;
         return machine;

@@ -1,15 +1,25 @@
-using System;
-using System.Collections.Generic;
 using Godot;
 
 namespace Arable;
 
 /// <summary>
-/// A vehicle (tractor, combine, truck, ...) that drives the road network.
-/// For now it wanders: pick a random road cell, BFS a path along roads, drive
-/// waypoint to waypoint, repeat. Movement runs on the fixed physics tick.
+/// The <b>drawing</b> of a vehicle (tractor, combine, truck, ...). The machine
+/// itself — position, yaw, route, whether it is parked — is a row of
+/// <see cref="MachineSystem"/>'s arrays, addressed by <see cref="Entity"/>;
+/// this node owns nothing but the mesh, and its transform is a picture of that
+/// row rather than the place the machine is. Read <see cref="SimPosition"/> for
+/// where it actually is.
+///
+/// So it is an <see cref="ISimView"/> and nothing else. It used to be both
+/// halves, which is why the interfaces were split before the arrays existed:
+/// moving the state out cost this file its <c>Tick</c> and touched no other
+/// part of the loop.
+///
+/// The exports are <b>spawn input</b>, read once by <c>WorldGrid.SpawnMachine</c>
+/// and copied into the arrays. Changing <see cref="Speed"/> on a live node does
+/// nothing; the sim never reads them again.
 /// </summary>
-public partial class Machine : Node3D
+public partial class Machine : Node3D, ISimView
 {
     /// <summary>Top surface of road tiles — machines drive at this height.</summary>
     public const float DeckHeight = 0.1f;
@@ -18,16 +28,26 @@ public partial class Machine : Node3D
     [Export] public float TurnSpeed { get; set; } = 8f;
     [Export] public Color BodyColor { get; set; } = new(0.75f, 0.22f, 0.17f);
 
-    private const int RouteAttempts = 8;
+    private MachineSystem? _machines;
+    private Simulation? _sim;
 
-    private WorldGrid? _world;
-    private Random _rng = new();
-    private readonly Queue<Vector3> _waypoints = new();
+    /// <summary>The sim entity this node draws, or <see cref="EntityId.None"/>.</summary>
+    public EntityId Entity { get; private set; } = EntityId.None;
 
-    public void Setup(WorldGrid world, Random rng, Color color)
+    /// <summary>Where the machine is as of the last tick. Sim truth.</summary>
+    public Vector3 SimPosition => _machines?.PositionOf(Entity) ?? Position;
+
+    /// <summary>Where it was the tick before — the other end of the view's blend.</summary>
+    public Vector3 PreviousSimPosition => _machines?.PreviousPositionOf(Entity) ?? Position;
+
+    /// <summary>Set once it strands off-road: it stays alive but stops moving.</summary>
+    public bool Parked => _machines?.IsParked(Entity) ?? false;
+
+    /// <summary>Binds the node to the row it draws. Called before it enters the tree.</summary>
+    public void Setup(MachineSystem machines, EntityId entity, Color color)
     {
-        _world = world;
-        _rng = rng;
+        _machines = machines;
+        Entity = entity;
         BodyColor = color;
     }
 
@@ -36,82 +56,43 @@ public partial class Machine : Node3D
         AddToGroup("machines");
         GetNode<MeshInstance3D>("Model/Body").MaterialOverride =
             new StandardMaterial3D { AlbedoColor = BodyColor };
+
+        _sim = Simulation.For(this);
+        if (_sim == null)
+        {
+            GD.PushWarning($"{Name} found no Simulation node; it will not be drawn.");
+            return;
+        }
+        _sim.RegisterView(this);
     }
 
-    public override void _PhysicsProcess(double delta)
+    /// <summary>
+    /// Freeing the node retires the entity with it. Creating and destroying an
+    /// entity is lifecycle, not a state write, so it is allowed here for the
+    /// same reason <c>Simulation.Register</c> is — outside a tick. Nothing else
+    /// knows the node went away, and a row left behind would be an invisible
+    /// machine still driving the roads.
+    /// </summary>
+    public override void _ExitTree()
     {
-        if (_world == null)
+        _sim?.UnregisterView(this);
+        _machines?.Despawn(Entity);
+        Entity = EntityId.None;
+    }
+
+    /// <summary>
+    /// Pose the node between the last two sim states. Nothing here may write
+    /// sim state — this runs at frame rate, which is exactly the coupling the
+    /// sim loop exists to remove.
+    /// </summary>
+    public void Interpolate(float alpha)
+    {
+        if (_machines == null || !_machines.IsAlive(Entity))
         {
             return;
         }
-        if (_waypoints.Count == 0 && !TryPlanRoute())
-        {
-            return;
-        }
-
-        // Spend the tick's travel budget across waypoints so corners don't
-        // lose distance.
-        float budget = Speed * (float)delta;
-        while (budget > 0f && _waypoints.Count > 0)
-        {
-            Vector3 target = _waypoints.Peek();
-            Vector3 toTarget = target - Position;
-            float distance = toTarget.Length();
-            if (distance <= budget)
-            {
-                Position = target;
-                budget -= distance;
-                _waypoints.Dequeue();
-            }
-            else
-            {
-                Vector3 direction = toTarget / distance;
-                Position += direction * budget;
-                FaceDirection(direction, (float)delta);
-                budget = 0f;
-            }
-        }
-    }
-
-    private bool TryPlanRoute()
-    {
-        Vector2I current = _world!.WorldToCell(Position);
-        if (!_world.IsRoad(current))
-        {
-            GD.PushWarning($"Machine at {Position} is stranded off-road; not moving.");
-            SetPhysicsProcess(false);
-            return false;
-        }
-
-        for (int i = 0; i < RouteAttempts; i++)
-        {
-            Vector2I destination = _world.RandomRoadCell(_rng);
-            if (destination == current)
-            {
-                continue;
-            }
-            List<Vector2I>? path = _world.FindRoadPath(current, destination);
-            if (path == null)
-            {
-                continue;
-            }
-            // String-pull the cell path into long straight runs so the drive
-            // is smooth instead of turning at every cell.
-            path = _world.SmoothRoadPath(path);
-            for (int j = 1; j < path.Count; j++)
-            {
-                _waypoints.Enqueue(_world.CellToWorld(path[j]) + Vector3.Up * DeckHeight);
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private void FaceDirection(Vector3 direction, float delta)
-    {
-        // -Z is the machine's forward.
-        float targetYaw = Mathf.Atan2(-direction.X, -direction.Z);
-        float weight = 1f - Mathf.Exp(-TurnSpeed * delta);
-        Rotation = new Vector3(0f, Mathf.LerpAngle(Rotation.Y, targetYaw, weight), 0f);
+        Position = _machines.PreviousPositionOf(Entity).Lerp(_machines.PositionOf(Entity), alpha);
+        Rotation = new Vector3(0f,
+            Mathf.LerpAngle(_machines.PreviousYawOf(Entity), _machines.YawOf(Entity), alpha), 0f);
     }
 }
