@@ -1,4 +1,4 @@
-[gd_resource type="MeshLibrary" load_steps=19 format=3]
+[gd_resource type="MeshLibrary" load_steps=31 format=3]
 
 [sub_resource type="StandardMaterial3D" id="mat_road"]
 albedo_color = Color(0.32, 0.33, 0.35, 1)
@@ -67,6 +67,54 @@ size = Vector3(2, 0.06, 2)
 material = SubResource("mat_soil_3")
 size = Vector3(2, 0.06, 2)
 
+[sub_resource type="StandardMaterial3D" id="mat_crop_fallow"]
+albedo_color = Color(0.48, 0.38, 0.28, 1)
+roughness = 0.95
+
+[sub_resource type="StandardMaterial3D" id="mat_crop_ploughed"]
+albedo_color = Color(0.22, 0.14, 0.09, 1)
+roughness = 1.0
+
+[sub_resource type="StandardMaterial3D" id="mat_crop_sown"]
+albedo_color = Color(0.64, 0.44, 0.24, 1)
+roughness = 0.95
+
+[sub_resource type="StandardMaterial3D" id="mat_crop_growing"]
+albedo_color = Color(0.3, 0.66, 0.16, 1)
+roughness = 0.85
+
+[sub_resource type="StandardMaterial3D" id="mat_crop_harvestable"]
+albedo_color = Color(0.95, 0.77, 0.18, 1)
+roughness = 0.7
+
+[sub_resource type="StandardMaterial3D" id="mat_crop_stubble"]
+albedo_color = Color(0.84, 0.79, 0.58, 1)
+roughness = 0.9
+
+[sub_resource type="BoxMesh" id="mesh_crop_fallow"]
+material = SubResource("mat_crop_fallow")
+size = Vector3(2, 0.16, 2)
+
+[sub_resource type="BoxMesh" id="mesh_crop_ploughed"]
+material = SubResource("mat_crop_ploughed")
+size = Vector3(2, 0.34, 2)
+
+[sub_resource type="BoxMesh" id="mesh_crop_sown"]
+material = SubResource("mat_crop_sown")
+size = Vector3(2, 0.26, 2)
+
+[sub_resource type="BoxMesh" id="mesh_crop_growing"]
+material = SubResource("mat_crop_growing")
+size = Vector3(2, 0.62, 2)
+
+[sub_resource type="BoxMesh" id="mesh_crop_harvestable"]
+material = SubResource("mat_crop_harvestable")
+size = Vector3(2, 1.0, 2)
+
+[sub_resource type="BoxMesh" id="mesh_crop_stubble"]
+material = SubResource("mat_crop_stubble")
+size = Vector3(2, 0.18, 2)
+
 [resource]
 item/0/name = "Road"
 item/0/mesh = SubResource("mesh_road")
@@ -104,3 +152,27 @@ item/8/name = "Structure"
 item/8/mesh = SubResource("mesh_structure")
 item/8/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
 item/8/shapes = []
+item/9/name = "Field: fallow"
+item/9/mesh = SubResource("mesh_crop_fallow")
+item/9/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.08, 0)
+item/9/shapes = []
+item/10/name = "Field: ploughed"
+item/10/mesh = SubResource("mesh_crop_ploughed")
+item/10/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.17, 0)
+item/10/shapes = []
+item/11/name = "Field: sown"
+item/11/mesh = SubResource("mesh_crop_sown")
+item/11/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.13, 0)
+item/11/shapes = []
+item/12/name = "Field: growing"
+item/12/mesh = SubResource("mesh_crop_growing")
+item/12/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.31, 0)
+item/12/shapes = []
+item/13/name = "Field: harvestable"
+item/13/mesh = SubResource("mesh_crop_harvestable")
+item/13/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+item/13/shapes = []
+item/14/name = "Field: stubble"
+item/14/mesh = SubResource("mesh_crop_stubble")
+item/14/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+item/14/shapes = []

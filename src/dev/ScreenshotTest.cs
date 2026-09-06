@@ -139,6 +139,12 @@ public partial class ScreenshotTest : Node
         // and only here does the picture say which speed is armed.
         await ShowTimeControls(main);
 
+        // The crop stages, which no view before M4 could contain: the map had
+        // nothing on it that changed by itself. Last, because it is the only
+        // section that writes fields into the world *and* runs the clock, and
+        // every earlier view should photograph the world it always did.
+        await ShowCropStages(main, rig);
+
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
     }
@@ -190,6 +196,236 @@ public partial class ScreenshotTest : Node
             GD.Print("FAIL: 14-time-paused — the pause button did not stop the clock");
             _failed = true;
         }
+    }
+
+    /// <summary>
+    /// The six crop stages standing next to each other, at three zooms. This is
+    /// the view that answers M1's question with content that actually changes:
+    /// the whole claim of #29 is that a field's stage is readable off the map
+    /// without opening a panel, and only a picture can say whether it is.
+    ///
+    /// <b>Abutting, not spaced.</b> Six fields in a block with no gap is the
+    /// hard case — a stage only reads if it reads against the stage next to it,
+    /// not against bare ground — and it is what a real farm looks like.
+    ///
+    /// <b>Grown, not set.</b> The stages are reached by ploughing, sowing and
+    /// stepping the clock, so the picture is of the state machine's own output;
+    /// there is no door that writes a stage directly, and inventing one for a
+    /// screenshot is how a view starts lying. The date is put at the start of
+    /// spring first, because the run arrives here at whatever date the earlier
+    /// views left, and a crop sown in the shipped winter never ripens at all.
+    ///
+    /// <b>Nothing here refreshes the view.</b> The tiles change because
+    /// <c>WorldGrid</c> sweeps its fields every frame and <see cref="Settle"/>
+    /// waits real ones — which is the "without a manual refresh" claim,
+    /// photographed rather than asserted.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowCropStages(Node main, CameraRig rig)
+    {
+        // Six 2x2 fields laid out 3 across and 2 down, in stage order.
+        const int Span = 2;
+        const int Columns = 3;
+        const int Rows = 2;
+        const int SearchRadius = 18;
+
+        // Growth is banked per tick against a rate the ground sets, so the wait
+        // is a budget rather than a schedule: generous enough for poor soil,
+        // finite so a stalled crop ends the run instead of hanging it.
+        const int StepChunk = 100;
+        const int MaxTicks = 60_000;
+
+        CropStage[] wanted =
+        [
+            CropStage.Fallow, CropStage.Ploughed, CropStage.Sown,
+            CropStage.Growing, CropStage.Harvestable, CropStage.Stubble,
+        ];
+
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var sim = main.GetNodeOrNull<Simulation>("Sim");
+        if (world == null || sim == null)
+        {
+            GD.Print("FAIL: crop stages — no World or Sim in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        // The readout was pinned to the screen centre by the view above; it is a
+        // dev instrument, and these frames are about the tiles.
+        main.GetNodeOrNull<CellInspector>("CellInspector")?.SetEnabled(false);
+        sim.Calendar.SetDate(1, Season.Spring, 1);
+
+        Vector2I? corner = FindCropBlock(world, Columns * Span, Rows * Span, SearchRadius);
+        if (corner is not { } origin)
+        {
+            GD.Print($"FAIL: crop stages — no clear {Columns * Span}x{Rows * Span} "
+                + $"soil block within {SearchRadius} cells of the origin");
+            _failed = true;
+            return;
+        }
+
+        var fields = new Field[wanted.Length];
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            var from = new Vector2I(
+                origin.X + (i % Columns) * Span, origin.Y + (i / Columns) * Span);
+            Vector2I to = from + new Vector2I(Span - 1, Span - 1);
+            Field? field = world.MarkField(WorldGrid.RectCells(from, to));
+            if (field == null)
+            {
+                GD.Print($"FAIL: crop stages — marking the {wanted[i]} field failed");
+                _failed = true;
+                return;
+            }
+            fields[i] = field;
+        }
+
+        CropSystem crops = world.Crops;
+
+        // Everything but the fallow one gets ploughed. The two that have to be
+        // standing ripe when the shutter falls are sown first and grown out
+        // together; one of them is then cut, which is what leaves stubble.
+        for (int i = 1; i < fields.Length; i++)
+        {
+            crops.Plough(fields[i].Crop);
+        }
+        crops.Sow(fields[4].Crop);
+        crops.Sow(fields[5].Crop);
+        StepUntil(sim, crops, fields[4].Crop, CropStage.Harvestable, StepChunk, MaxTicks);
+        StepUntil(sim, crops, fields[5].Crop, CropStage.Harvestable, StepChunk, MaxTicks);
+        crops.Harvest(fields[5].Crop);
+
+        // Only now the growing one, so it is still half-grown while the ripe one
+        // waits — a ripe field never moves on by itself, which is what lets one
+        // frame hold two stages that are days apart.
+        crops.Sow(fields[3].Crop);
+        StepUntil(sim, crops, fields[3].Crop, CropStage.Growing, StepChunk, MaxTicks);
+
+        // And the sown one last of all: a single tick of growth would sprout it.
+        crops.Sow(fields[2].Crop);
+
+        var reached = new System.Text.StringBuilder();
+        bool asWanted = true;
+        for (int i = 0; i < fields.Length; i++)
+        {
+            CropStage stage = crops.StageOf(fields[i].Crop);
+            asWanted &= stage == wanted[i];
+            reached.Append(reached.Length > 0 ? ", " : string.Empty)
+                .Append(CropSystem.Name(stage));
+        }
+
+        if (!asWanted)
+        {
+            GD.Print($"FAIL: crop stages — the fields ended on {reached}, "
+                + "not the six stages asked for");
+            _failed = true;
+        }
+
+        rig.Position = world.CellToWorld(
+            origin + new Vector2I(Columns * Span / 2, Rows * Span / 2));
+        string what = $"six 2x2 fields abutting, left to right then down: {reached}";
+
+        // Back in from the zoom-out view above, then out again a step at a time,
+        // because the readability claim is about the range the rig allows and
+        // not about one framing.
+        await ZoomTo(rig, ZoomOutSteps, zoomIn: true);
+        Capture("15-crop-stages-near", $"{what} — ortho size {Zoom(rig):0.0}");
+
+        await ZoomTo(rig, ZoomOutSteps / 2, zoomIn: false);
+        Capture("16-crop-stages-mid", $"the same six at mid zoom — ortho size {Zoom(rig):0.0}");
+
+        await ZoomTo(rig, ZoomOutSteps - ZoomOutSteps / 2, zoomIn: false);
+        Capture("17-crop-stages-far",
+            $"the same six at the rig's far limit — ortho size {Zoom(rig):0.0}");
+    }
+
+    /// <summary>
+    /// Runs the clock until the field reaches the stage, in chunks, giving up
+    /// after <paramref name="maxTicks"/>. Stepped rather than played: the growth
+    /// is days of game time and the shutter should not wait for them.
+    /// </summary>
+    private static void StepUntil(
+        Simulation sim, CropSystem crops, EntityId row, CropStage want,
+        int chunk, int maxTicks)
+    {
+        for (int t = 0; t < maxTicks && crops.StageOf(row) != want; t += chunk)
+        {
+            sim.Step(chunk);
+        }
+    }
+
+    /// <summary>
+    /// The min corner of a clear, workable block of soil big enough for the
+    /// field layout — searched outward from the origin, never assumed, so a seed
+    /// change moves the picture rather than quietly photographing a refusal.
+    /// Poor ground is skipped as well as unusable ground: a crop on soil that
+    /// barely grows would spend the whole tick budget getting ripe.
+    /// </summary>
+    private static Vector2I? FindCropBlock(WorldGrid world, int width, int height, int radius)
+    {
+        const float WantFertility = 0.35f;
+
+        // Two passes, because the fertility floor is a preference and the clear
+        // ground is a requirement: a stony seed still gets a picture.
+        for (int pass = 0; pass < 2; pass++)
+        {
+            float floor = pass == 0 ? WantFertility : 0f;
+            for (int r = 0; r <= radius; r++)
+            {
+                for (int dz = -r; dz <= r; dz++)
+                {
+                    for (int dx = -r; dx <= r; dx++)
+                    {
+                        if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dz)) != r)
+                        {
+                            continue;
+                        }
+
+                        var corner = new Vector2I(dx, dz);
+                        if (IsClearBlock(world, corner, width, height, floor))
+                        {
+                            return corner;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static bool IsClearBlock(
+        WorldGrid world, Vector2I corner, int width, int height, float minFertility)
+    {
+        for (int z = 0; z < height; z++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                var cell = new Vector2I(corner.X + x, corner.Y + z);
+                if (!world.IsSoil(cell)
+                    || world.GetTile(cell) != TileType.Empty
+                    || world.GetFertility(cell) < minFertility)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// <summary>The rig camera's current orthographic size — how far out the view is.</summary>
+    private static float Zoom(CameraRig rig) => rig.GetNode<Camera3D>("Camera3D").Size;
+
+    /// <summary>
+    /// Steps the zoom and lets the rig's smoothing land on it. Through the input
+    /// action rather than the camera, so the framing is one the player could
+    /// actually reach — and settled by time, because the smoothing is dt-based.
+    /// </summary>
+    private async System.Threading.Tasks.Task ZoomTo(CameraRig rig, int steps, bool zoomIn)
+    {
+        for (int i = 0; i < steps; i++)
+        {
+            SendAction(zoomIn ? "camera_zoom_in" : "camera_zoom_out");
+        }
+        await Settle(SettleSeconds);
     }
 
     /// <summary>

@@ -24,7 +24,7 @@ Last updated: 2026-09-06.
 | `## Game calendar` | touching days, seasons, game speed or pause |
 | `## Randomness` | drawing a random number, or seeding anything |
 | `## Camera` | touching `CameraRig`, projection or input |
-| `## World grid` | touching world state, terrain, tiles or road queries |
+| `## World grid` | touching world state, terrain, tiles, roads or how a cell draws |
 | `## Machines` | touching vehicles or movement |
 | `## Build palette` | touching the toolbar or tool selection |
 | `## Dev shortcuts` | adding a dev key |
@@ -52,8 +52,7 @@ free. `dev/` is test scenes, not the game; `scenes/Main.tscn` is the entry point
 
 **Gotcha (hand-written .tscn):** a Node-typed export serialized as
 `World = NodePath("../World")` only resolves if the `[node]` header also carries
-`node_paths=PackedStringArray("World")`. Without that marker the property loads
-as null.
+`node_paths=PackedStringArray("World")`; without it the property loads as null.
 
 ## Simulation (`src/sim/`)
 
@@ -174,11 +173,9 @@ Stacks sit ascending by type id, so the hash walk is canonical without a fold.
 > **Two clocks, and conflating them is the trap.** `SimClock` is the *tick
 > scheduler* — real seconds in, whole ticks out. `GameCalendar` is the *date* —
 > ticks in, days and seasons out. Neither measures what the other does, which is
-> exactly what lets the speed control move the first and never the second.
-
-**A day is a count of ticks, not a span of seconds**, which makes "the same
-number of ticks elapses per simulated day at every speed" true by construction
-rather than by arithmetic somebody keeps honest: 3× only runs them sooner.
+> exactly what lets the speed control move the first and never the second — and
+> makes a day a count of ticks rather than of seconds, so the same ticks elapse
+> per simulated day at every speed by construction, 3× only running them sooner.
 
 **The numbers, and why.** A day is **600 ticks** — 30 s at 20 Hz, about one haul
 across the map, so a five-minute playtest sees ten and day-scale effects (M7's
@@ -235,10 +232,9 @@ means *new world*, not *load*.
 
 **A class, not a struct:** a mutable value type advances a *copy* as soon as it
 is passed or pulled out of a collection, surfacing as a determinism failure
-rather than as anything that looks wrong. Streams are per **system**, not per
-entity, a fixed slot walk being reproducible already. Names live with the owning
-system (`MachineSystem.StreamName`), not a central list every milestone would
-edit; the price is that a typo opens a *new* stream, hence constants.
+and not as anything that looks wrong. Streams are per **system**, not per entity
+— a slot walk is reproducible already — and their names live with the owning
+system, not a central list; a typo therefore opens a *new* stream, hence constants.
 
 **Three traps.** `WorldGrid.WorldSeed` forwards to the seed on `Simulation`
 (terrain is its loudest consumer, not its owner), but that `[Export]` is the
@@ -304,6 +300,28 @@ throwing, so "not on the map" is one call.
 **How the two layers render.** One `GridMap` draws both, the placed tile winning
 where a cell has one — placement *hides* terrain rather than overwriting it.
 
+**A field cell draws its crop stage** (`### Crops`): one MeshLibrary item per
+`CropStage`, consecutive from a base id, the arithmetic the fertility tiers
+already use. `TileType` stays at `Field`, because six stages in the tile enum
+would put sim state in the placement layer; the plain farmland item is the
+fallback for a cell whose row is unreachable — inside `MarkField` before the
+cell → field lookup exists, and the raw `SetTile` door.
+
+**How a stage the sim moved reaches the `GridMap`.** Every other tile changes
+because something called `SetTile`; a crop ripens because time passed and
+nothing calls anything. So `WorldGrid` takes the `ISimView` half as well and
+sweeps its fields once a frame against the stage it last drew, pushing only
+those that moved — view bookkeeping, never hashed, never saved. Rejected: an
+event out of `CropSystem`, which would run the view half-way through a tick and
+point the dependency from the sim at the renderer. `MarkField` draws its own new
+field rather than waiting for a frame, because a stepped run has none.
+
+**Stage art needs height *and* colour**: at `ZoomMax` a 2 m cell is a few pixels
+tall so only colour reads, while close in height is what separates two browns.
+**Keep the ramp out of the terrain palette** — grey is rock, olive is soil — a
+trap paid for once, when a grey-brown fallow field read as a rock outcrop at the
+zoom limit. Warm earth → green → gold is what is left, and M10 inherits it.
+
 **Road-network queries live here**, because they are questions about the grid
 rather than about a vehicle:
 
@@ -343,11 +361,10 @@ system, because machines run on the road queries it already owns.
   and copied into the arrays — changing one on a live node does nothing.
 - **Dev model:** a box whose forward is **−Z**, meshes under a `Model` child
   carrying the visual scale, so resizing the art never touches movement code.
-- **Behavior:** wander. The smoothing is what keeps a stair-stepped diagonal
-  road from being driven as a zigzag; one that strands off-road warns and parks.
-  Each tick spends a travel budget (`Speed·dt`) across waypoints so corners lose
-  no distance, and yaw smooths frame-rate-independently. The previous pose is
-  snapshotted for *every* live machine, parked included — a stale one drifts.
+- **Behavior:** wander. Smoothing keeps a stair-stepped diagonal road from being
+  driven as a zigzag; one stranded off-road warns and parks. A tick spends a
+  travel budget (`Speed·dt`) across waypoints so corners lose no distance, and
+  the previous pose is snapshotted for *every* machine — a parked one drifts.
 - **Freeing the node despawns the row.** `Machine._ExitTree` is the one place a
   view touches sim state — lifecycle, not a state write. Nothing else notices a
   freed node, and an orphan row is an invisible machine still driving the roads.
@@ -358,9 +375,8 @@ system, because machines run on the road queries it already owns.
 ## Build palette (`src/ui/BuildPalette.cs`)
 
 > **The toolbar is how a build tool is chosen**, and it is the pattern every
-> other HUD bar copies (`## Game calendar` is the second): one button per entry,
-> built in code from an exported list, reading its state off the thing it
-> controls, with one selection path and a repaint every frame.
+> other HUD bar copies (`## Game calendar` is the second): one button per entry
+> from an exported list, one selection path, and a repaint every frame.
 
 **Built in code from the exported `Tools` list**, in bar order, so putting M5's
 silo on the bar is adding it to that list; each button reads its name, icon and
@@ -371,10 +387,9 @@ tools (`BuildTool.Active`, kept unique by the `build_tools` group), repainted
 every frame — so a tool disarmed by *any* other route is right on the bar the
 same frame, with no palette-side copy that could disagree.
 
-**Keys are an accelerator for the bar, not a way around it.** Key *n* calls the
-same `Toggle` a button press calls, and the palette claims `menu_1` upwards so
-the range grows with the roster. `Select` is public so a headless test can arm a
-tool along the path a click takes.
+**Keys are an accelerator for the bar, not a way around it.** Key *n* — and a
+headless test — calls the same `Toggle` a button press does, and the palette
+claims `menu_1` upwards so the range grows with the roster.
 
 **The M8 seam is `ToolAvailability`.** A non-available entry is refused on
 **every** path in, because a seam only one path respects is decoration; a tool
@@ -414,17 +429,14 @@ satisfy its own access requirement, and a corner is not access.
 
 `Check` answers a `PlacementPlan`, and how its per-cell verdicts add up is the
 `FootprintPolicy`, because building and clearing want opposite answers about a
-mixed region. Building is `EveryCell`: **all-or-nothing**, since a half road or
-a field with a bite out of it is not what the player asked for, and the per-cell
-verdicts exist only so the ghost can point at the offenders. The bulldozer alone
-is `AnyCell` — failing cells are skipped, and a drag is *priced* on the cells it
-acts on rather than the ground it crossed.
+mixed region. Building is `EveryCell`: **all-or-nothing**, since a field with a
+bite out of it is not what the player asked for, and the per-cell verdicts exist
+only so the ghost can point at the offenders. The bulldozer alone is `AnyCell`,
+*priced* on the cells it acts on rather than the ground it crossed.
 
-**What the player sees** is a ghost of the footprint whose one promise is that
-**a legal-coloured cell is a cell something will happen to**, which is why
-`GhostColorFor` is virtual: under
-`AnyCell` a legal plan still holds cells it will skip, and the bulldozer dims
-those.
+**What the player sees** is a ghost whose one promise is that **a legal-coloured
+cell is a cell something will happen to** — hence a virtual `GhostColorFor`:
+under `AnyCell` a legal plan still holds cells it will skip.
 
 **Interaction.** A refused click writes nothing *and keeps the anchor*, so the
 player re-aims; right click / Esc drops the anchor first, the tool second.
@@ -465,14 +477,12 @@ palette on purpose: a new tool gets it free, and the palette knows no rule.
 **Crop state left `Field` for the entity arrays** (`### Entity storage`). An
 enum and a float on `Field` would have hashed fine through `WorldGrid`'s
 registry fold — and left the growth factors, the output buffer and M5's jobs
-walking a `List` whose order a load need not reproduce. `Field` keeps the cells,
-the name and a `Crop` handle, hashed from both ends because neither derives the
-other.
+walking a `List` whose order a load need not reproduce. The pairing is hashed
+from both ends, because neither side derives the other.
 
 **Harvest leaves stubble, to be ploughed in again.** Rejected: returning the
 field straight to sowable, which makes ploughing a once-per-field job when M5
-exists to program a *repeating* round of work — hence the pacing tunable
-`WorldGrid.StubbleNeedsPloughing`.
+exists to program a *repeating* round — hence `StubbleNeedsPloughing`.
 
 **Growth accumulates in whole ticks, not days**: adding 1/600 of a day a tick
 lands a hair either side of the threshold in single precision, so a crop ripens
@@ -484,11 +494,10 @@ point.** A factor at zero *stalls* the crop where it stands instead of slowing
 it, which is what stops an untended field quietly finishing and keeps M5's
 labour worth programming; summing would let three good ones carry a zero. Every
 factor is an `[Export]` on `WorldGrid`: M4's question is the cadence, and no
-answer to it should need a rebuild. Shipped seasons run full, full, half,
-**nothing** — winter at 0 makes *when* to sow a decision, and is the first
-number to soften if the dead season plays long. **Water is inert**: nothing in
-the POC irrigates or rains, but dropping the term would make whoever adds
-rainfall re-open the product, its exports and its hash.
+answer should need a rebuild. Shipped seasons run full, full, half, **nothing** —
+winter at 0 makes *when* to sow a decision, and is the first number to soften if
+the dead season plays long. **Water is inert**: nothing in the POC irrigates or
+rains, but dropping the term makes whoever adds rain re-open product and hash.
 
 **Fertility reaches the row as a column, never as a lookup** — `src/sim/` knows
 nothing of cells — and the number is the mean of the field's **chunk** means, a
@@ -496,11 +505,10 @@ chunk being a `FertilityChunkSize`-cell square of the world (4 → 8 m). Rejecte
 the plain cell average, which lets a field lean its rate on whichever patch it
 clipped most of, so the same two patches answer differently depending where the
 drag started; equal weight per chunk makes the rate a property of the ground the
-field spans, at the granularity the yield and M9's hazards want. Chunks align to
-the world origin, so the same ground falls in the same chunks whoever marks it,
-and size 1 is the exact cell mean — the knob's off position. The season is read
-live off `GameCalendar` instead: that is sim state, and a copy taken at startup
-is wrong the first time a save loads in autumn.
+field spans. Chunks align to the world origin, so the same ground falls in the
+same chunks whoever marks it, and size 1 is the exact cell mean — the knob's off
+position. The season is read live off `GameCalendar` instead: it is sim state,
+and a copy taken at startup is wrong the first time a save loads in autumn.
 
 **A harvest deposits a stack into the field's own buffer** (`### Items and
 buffers`), reached through the crop row like the stage, and is **refused whole**
@@ -514,9 +522,8 @@ and is the same for every field that finished, while the ground pays fertility
 twice: good soil ripens sooner *and* cuts heavier. Season stays out on purpose,
 so winter delays a harvest instead of shrinking one. `ProjectedYield` is that
 same computation, so #30 cannot show a number the cut disagrees with. **Area is
-a second pushed-down column** (`SetGround`, taken with fertility at the same two
-moments); it sizes the buffer at `FieldOutputHarvests` *perfect* harvests, so a
-first cut always fits and only an uncollected second one bites.
+a second pushed-down column**, taken with fertility; it sizes the buffer at
+`FieldOutputHarvests` *perfect* harvests, so only an uncollected second cut bites.
 
 **Traps.** A row takes its ground at `MarkField` and whenever the field's cells
 change, never per tick — so moving `FertilityChunkSize` at runtime re-aggregates
@@ -543,9 +550,8 @@ resolving to null once the building is gone, so an order pointing at a
 demolished mill fails loudly rather than hitting its replacement. Bolting the
 entity on later would have meant migrating every bare tile already stamped.
 
-**How a 2×2 lands on this without a rewrite.** A structure owns a *list* of
-cells even though the tool hands it one, and every consumer already works a cell
-at a time; the one line that changes is `Footprint`.
+**How a 2×2 lands without a rewrite.** A structure owns a *list* of cells though
+the tool hands it one, and every consumer already works a cell at a time.
 
 **Where a building parts company with a field** — the one deliberate asymmetry:
 a building is **atomic**. A field shrinks cell by cell; clearing *any* cell of a
@@ -577,12 +583,11 @@ to start on something removable, the first thing to revisit if bulldozing ever
 feels fiddly.
 
 **The refund seam is an M7 stub.** Every removal passes through `RefundFor`,
-whose return `Apply` credits to the `Economy` — so the day M7 puts a fraction of
-a build cost in that expression is the day refunds appear. It pays **nothing**
-today, deliberately rather than unfinished, and already carries what a real rule
-needs: the entity, so a building can be priced by *what* it is. `Removals` is
-the ledger, **one entry per removal, not per cleared cell**, which is why
-clipping two cells of one building refunds it once.
+whose return `Apply` credits to the `Economy`: the day M7 puts a fraction of a
+build cost in that expression is the day refunds appear. It pays **nothing**
+today, deliberately, and is already handed the entity, so a building can be
+priced by *what* it is. `Removals` is the ledger, **one entry per removal, not
+per cleared cell** — clipping two cells of one building refunds it once.
 
 ### Money and build costs (`src/world/Economy.cs`)
 
@@ -606,29 +611,26 @@ Like `TouchesRoad`, affordability is a property of the **whole placement**: the
 player buys all of a ten-cell road or none of it. It is judged **last**, after
 every reason that is not about money, so a drag into water blames the water.
 
-**Charged on commit, never on preview.** `ClickCell` spends `plan.Cost` and
-nothing else in the tool touches money, so however often the ghost is recomputed
-nothing moves — and a refused click is free. A tool with **no** `Economy` wired
-builds for free: that is "there is no money in this scene", not "the player is
-broke", and it keeps a dev scene working.
+**Charged on commit, never on preview**, so however often the ghost is
+recomputed nothing moves and a refused click is free. A tool with **no**
+`Economy` wired builds for free: that is "there is no money in this scene", not
+"the player is broke", and it keeps a dev scene working.
 
 ## Cell picking (`src/ui/CellPicker.cs`)
 
-One implementation of "which cell is under that pixel", shared by every
-mouse-driven tool and the hover readout, so the answer cannot drift between
-them. The camera ray meets the ground plane at y = 0 **analytically** — no
-physics bodies — so a pick is exact, deterministic and independent of what is
-drawn there (a tall rock mesh must not move a cell). Picks are **not clamped**:
-off-map ones are real coordinates, and callers ask `InBounds` what that means.
+One implementation of "which cell is under that pixel", shared by every tool and
+the hover readout, so the answer cannot drift between them. The camera ray meets
+y = 0 **analytically** — no physics bodies — so a pick is exact, deterministic
+and independent of what is drawn there (a tall rock mesh must not move a cell).
+Picks are **not clamped**: off-map ones are real, and callers ask `InBounds`.
 
 ## Hover readout (`src/ui/CellInspector.cs`)
 
 The debug instrument that confirms the generated world is what the generator
-thinks it is. It names the owning `Field`/`Structure` *by name*, the entity
-being what the game addresses farmland and buildings by, and formats with
-`InvariantCulture` so the text is identical on every machine. **Off the map
-needs no bounds check** — the terrain layer already answers `OutOfBounds`. It
-starts **on**, and is *not* the player-facing inspector: that is #30's, and M6's.
+thinks it is. It names the owning `Field`/`Structure` — the entity, not the cell
+— and formats with `InvariantCulture`, so the text reads the same everywhere.
+**Off the map needs no bounds check**: the terrain layer answers `OutOfBounds`.
+Not the player-facing inspector; that is #30's, and M6's.
 
 ## Dev smoke tests (`scenes/dev/`, `src/dev/`)
 
@@ -647,10 +649,9 @@ What is *not*, and costs an afternoon:
 - **`GhostColor` reads the tints the tool handed the mesh, not the mesh.** Under
   `--headless` the dummy renderer keeps no per-instance colours, and
   `GetInstanceColor` answers black.
-- **Wait on sim ticks, not frame counts.** Anything the sim moves has to be
-  asserted after *N ticks*, since a frame number now says nothing about how far
-  it got. The clock itself is testable as plain arithmetic — it is not a node,
-  and `Simulation.Step` runs ticks outright when real time is only in the way.
+- **Wait on sim ticks, not frame counts.** Anything the sim moves is asserted
+  after *N ticks*; the clock itself is plain arithmetic and not a node, and
+  `Simulation.Step` runs ticks outright when real time is only in the way.
 - **One `Main.tscn` at a time.** Two live instances put two nodes in the
   `simulation` group and `Simulation.For` answers whichever it finds first, so
   the second world wires itself to the first world's clock and streams. Free one
@@ -674,7 +675,7 @@ godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>
 framebuffer, so `FramePostDraw` never fires. `_Ready` detects it and quits 1.
 
 **A view earns its place by showing something no other view can** — a ghost
-verdict, a placed building, a paused clock. Each `PASS` line captions what the
+verdict, a paused clock, six crop stages abutting at three zooms. Each `PASS` line captions what the
 frame is meant to show; the caption, not the pixel colour, is what says which
 cell killed a drag. It keeps the conventions above, plus one of its own: views
 settle by **time**, not frame count, because the rig smooths on `delta`.
@@ -682,8 +683,7 @@ settle by **time**, not frame count, because the rig smooths on `delta`.
 ## Not yet implemented (deliberate)
 
 - **Nothing moves an item.** A harvest fills the field's output buffer and it
-  sits there — hauling is M5's — and no crop stage shows in the view (#29) or a
-  panel (#30).
+  sits there — hauling is M5's — and no panel names what it holds (#30).
 - **Structures have no behavior** and there is one generic kind; the roster is
   M5's (silo) and M6's (cleaner, mill, bakery). They are also the last placed
   thing still a plain object in `WorldGrid`'s registries rather than an entity

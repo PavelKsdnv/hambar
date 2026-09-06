@@ -21,15 +21,23 @@ namespace Arable;
 /// machines. The GridMap is presentation only — game logic must always go
 /// through this class, never read the GridMap back.
 /// </summary>
-public partial class WorldGrid : Node3D, IHashableState
+public partial class WorldGrid : Node3D, IHashableState, ISimView
 {
     private const int StartRoadHalfExtent = 16; // the starting road spans cells -16..16
 
     // MeshLibrary item ids in assets/dev/tile_library.tres.
     private const int RoadItem = 0;
-    private const int FieldItem = 1;
     private const int RockItem = 2;
     private const int WaterItem = 3;
+
+    /// <summary>
+    /// Farmland whose crop row cannot be reached — the one frame inside
+    /// <see cref="MarkField"/> before the cell → field lookup is written, and
+    /// any cell the unvalidated <see cref="SetTile"/> door makes farmland
+    /// without an owning <see cref="Field"/>. Never what the player sees: a
+    /// real field is drawn by its stage below.
+    /// </summary>
+    private const int FieldItem = 1;
 
     /// <summary>
     /// Soil is drawn in <see cref="SoilTiers"/> shades by fertility, as
@@ -40,6 +48,17 @@ public partial class WorldGrid : Node3D, IHashableState
 
     /// <summary>Dev art for a placed building: a tall box, so it reads as one.</summary>
     private const int StructureItem = 8;
+
+    /// <summary>
+    /// A field cell is drawn by <b>what is standing on it</b>, one MeshLibrary
+    /// item per <see cref="CropStage"/>, consecutive from this id in enum
+    /// order — the same trick <see cref="SoilItemFirst"/> plays with fertility
+    /// tiers, and for the same reason: the mapping is arithmetic, so adding a
+    /// stage is adding a mesh rather than editing a switch. Each item differs
+    /// in <i>both</i> height and colour, because at the far end of the rig's
+    /// zoom a 2 m cell is a few pixels tall and height alone stops carrying.
+    /// </summary>
+    private const int FieldStageItemFirst = 9;
 
     /// <summary>
     /// The stream machine spawn placement draws from. Separate from
@@ -184,6 +203,12 @@ public partial class WorldGrid : Node3D, IHashableState
     private readonly Dictionary<Vector2I, Field> _fieldOf = new();
     private int _fieldsCreated;
 
+    // The stage each field's cells are currently *drawn* at, so the per-frame
+    // sweep can spot the ones the sim moved and push only those. Pure view
+    // bookkeeping — derived from the crop rows, never hashed, never saved, and
+    // never read by anything that decides something.
+    private readonly Dictionary<int, CropStage> _drawnStage = new();
+
     // Buildings are entities too, and for a stronger reason: a tile enum has
     // no room for the identity M5 delivers to and M6 hangs state off (see
     // Structure). Same shape as the field registry — a list in creation order
@@ -252,6 +277,10 @@ public partial class WorldGrid : Node3D, IHashableState
         // The world is state, not a system: it has nothing to tick, but a
         // determinism run and a save both have to see the map the player built.
         _sim?.RegisterState(this);
+
+        // ...and it is a view as well, because a field's appearance is a
+        // function of a crop stage the sim moves on its own. See Interpolate.
+        _sim?.RegisterView(this);
         GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
@@ -268,6 +297,7 @@ public partial class WorldGrid : Node3D, IHashableState
         _sim?.Unregister(_machines);
         _sim?.Unregister(_crops);
         _sim?.UnregisterState(this);
+        _sim?.UnregisterView(this);
     }
 
     /// <summary>
@@ -467,6 +497,13 @@ public partial class WorldGrid : Node3D, IHashableState
             SetTile(cell, TileType.Field);
             _fieldOf[cell] = field;
         }
+
+        // The SetTile above ran before the cell → field lookup existed, so it
+        // could only draw the "no crop row" tile. Now that the field is
+        // reachable, draw it at the stage it opened on — a field must look
+        // right the instant it is marked, not on the next rendered frame,
+        // because a stepped headless run has no frames at all.
+        DrawFieldStage(field);
         return field;
     }
 
@@ -594,6 +631,7 @@ public partial class WorldGrid : Node3D, IHashableState
         }
 
         _fields.Remove(field);
+        _drawnStage.Remove(field.Id);
         // The row goes with the field, which is what makes every handle to it
         // answer NoSuchField rather than address whatever field is marked into
         // the recycled slot next.
@@ -700,7 +738,11 @@ public partial class WorldGrid : Node3D, IHashableState
             case TileType.Road:
                 return RoadItem;
             case TileType.Field:
-                return FieldItem;
+                // The tile layer only says "farmland"; what is standing on it
+                // is the crop row's business, so the view reads through to it.
+                return GetField(cell) is { } field
+                    ? FieldStageItemFirst + (int)_crops.StageOf(field.Crop)
+                    : FieldItem;
             case TileType.Structure:
                 return StructureItem;
         }
@@ -718,6 +760,50 @@ public partial class WorldGrid : Node3D, IHashableState
     /// <summary>Pushes one cell's current state to the GridMap view.</summary>
     private void RefreshCell(Vector2I cell) =>
         _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), ViewItem(cell));
+
+    /// <summary>
+    /// <b>How a crop stage the sim moved reaches the GridMap.</b> Every other
+    /// tile changes because something called <see cref="SetTile"/>; a crop
+    /// ripens because time passed, and nothing calls anything. So the world
+    /// takes the <see cref="ISimView"/> half as well and sweeps its fields once
+    /// per rendered frame, comparing each against the stage it last drew.
+    ///
+    /// A poll, and deliberately not a callback out of <c>CropSystem</c>: an
+    /// event raised inside <see cref="ISimSystem.Tick"/> would run the view
+    /// half-way through a tick, and it would point the dependency from the sim
+    /// at the renderer — the exact direction the ownership rule forbids. This
+    /// way the sim knows nothing, and the compare is one enum per field per
+    /// frame, over a list a farm keeps in the dozens.
+    ///
+    /// <paramref name="alpha"/> is unused: a tile is a discrete state, so there
+    /// is nothing between two of them to blend.
+    /// </summary>
+    public void Interpolate(float alpha)
+    {
+        for (int i = 0; i < _fields.Count; i++)
+        {
+            Field field = _fields[i];
+            if (!_drawnStage.TryGetValue(field.Id, out CropStage drawn)
+                || drawn != _crops.StageOf(field.Crop))
+            {
+                DrawFieldStage(field);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pushes every cell of one field at its current stage and records what was
+    /// drawn, so the sweep above has something to compare against.
+    /// </summary>
+    private void DrawFieldStage(Field field)
+    {
+        _drawnStage[field.Id] = _crops.StageOf(field.Crop);
+        IReadOnlyList<Vector2I> cells = field.Cells;
+        for (int i = 0; i < cells.Count; i++)
+        {
+            RefreshCell(cells[i]);
+        }
+    }
 
     /// <summary>Center of the cell on the ground plane (y = 0).</summary>
     public Vector3 CellToWorld(Vector2I cell) =>

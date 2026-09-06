@@ -64,12 +64,21 @@ public partial class CropSmokeTest : Node
     private const int SearchRadius = 24;
 
     private WorldGrid _world = null!;
+    private GridMap _gridMap = null!;
     private Simulation _sim = null!;
     private CropSystem _crops = null!;
     private Field? _field;
 
     /// <summary>Every stage the field was seen in, in order — the sequence asserted at the end.</summary>
     private readonly List<CropStage> _walked = new();
+
+    /// <summary>
+    /// The MeshLibrary item the field's cells were <i>drawn</i> with in each
+    /// stage it passed through. The one place this test looks at the view: #29
+    /// promises the stage is readable off the map, and a stage that draws the
+    /// tile of the stage before it is not.
+    /// </summary>
+    private readonly Dictionary<CropStage, int> _drawn = new();
 
     /// <summary>
     /// What the field promised at sowing. Kept so the number the player would
@@ -100,6 +109,7 @@ public partial class CropSmokeTest : Node
         AddChild(main);
 
         _world = world;
+        _gridMap = world.GetNode<GridMap>("GridMap");
         _sim = main.GetNode<Simulation>("Sim");
         _crops = world.Crops;
 
@@ -133,6 +143,7 @@ public partial class CropSmokeTest : Node
         CheckTheYieldIsKnownBeforeTheCut();
         CheckHarvestLeavesStubble();
         CheckTheCycleCloses();
+        CheckEachStageDrawsItsOwnTile();
         CheckCropStateIsHashed();
         CheckAFullBufferRefusesTheHarvest();
         CheckTheOutputBufferIsHashed();
@@ -364,6 +375,41 @@ public partial class CropSmokeTest : Node
     /// Crop state has to be inside <see cref="SimStateHash"/>, or the
     /// determinism harness would pass a run whose crops diverged on tick one.
     /// </summary>
+    /// <summary>
+    /// The stage has to be readable off the map without opening anything, which
+    /// makes "every stage draws its own tile" an assertion and not a matter of
+    /// taste. The ones that arrive by <i>time</i> are the interesting half: no
+    /// tool touched the cell between sown and growing, so the only thing that
+    /// can have changed the tile is the world noticing the crop row moved.
+    ///
+    /// Distinctness, not identity: which mesh a stage picks is dev art that
+    /// M10 replaces, while "two stages must never look alike" outlives it.
+    /// </summary>
+    private void CheckEachStageDrawsItsOwnTile()
+    {
+        Check($"the {_walked.Count}-step walk left the field drawn in each of its "
+            + $"{_drawn.Count} distinct stages", _drawn.Count == 6);
+
+        var seen = new Dictionary<int, CropStage>();
+        bool distinct = true;
+        var report = new System.Text.StringBuilder();
+        foreach (KeyValuePair<CropStage, int> entry in _drawn)
+        {
+            report.Append(report.Length > 0 ? ", " : string.Empty)
+                .Append($"{CropSystem.Name(entry.Key)}={entry.Value}");
+            if (!seen.TryAdd(entry.Value, entry.Key))
+            {
+                distinct = false;
+            }
+        }
+
+        Check($"and every stage drew a tile of its own — {report}", distinct);
+        Check("the two stages nothing but time produced still changed the tile, "
+            + "so the view followed the sim with no tool and no manual refresh",
+            _drawn[CropStage.Growing] != _drawn[CropStage.Sown]
+            && _drawn[CropStage.Harvestable] != _drawn[CropStage.Growing]);
+    }
+
     private void CheckCropStateIsHashed()
     {
         Check("the crops are a hashed state source", HasState(_sim, CropSystem.StateSourceName));
@@ -913,10 +959,22 @@ public partial class CropSmokeTest : Node
 
     private CropStage Stage() => _crops.StageOf(Row);
 
-    /// <summary>Notes the stage the field is in now, for the sequence assertion.</summary>
+    /// <summary>
+    /// Notes the stage the field is in now, and the tile the view is drawing it
+    /// with, for the two sequence assertions.
+    ///
+    /// <b>The sweep is invoked, not the redraw.</b> <c>WorldGrid</c> spots a
+    /// stage the sim moved once per rendered frame, and a stepped run has no
+    /// frames of its own — so this stands exactly where a frame would have
+    /// stood. Nothing here ever pushes a cell itself, or the assertion below
+    /// would be testing this test.
+    /// </summary>
     private void Record()
     {
         _walked.Add(Stage());
+        _world.Interpolate(0f);
+        Vector2I cell = _field!.Cells[0];
+        _drawn[Stage()] = _gridMap.GetCellItem(new Vector3I(cell.X, 0, cell.Y));
     }
 
     private bool Walked(IReadOnlyList<CropStage> expected)
