@@ -29,7 +29,7 @@ namespace Arable;
 /// are wired in Main.tscn: playtests will want to move the starting number
 /// without a rebuild, and the readout is the whole of the money UI for now.
 /// </summary>
-public partial class Economy : Node
+public partial class Economy : Node, IHashableState
 {
     /// <summary>
     /// What the player starts with. A placeholder — the number a playtest will
@@ -50,6 +50,8 @@ public partial class Economy : Node
     /// <summary>What the readout says — the label's text, kept for the tests.</summary>
     public string Text { get; private set; } = string.Empty;
 
+    private Simulation? _sim;
+
     /// <summary>
     /// Opens the account. <see cref="StartingBalance"/> is inspector input, so
     /// this is the boundary a bad number actually arrives at — the one place in
@@ -66,7 +68,25 @@ public partial class Economy : Node
                 $"Economy: StartingBalance is negative ({StartingBalance}); clamped to 0.");
         }
         SetBalance(StartingBalance);
+
+        // The balance is world state — M10 saves it, and a determinism run that
+        // did not cover it would call two worlds identical while the player was
+        // broke in one of them.
+        _sim = Simulation.For(this);
+        _sim?.RegisterState(this);
     }
+
+    public override void _ExitTree() => _sim?.UnregisterState(this);
+
+    /// <summary>The name the balance is filed under in a state hash.</summary>
+    public string StateName => "economy";
+
+    /// <summary>
+    /// One integer. The readout text is a view of it and is deliberately not
+    /// hashed — a formatted string is the last place a divergence should be
+    /// discovered.
+    /// </summary>
+    public void HashState(StateHash hash) => hash.Write(Balance);
 
     /// <summary>Whether that much could be spent right now.</summary>
     public bool CanAfford(int amount) => amount <= Balance;

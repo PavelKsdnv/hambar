@@ -105,6 +105,29 @@ public sealed class EntityStore
         return true;
     }
 
+    /// <summary>
+    /// Writes liveness into a state hash, so a system only has to hash its own
+    /// columns — the slot walk and the generations are the same for all of them.
+    ///
+    /// The free list is <b>not</b> hashed, only which slots are free: its order
+    /// decides which slot the next <see cref="Create"/> hands out, but it is
+    /// rebuildable from liveness, and M10 restoring it in a different order
+    /// would then fail a save/load comparison over a difference no tick can
+    /// observe. The trap that leaves behind: a load that rebuilds the list in
+    /// another order hashes equal today and spawns into different slots
+    /// tomorrow, so M10 has to restore it in destruction order.
+    /// </summary>
+    public void HashState(StateHash hash)
+    {
+        hash.Write(Count);
+        hash.Write(SlotCount);
+        for (int i = 0; i < SlotCount; i++)
+        {
+            hash.Write(_alive[i]);
+            hash.Write(_generation[i]);
+        }
+    }
+
     private void EnsureCapacity(int needed)
     {
         if (needed <= _generation.Length)

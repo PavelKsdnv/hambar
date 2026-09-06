@@ -102,6 +102,7 @@ public partial class Simulation : Node
     private RandomStreams _streams = new();
     private readonly List<ISimSystem> _systems = new();
     private readonly List<ISimView> _views = new();
+    private readonly List<IHashableState> _states = new();
     private float[] _speeds = [0f, 1f];
     private int _speedIndex = 1;
 
@@ -137,6 +138,16 @@ public partial class Simulation : Node
     public float Alpha => _clock.Alpha;
 
     public int SystemCount => _systems.Count;
+
+    /// <summary>
+    /// Everything that can write itself into a state hash — see
+    /// <see cref="SimStateHash"/>. A system that implements
+    /// <see cref="IHashableState"/> lands here by registering; state that is
+    /// not a system says so with <see cref="RegisterState"/>. The walk over
+    /// this list is order-independent, so nothing here has to be kept in any
+    /// particular sequence.
+    /// </summary>
+    public IReadOnlyList<IHashableState> States => _states;
 
     /// <summary>The speed ladder actually in force, after the export was vetted.</summary>
     public IReadOnlyList<float> Speeds => _speeds;
@@ -246,9 +257,40 @@ public partial class Simulation : Node
         {
             _systems.Add(system);
         }
+
+        // A system that can hash itself is hashed: opting in separately is one
+        // more thing a new system can forget, and a hash that quietly stopped
+        // covering a system is a determinism check that passes for the wrong
+        // reason.
+        if (system is IHashableState hashable)
+        {
+            RegisterState(hashable);
+        }
     }
 
-    public void Unregister(ISimSystem system) => _systems.Remove(system);
+    public void Unregister(ISimSystem system)
+    {
+        _systems.Remove(system);
+        if (system is IHashableState hashable)
+        {
+            UnregisterState(hashable);
+        }
+    }
+
+    /// <summary>
+    /// Registers state that is not a system — the world grid and the balance
+    /// are the two — so the hash covers it. Unregister on the way out: hashing
+    /// a freed node's state is a crash, not a wrong number.
+    /// </summary>
+    public void RegisterState(IHashableState state)
+    {
+        if (!_states.Contains(state))
+        {
+            _states.Add(state);
+        }
+    }
+
+    public void UnregisterState(IHashableState state) => _states.Remove(state);
 
     public void RegisterView(ISimView view)
     {
@@ -260,9 +302,48 @@ public partial class Simulation : Node
 
     public void UnregisterView(ISimView view) => _views.Remove(view);
 
+    /// <summary>
+    /// Runs exactly <paramref name="ticks"/> ticks <b>now</b>, ignoring the
+    /// wall clock and the speed setting: the same ticks a real-time run would
+    /// have produced, as fast as the CPU can produce them.
+    ///
+    /// This is how a headless harness drives the sim — #25's determinism runs,
+    /// M10's replay after a load. Driving <c>_Process</c> with a synthetic
+    /// delta instead would put <see cref="MaxTicksPerFrame"/> and the leftover
+    /// accumulator between the caller and the tick count, so a run would depend
+    /// on the frame pattern it was fed. Nothing about a tick changes here: the
+    /// step is <see cref="SimClock.TickDelta"/> either way, which is what makes
+    /// a stepped run and a played run the same world.
+    ///
+    /// Views are not interpolated — they belong to the frame loop, and a
+    /// stepped run has no frames to draw.
+    /// </summary>
+    public void Step(int ticks = 1)
+    {
+        if (ticks <= 0)
+        {
+            return;
+        }
+        _clock.Step(ticks);
+        RunTicks(ticks);
+    }
+
     public override void _Process(double delta)
     {
-        int ticks = _clock.Advance(delta);
+        RunTicks(_clock.Advance(delta));
+
+        // Every frame, ticks or not: the alpha moves even when no tick ran,
+        // which is the whole point above the tick rate.
+        float alpha = _clock.Alpha;
+        for (int i = 0; i < _views.Count; i++)
+        {
+            _views[i].Interpolate(alpha);
+        }
+    }
+
+    /// <summary>The tick loop itself, shared by the frame clock and <see cref="Step"/>.</summary>
+    private void RunTicks(int ticks)
+    {
         var dt = (float)_clock.TickDelta;
         for (int t = 0; t < ticks; t++)
         {
@@ -273,14 +354,6 @@ public partial class Simulation : Node
             {
                 _systems[i].Tick(dt);
             }
-        }
-
-        // Every frame, ticks or not: the alpha moves even when no tick ran,
-        // which is the whole point above the tick rate.
-        float alpha = _clock.Alpha;
-        for (int i = 0; i < _views.Count; i++)
-        {
-            _views[i].Interpolate(alpha);
         }
     }
 }

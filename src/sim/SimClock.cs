@@ -150,4 +150,26 @@ public sealed class SimClock
         Alpha = Math.Clamp((float)(_accumulator / TickDelta), 0f, 1f);
         return ticks;
     }
+
+    /// <summary>
+    /// Books <paramref name="ticks"/> ticks <b>without booking any real
+    /// time</b> — the offline door, and the counterpart of
+    /// <see cref="Advance"/>. A headless determinism run, a replay and M10's
+    /// load all want the same sequence of ticks as fast as the CPU will produce
+    /// it, not as fast as the wall clock allows; a harness that instead fed
+    /// <see cref="Advance"/> a synthetic delta would be measuring
+    /// <see cref="MaxTicksPerFrame"/> and <see cref="Speed"/> rather than the
+    /// sim.
+    ///
+    /// It deliberately leaves the accumulator and <see cref="Alpha"/> alone:
+    /// they are the view's blend, and moving them here would make a stepped
+    /// frame draw from somewhere the sim never was.
+    /// </summary>
+    public void Step(int ticks = 1)
+    {
+        if (ticks > 0)
+        {
+            TickCount += ticks;
+        }
+    }
 }

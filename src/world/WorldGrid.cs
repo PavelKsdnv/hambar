@@ -21,7 +21,7 @@ namespace Arable;
 /// machines. The GridMap is presentation only — game logic must always go
 /// through this class, never read the GridMap back.
 /// </summary>
-public partial class WorldGrid : Node3D
+public partial class WorldGrid : Node3D, IHashableState
 {
     private const int StartRoadHalfExtent = 16; // the starting road spans cells -16..16
 
@@ -155,6 +155,10 @@ public partial class WorldGrid : Node3D
         _spawnRng = Streams.For(SpawnStreamName);
         _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
         _sim?.Register(_machines);
+
+        // The world is state, not a system: it has nothing to tick, but a
+        // determinism run and a save both have to see the map the player built.
+        _sim?.RegisterState(this);
         GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
@@ -164,8 +168,13 @@ public partial class WorldGrid : Node3D
     }
 
     // The machine system holds this world; leaving it registered would tick it
-    // against a freed WorldGrid.
-    public override void _ExitTree() => _sim?.Unregister(_machines);
+    // against a freed WorldGrid — and leaving the world registered as state
+    // would hash a freed node.
+    public override void _ExitTree()
+    {
+        _sim?.Unregister(_machines);
+        _sim?.UnregisterState(this);
+    }
 
     /// <summary>
     /// The world's randomness, which the <c>Simulation</c> owns. Resolved
@@ -856,6 +865,85 @@ public partial class WorldGrid : Node3D
         {
             SetTile(new Vector2I(x, 0), TileType.Road);
         }
+    }
+
+    /// <summary>The name the world's state is filed under in a state hash.</summary>
+    public string StateName => "world";
+
+    /// <summary>
+    /// Both layers of the map, plus the registries and the id counters that say
+    /// what the next placement will be called.
+    ///
+    /// <b>The terrain layer goes in even though it is regenerable from the
+    /// seed</b> — it is what makes "two runs from different seeds hash
+    /// differently" true on tick zero rather than whenever the divergence
+    /// happens to reach a machine, and re-running generation is bit-exact, so a
+    /// load that regenerates rather than restores still matches.
+    ///
+    /// <b>The placement layer is folded unordered</b>, because it is a
+    /// <c>Dictionary</c>: its enumeration order depends on insertion history
+    /// and capacity, so hashing that walk in order would report divergences
+    /// between two identical maps. The cell-to-owner lookups and the road-cell
+    /// list are left out entirely — all three are indexes derived from what is
+    /// hashed here.
+    /// </summary>
+    public void HashState(StateHash hash)
+    {
+        hash.Write(_halfExtent);
+        for (int i = 0; i < _terrain.Length; i++)
+        {
+            hash.Write((int)_terrain[i]);
+            hash.Write(_fertility[i]);
+        }
+
+        var member = new StateHash();
+        ulong fold = 0UL;
+        foreach (KeyValuePair<Vector2I, TileType> tile in _tiles)
+        {
+            member.Reset();
+            member.Write(tile.Key);
+            member.Write((int)tile.Value);
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _tiles.Count);
+
+        // Fields and structures are folded by identity for the same reason:
+        // their registries are lists today, but a load will not rebuild them in
+        // creation order and the hash has no business caring.
+        fold = 0UL;
+        foreach (Field field in _fields)
+        {
+            member.Reset();
+            member.Write(field.Id);
+            member.Write(field.Name);
+            foreach (Vector2I cell in field.Cells)
+            {
+                member.Write(cell);
+            }
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _fields.Count);
+
+        fold = 0UL;
+        foreach (Structure structure in _structures)
+        {
+            member.Reset();
+            member.Write(structure.Id);
+            member.Write(structure.Name);
+            foreach (Vector2I cell in structure.Cells)
+            {
+                member.Write(cell);
+            }
+            fold = StateHash.Fold(fold, member.Value);
+        }
+        hash.WriteUnordered(fold, _structures.Count);
+
+        // Counters, not derivable from the registries: a demolished building
+        // does not give its id back, and the next machine's colour depends on
+        // how many have ever spawned.
+        hash.Write(_fieldsCreated);
+        hash.Write(_structuresCreated);
+        hash.Write(_machinesSpawned);
     }
 
     /// <summary>

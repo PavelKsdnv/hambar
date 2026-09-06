@@ -24,7 +24,7 @@ namespace Arable;
 /// <c>src/sim/</c> free of any dependency on the world: the store and the hash
 /// know nothing about roads.
 /// </summary>
-public sealed class MachineSystem : ISimSystem
+public sealed class MachineSystem : ISimSystem, IHashableState
 {
     /// <summary>
     /// The system's named RNG stream. One stream for the whole system, not one
@@ -182,6 +182,45 @@ public sealed class MachineSystem : ISimSystem
 
             Drive(i, dt);
             Refile(i);
+        }
+    }
+
+    /// <summary>
+    /// The name this system's state is filed under in a state hash. The same
+    /// string as <see cref="StreamName"/> on purpose: one system, one name,
+    /// whether the thing being identified is its sequence or its rows.
+    /// </summary>
+    public string StateName => StreamName;
+
+    /// <summary>
+    /// Every column, walked in ascending slot order. The route and the
+    /// occupancy index are left out because both are derived — the route can be
+    /// replanned from the world and the index rebuilt from the cells — and
+    /// hashing derived state is what makes a save/load comparison fail over a
+    /// correct rebuild. The cost is that a machine which plans a <i>different</i>
+    /// route shows up one tick later, when it has driven somewhere else; a
+    /// divergent draw is caught on the tick it happens anyway, because the
+    /// stream's position is hashed.
+    /// </summary>
+    public void HashState(StateHash hash)
+    {
+        _entities.HashState(hash);
+        for (int i = 0; i < _entities.SlotCount; i++)
+        {
+            if (!_entities.IsAliveSlot(i))
+            {
+                continue;
+            }
+
+            hash.Write(i);
+            hash.Write(_position[i]);
+            hash.Write(_previousPosition[i]);
+            hash.Write(_yaw[i]);
+            hash.Write(_previousYaw[i]);
+            hash.Write(_speed[i]);
+            hash.Write(_turnSpeed[i]);
+            hash.Write(_parked[i]);
+            hash.Write(_cell[i]);
         }
     }
 

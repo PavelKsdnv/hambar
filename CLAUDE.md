@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Godot 4 (.NET build)** — game code is written in **C#**; requires the Godot ".NET"/C#-support editor build plus a separately installed .NET SDK (8 / current LTS).
 - Rendering: Forward Plus, D3D12 on Windows; physics: Jolt.
 - `dotnet build Arable.sln` compiles the game assembly (`Arable.csproj`/`Arable.sln` are hand-written; Godot's `--build-solutions` doesn't create them from scratch).
-- Verify changes with the headless smoke tests: `godot --headless --path . res://scenes/dev/CameraSmokeTest.tscn` (and `WorldSmokeTest.tscn`) — they print PASS/FAIL and exit 0/1.
+- Verify changes with **all four** headless smoke tests — `godot --headless --path . res://scenes/dev/<name>.tscn` for `CameraSmokeTest`, `WorldSmokeTest`, `BuildSmokeTest` and `SimSmokeTest` (the determinism harness: two runs from one seed, hashed every tick, reporting the first tick they differ on). Each prints PASS/FAIL and exits 0/1; the older ones are the regression net for the newer ones.
 - Check *visual* claims with `godot --path . res://scenes/dev/ScreenshotTest.tscn -- <dir>`, which renders the canonical views to PNGs you (or an agent) can actually look at. **Must run windowed** — under `--headless` the rasterizer is a dummy and there is no framebuffer to read back, so the scene detects it and exits 1 with `SCREENSHOT TEST FAILED: --headless cannot render`. Output dir defaults to `user://screenshots`; pass a scratchpad path to keep runs disposable.
 - Run the game from the CLI with the Godot .NET editor binary: `godot --path .` (add `--headless` for editor-less operations like `--build-solutions` or `--import`).
 - `.godot/` is generated cache — never edit or commit-worthy content lives there.
