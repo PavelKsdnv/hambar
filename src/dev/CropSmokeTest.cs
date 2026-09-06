@@ -37,6 +37,13 @@ namespace Arable;
 /// budgeted from it. The invariant asserted instead is the one that cannot
 /// drift — a stage is exactly the growth banked against its threshold.
 ///
+/// <b>The harvest has to leave something real behind.</b> The sections on the
+/// output buffer assert the exact stack a cut deposits, that the projection
+/// shown before the cut is the number that lands, and what a harvest with
+/// nowhere to put itself does — refuse whole, leaving the crop standing. That
+/// last one is checked on a bare system with one harvest of room, because the
+/// world's fields are deliberately sized never to fill on their first cut.
+///
 /// <b>The season table is flattened for this world</b> (see
 /// <see cref="_Ready"/>) so the lifecycle walk runs at one rate from end to
 /// end; the season's own effect, and the winter stall the game ships with, are
@@ -63,6 +70,13 @@ public partial class CropSmokeTest : Node
 
     /// <summary>Every stage the field was seen in, in order — the sequence asserted at the end.</summary>
     private readonly List<CropStage> _walked = new();
+
+    /// <summary>
+    /// What the field promised at sowing. Kept so the number the player would
+    /// have been shown then can be compared against the one that actually lands
+    /// in the buffer days later — a projection that drifts is worse than none.
+    /// </summary>
+    private int _promised;
 
     private bool _done;
     private bool _failed;
@@ -116,9 +130,12 @@ public partial class CropSmokeTest : Node
         CheckSowing();
         CheckItGrowsOnSchedule();
         CheckRipeWaitsToBeHarvested();
+        CheckTheYieldIsKnownBeforeTheCut();
         CheckHarvestLeavesStubble();
         CheckTheCycleCloses();
         CheckCropStateIsHashed();
+        CheckAFullBufferRefusesTheHarvest();
+        CheckTheOutputBufferIsHashed();
         CheckThePostHarvestStageIsTunable();
         CheckGrowthIsCountedInTicksNotSeconds();
         CheckBulldozingClosesTheRow();
@@ -201,6 +218,12 @@ public partial class CropSmokeTest : Node
         Record();
         Check("and puts the seed in the ground", Stage() == CropStage.Sown);
 
+        _promised = _crops.ProjectedYield(Row);
+        Check($"a sown field already promises what it will give: {_promised} "
+            + $"{_crops.HarvestItem.Name}", _promised == ExpectedYield(_crops, Row));
+        Check("which nothing has been paid yet — the buffer is empty",
+            Output().IsEmpty && !Output().IsFull);
+
         // Nothing is legal here: the two timed transitions are the only way out
         // of a sown field, which is what makes the crop take real time.
         RefuseAllBut(null, "sown");
@@ -270,11 +293,46 @@ public partial class CropSmokeTest : Node
         RefuseAllBut(CropOperation.Harvest, "harvestable");
     }
 
+    /// <summary>
+    /// <b>The number the player is shown has to be the number they get.</b>
+    /// #30's inspector displays the projection, so it is asserted here against
+    /// the ground it is computed from, against what it said days earlier at
+    /// sowing, and — in the section below — against what actually lands in the
+    /// buffer. Two of those could agree with a second formula that had drifted
+    /// from the first; all four cannot.
+    /// </summary>
+    private void CheckTheYieldIsKnownBeforeTheCut()
+    {
+        ItemBuffer output = Output();
+        Check($"the field's yield is its ground: {_crops.YieldPerCell:F0} per cell x "
+            + $"{_crops.AreaOf(Row)} cells x soil {_crops.FertilityOf(Row):F3} = "
+            + $"{_crops.ProjectedYield(Row)}",
+            _crops.ProjectedYield(Row) == ExpectedYield(_crops, Row));
+        Check("and it is the same promise the field made when it was sown, "
+            + "not a number that drifted while it grew", _crops.ProjectedYield(Row) == _promised);
+        Check("the world pushed the field's own area down to the row, not a cell count of one",
+            _crops.AreaOf(Row) == _field!.CellCount && _field.CellCount > 1);
+        Check($"the buffer is sized to {_crops.OutputHarvests} perfect harvests of that "
+            + $"field ({output.Capacity} units), so the first cut always fits",
+            output.Capacity == (int)(_crops.YieldPerCell * _crops.AreaOf(Row))
+                * _crops.OutputHarvests
+            && output.HasRoomFor(_crops.ProjectedYield(Row)));
+    }
+
     private void CheckHarvestLeavesStubble()
     {
+        ItemBuffer output = Output();
         Check("harvesting a ripe field is accepted",
             _crops.Harvest(Row) == CropOpResult.Ok);
         Record();
+        Check($"and puts exactly the {_promised} {_crops.HarvestItem.Name} it promised into "
+            + "the field's own buffer — a stack of a typed good, not a global total",
+            output.CountOf(ItemTypes.Grain) == _promised && output.Total == _promised);
+        Check("as one stack, of grain and of nothing else",
+            output.StackCount == 1 && output.StackAt(0) == new ItemStack(ItemTypes.Grain, _promised)
+            && output.StackAt(0).Type == _crops.HarvestItem);
+        Check("and there is still room, so this harvest was not the backpressure case",
+            !output.IsFull && output.Free == output.Capacity - _promised);
         Check("and leaves the stage the tunable says it should",
             Stage() == _crops.PostHarvestStage);
         Check("which by default is stubble, not bare fallow ground",
@@ -320,8 +378,90 @@ public partial class CropSmokeTest : Node
 
         // Put the field back where the cycle left it, so the bulldoze section
         // below is not quietly testing a different stage.
+        int held = Output().Total;
         Check("the second crop ripened the same way the first did",
             Ripen() && _crops.Harvest(Row) == CropOpResult.Ok);
+        Check($"and its {_promised} piled up on the {held} already in the buffer "
+            + "rather than replacing them", Output().Total == held + _promised);
+    }
+
+    /// <summary>
+    /// <b>The backpressure case, which is the reason the capacity exists at
+    /// all.</b> Nothing collects from a field in M4, so a buffer that filled
+    /// would be a dead end — the decision recorded here is that a harvest with
+    /// nowhere to go is <i>refused whole</i>: the crop stays standing, ripe,
+    /// and nothing is spilled or half-deposited. M5's collection is what
+    /// unblocks it, and <see cref="ItemBuffer.Remove"/> stands in for that.
+    ///
+    /// On a bare system, because the point is the arithmetic of a full buffer
+    /// and the world's real fields are deliberately sized never to hit one on
+    /// their first cut.
+    /// </summary>
+    private void CheckAFullBufferRefusesTheHarvest()
+    {
+        // One harvest of room, so the second cut has nowhere to go.
+        var tight = new CropSystem(
+            _crops.TicksPerDay, 1, 2, stubbleNeedsPloughing: false, outputHarvests: 1);
+        EntityId row = tight.Create(fieldId: 1, fertility: 1f, area: 2);
+        ItemBuffer buffer = tight.OutputOf(row)!;
+        int yield = ExpectedYield(tight, row);
+
+        Check($"a field's buffer starts empty, holding {yield} of the "
+            + $"{buffer.Capacity} units it has room for",
+            buffer.IsEmpty && !buffer.IsFull && buffer.Capacity == yield);
+        Check("the first harvest fills it exactly to the brim",
+            Cycle(tight, row) == CropStage.Ploughed && buffer.Total == buffer.Capacity);
+        Check("which is what being full means, and it is a state the buffer reports",
+            buffer.IsFull && buffer.Free == 0);
+
+        Check("a second crop grows on the field regardless — the field is not blocked, "
+            + "only the cutting is", Ripen(tight, row) == CropStage.Harvestable);
+        Check("but the harvest is refused, and named as full rather than out of stage",
+            tight.Harvest(row) == CropOpResult.OutputFull);
+        Check("nothing was half-deposited: the buffer holds exactly what it did",
+            buffer.Total == buffer.Capacity && buffer.CountOf(ItemTypes.Grain) == yield);
+        Check("the crop is left standing, ripe, for as long as that lasts",
+            tight.StageOf(row) == CropStage.Harvestable);
+        Check("and a scheduler asking whether it can be cut is told no",
+            !tight.CanApply(row, CropOperation.Harvest));
+        Check("though harvest is still the one thing the field is waiting for",
+            tight.NextOperation(row) == CropOperation.Harvest);
+
+        // Room for a unit is not room for a harvest: the yield goes in whole or
+        // not at all, which is what keeps a part-cut field out of the state
+        // machine.
+        buffer.Remove(ItemTypes.Grain, 1);
+        Check("one unit of room is not enough, because a harvest is all or nothing",
+            !tight.CanApply(row, CropOperation.Harvest)
+            && tight.Harvest(row) == CropOpResult.OutputFull);
+
+        int collected = buffer.Remove(ItemTypes.Grain, buffer.Total);
+        Check($"collecting the {collected + 1} units in the buffer empties it",
+            buffer.IsEmpty && !buffer.IsFull && buffer.CountOf(ItemTypes.Grain) == 0);
+        Check("and the crop that was standing all along can now be cut",
+            tight.Harvest(row) == CropOpResult.Ok && buffer.Total == yield);
+    }
+
+    /// <summary>
+    /// The buffer is sim state, so two worlds that harvested differently must
+    /// not hash alike — otherwise the determinism harness would pass a run
+    /// whose stores diverged. Checked on a pair of bare systems, which is the
+    /// smallest thing that can differ by exactly one deposit.
+    /// </summary>
+    private void CheckTheOutputBufferIsHashed()
+    {
+        var left = new CropSystem(_crops.TicksPerDay, 1, 2);
+        var right = new CropSystem(_crops.TicksPerDay, 1, 2);
+        EntityId a = left.Create(1, 1f, 2);
+        EntityId b = right.Create(1, 1f, 2);
+        Check("two systems built and filled the same way hash the same",
+            HashOf(left) == HashOf(right));
+
+        left.OutputOf(a)!.Add(ItemTypes.Grain, 1);
+        Check("one unit of grain in one of them moves its hash", HashOf(left) != HashOf(right));
+        right.OutputOf(b)!.Add(ItemTypes.Grain, 1);
+        Check("and the same unit in the other brings them back together",
+            HashOf(left) == HashOf(right));
     }
 
     /// <summary>
@@ -398,7 +538,10 @@ public partial class CropSmokeTest : Node
             && _crops.Harvest(row) == CropOpResult.NoSuchField);
         Check("reading a dead handle answers rather than crashing",
             _crops.StageOf(row) == CropStage.Fallow && _crops.GrowthOf(row) == 0f
-            && _crops.NextOperation(row) == null);
+            && _crops.NextOperation(row) == null && _crops.AreaOf(row) == 0
+            && _crops.ProjectedYield(row) == 0);
+        Check("and a bulldozed field has no buffer at all, rather than an empty one",
+            _crops.OutputOf(row) == null);
         // A tick that walks a slot nobody lives in any more must be a no-op,
         // not an index into a column that was never rewritten.
         _sim.Step(_crops.TicksPerDay);
@@ -477,9 +620,13 @@ public partial class CropSmokeTest : Node
             return;
         }
 
+        int store = _crops.OutputOf(field.Crop)!.Capacity;
         _world.Clear(cells[0]);
         Check("and it is taken again when bulldozing takes a cell off the field",
             Near(_crops.FertilityOf(field.Crop), _world.ChunkedFertility(field.Cells)));
+        Check("along with the area, so a shrunken field yields less and stores less",
+            _crops.AreaOf(field.Crop) == field.CellCount
+            && _crops.OutputOf(field.Crop)!.Capacity < store);
         ClearAll(field);
     }
 
@@ -537,6 +684,31 @@ public partial class CropSmokeTest : Node
         Check("and neither has ripened, so it is growth being compared and not stages",
             _crops.StageOf(rich.Crop) != CropStage.Harvestable
             && _crops.StageOf(poor.Crop) != CropStage.Harvestable);
+
+        // Fertility is paid twice — sooner and more — which is what makes
+        // choosing where to farm a decision rather than a formality.
+        int fromRich = _crops.ProjectedYield(rich.Crop);
+        int fromPoor = _crops.ProjectedYield(poor.Crop);
+        Check($"the fertile field also promises the bigger harvest of the two "
+            + $"({fromRich} against {fromPoor}), off the same {_crops.AreaOf(rich.Crop)} cells",
+            fromRich > fromPoor && _crops.AreaOf(rich.Crop) == _crops.AreaOf(poor.Crop));
+        Check("and both promises are exactly what their ground says they are",
+            fromRich == ExpectedYield(_crops, rich.Crop)
+            && fromPoor == ExpectedYield(_crops, poor.Crop));
+
+        // Area is the other half of the ground, and the only one the world can
+        // change under a standing crop. A bare system says it without needing
+        // two more patches of map.
+        var wide = new CropSystem(_crops.TicksPerDay, 1, 2);
+        EntityId one = wide.Create(1, fertility: 1f, area: 1);
+        EntityId four = wide.Create(2, fertility: 1f, area: 4);
+        wide.Plough(one);
+        wide.Sow(one);
+        wide.Plough(four);
+        wide.Sow(four);
+        Check("four times the ground is four times the harvest, and four times the store",
+            wide.ProjectedYield(four) == wide.ProjectedYield(one) * 4
+            && wide.OutputOf(four)!.Capacity == wide.OutputOf(one)!.Capacity * 4);
 
         ClearAll(rich);
         ClearAll(poor);
@@ -614,6 +786,36 @@ public partial class CropSmokeTest : Node
             CropStage.Harvestable => grown >= _crops.TicksToRipen,
             _ => true,
         };
+    }
+
+    /// <summary>The field's output buffer. Only called where the field is known live.</summary>
+    private ItemBuffer Output() => _crops.OutputOf(Row)!;
+
+    /// <summary>
+    /// The yield the ground says the field owes, spelled out here rather than
+    /// asked of the system — the assertion is that the two agree, so stating it
+    /// twice is the point and not duplication.
+    /// </summary>
+    private static int ExpectedYield(CropSystem crops, EntityId row) =>
+        Math.Max(1, (int)(crops.YieldPerCell * crops.AreaOf(row) * crops.FertilityOf(row)));
+
+    /// <summary>One system's state as a number, for comparing two of them.</summary>
+    private static ulong HashOf(CropSystem crops)
+    {
+        var hash = new StateHash();
+        crops.HashState(hash);
+        return hash.Value;
+    }
+
+    /// <summary>Sows a ploughed row on a bare system and runs it to ripe.</summary>
+    private static CropStage Ripen(CropSystem crops, EntityId row)
+    {
+        crops.Sow(row);
+        for (int tick = 0; tick < crops.TicksToRipen; tick++)
+        {
+            crops.Tick(1f / 20f);
+        }
+        return crops.StageOf(row);
     }
 
     /// <summary>Ticks the field needs to ripen at <paramref name="rate"/>, with slack.</summary>

@@ -100,7 +100,12 @@ public partial class DevShortcuts : Node
         }
 
         CropOpResult result = crops.Apply(field.Crop, operation);
+        // The buffer goes on the line because a harvest that deposited nothing
+        // and one that filled the field's store look identical without it, and
+        // OutputFull is a refusal the player is meant to be able to explain.
+        ItemBuffer? output = crops.OutputOf(field.Crop);
         GD.Print($"dev: {operation.ToString().ToLowerInvariant()} {field.Name} "
-            + $"({stage}) → {result}: now {CropSystem.Name(crops.StageOf(field.Crop))}");
+            + $"({stage}) → {result}: now {CropSystem.Name(crops.StageOf(field.Crop))}, "
+            + $"holding {output} {crops.HarvestItem.Name}");
     }
 }

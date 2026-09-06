@@ -68,6 +68,13 @@ public enum CropOpResult
 
     /// <summary>The field is not at a stage this operation is legal from.</summary>
     WrongStage,
+
+    /// <summary>
+    /// The stage was right, but the yield would not fit in the field's output
+    /// buffer, so the crop is <b>still standing</b>. Harvest only. This is
+    /// backpressure, not an error: it clears the moment something collects.
+    /// </summary>
+    OutputFull,
 }
 
 /// <summary>
@@ -140,10 +147,30 @@ public enum CropOpResult
 /// season is the exception it is allowed: <see cref="GameCalendar"/> is sim
 /// state, not world state, so the date can be read here directly.
 ///
-/// <b>Seam for #28:</b> <see cref="GrowthPerTick(EntityId)"/> and
-/// <see cref="FertilityOf"/> are public precisely so a projected yield can be
-/// computed before the harvest happens, from the ground and the rate rather
-/// than from a number this class would otherwise have to bank per row.
+/// <b>A harvest deposits a stack; it does not add to a total.</b> The yield
+/// goes into the field's own <see cref="ItemBuffer"/> as so many units of
+/// <see cref="HarvestItem"/>, and if it does not fit the harvest is
+/// <b>refused</b> and the crop stays standing (<see cref="CropOpResult.OutputFull"/>).
+/// Refused rather than spilled, because grain that evaporates when nobody
+/// collects it is the logistics game deleting itself; and rather than
+/// part-filled, because a partly cut field is a state the machine above does
+/// not have and inventing one to model a case nothing can yet reach is guessing
+/// at M5's shape. See <see cref="ItemBuffer"/> for why the capacity exists
+/// before anything consumes from it.
+///
+/// <b>What a field yields is a property of its ground</b>, not of the growth it
+/// happened to bank: <see cref="YieldPerCell"/> x area x fertility, floored.
+/// Banked growth is the wrong number — it stops accumulating at ripe, so it is
+/// the same for every field that finished — while the ground gives fertility a
+/// second, visible consequence: good soil ripens sooner <i>and</i> yields more.
+/// The season deliberately stays out of it: winter makes a crop take longer, not
+/// come up short, which keeps "when to sow" a scheduling decision rather than a
+/// yield penalty the player cannot see coming. <see cref="ProjectedYield"/> is
+/// the same computation the harvest itself runs, so the number #30's inspector
+/// shows before the cut cannot drift from the one that lands in the buffer.
+///
+/// <b>Area is a column, pushed down like fertility</b> — a count of cells, not
+/// a set of them, so nothing here learns what a cell is.
 /// </summary>
 public sealed class CropSystem : ISimSystem, IHashableState
 {
@@ -196,6 +223,24 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// </summary>
     public static float[] DefaultSeasonGrowth => [1f, 1f, 0.5f, 0f];
 
+    /// <summary>
+    /// Units a cell of perfect ground yields when it is cut. Ten, so a modest
+    /// field is tens of units rather than a number a player has to read as a
+    /// fraction, and so halving the soil is visibly half the harvest.
+    /// </summary>
+    public const float DefaultYieldPerCell = 10f;
+
+    /// <summary>
+    /// How many <b>perfect</b> harvests a field's output buffer holds — the
+    /// capacity, in units of the field's own best cut. Two, so the first
+    /// harvest always fits however good the ground turned out to be, and the
+    /// field stops itself only when a second (or, on poor ground, a fourth)
+    /// has piled up with nobody collecting. Sizing it against the field rather
+    /// than fixing one number for every field is what stops a large field being
+    /// unharvestable and a small one being effectively unlimited.
+    /// </summary>
+    public const int DefaultOutputHarvests = 2;
+
     /// <summary>Slots the arrays start at; they grow by doubling from there.</summary>
     private const int InitialCapacity = 16;
 
@@ -205,6 +250,14 @@ public sealed class CropSystem : ISimSystem, IHashableState
     private readonly float _baseGrowthRate;
     private readonly float[] _seasonGrowth;
     private readonly float _waterGrowth;
+    private readonly float _yieldPerCell;
+    private readonly int _outputHarvests;
+
+    // What comes off a field. Configuration and not a column, because there is
+    // no crop-kind column either: one crop, one product. It becomes a column on
+    // the tick the game grows a second crop, and every caller here already
+    // reads it per row.
+    private readonly ItemType _harvestItem;
 
     // The date, for the season factor only. Held rather than copied per tick
     // because a cached season is a second copy that a date jump would leave
@@ -218,6 +271,8 @@ public sealed class CropSystem : ISimSystem, IHashableState
     private CropStage[] _stage = [];
     private float[] _growth = [];
     private float[] _fertility = [];
+    private int[] _area = [];
+    private ItemBuffer[] _output = [];
     private int[] _owner = [];
 
     /// <param name="ticksPerDay">
@@ -244,6 +299,17 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// at all — every season full — which is what a system built without a sim
     /// (a test, a tool) gets, rather than an arbitrary date to grow against.
     /// </param>
+    /// <param name="yieldPerCell">Units a cell of perfect ground gives when cut.</param>
+    /// <param name="outputHarvests">
+    /// Perfect harvests a field's output buffer holds — see
+    /// <see cref="DefaultOutputHarvests"/>. Zero is a field that can never be
+    /// harvested, which is a legal thing to configure and an obvious one to
+    /// notice.
+    /// </param>
+    /// <param name="harvestItem">
+    /// The good a cut field produces. Null takes grain; it is an argument at
+    /// all so that a second crop is a second system rather than a rewrite.
+    /// </param>
     public CropSystem(
         int ticksPerDay,
         int daysToSprout = DefaultDaysToSprout,
@@ -252,7 +318,10 @@ public sealed class CropSystem : ISimSystem, IHashableState
         float baseGrowthRate = DefaultBaseGrowthRate,
         float[]? seasonGrowth = null,
         float waterGrowth = DefaultWaterGrowth,
-        GameCalendar? calendar = null)
+        GameCalendar? calendar = null,
+        float yieldPerCell = DefaultYieldPerCell,
+        int outputHarvests = DefaultOutputHarvests,
+        ItemType? harvestItem = null)
     {
         TicksPerDay = Math.Max(1, ticksPerDay);
         DaysToSprout = Math.Max(0, daysToSprout);
@@ -274,6 +343,14 @@ public sealed class CropSystem : ISimSystem, IHashableState
         _waterGrowth = Math.Max(0f, waterGrowth);
         _seasonGrowth = VetSeasonGrowth(seasonGrowth);
         _calendar = calendar;
+
+        // A negative yield or capacity is meaningless rather than merely
+        // extreme, so both clamp at nothing: an unharvestable field is a
+        // configuration, an inverted one is not a state anything downstream
+        // could read.
+        _yieldPerCell = Math.Max(0f, yieldPerCell);
+        _outputHarvests = Math.Max(0, outputHarvests);
+        _harvestItem = harvestItem ?? ItemTypes.Grain;
     }
 
     /// <summary>
@@ -327,6 +404,15 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// <summary>The water factor. 1, and inert — see <see cref="DefaultWaterGrowth"/>.</summary>
     public float WaterGrowth => _waterGrowth;
 
+    /// <summary>Units a cell of perfect ground yields when it is cut.</summary>
+    public float YieldPerCell => _yieldPerCell;
+
+    /// <summary>Perfect harvests a field's output buffer holds.</summary>
+    public int OutputHarvests => _outputHarvests;
+
+    /// <summary>The good a harvest deposits. Grain, until there is a second crop.</summary>
+    public ItemType HarvestItem => _harvestItem;
+
     /// <summary>The season the growth rate is currently read against, or null with no calendar.</summary>
     public Season? CurrentSeason => _calendar?.Season;
 
@@ -356,12 +442,13 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// walk over the rows can name the field it is drawing or reporting on
     /// without a reverse index.
     ///
-    /// <paramref name="fertility"/> (0..1) is <b>input, not a lookup</b>: the
-    /// world has already averaged the ground the field covers and hands the
-    /// answer down, so this class never learns what a cell is. It defaults to
+    /// <paramref name="fertility"/> (0..1) and <paramref name="area"/> are
+    /// <b>input, not a lookup</b>: the world has already averaged the ground
+    /// the field covers and counted its cells, and hands both answers down, so
+    /// this class never learns what a cell is. They default to one cell of
     /// perfect ground, which is what a system built without a world grows on.
     /// </summary>
-    public EntityId Create(int fieldId, float fertility = 1f)
+    public EntityId Create(int fieldId, float fertility = 1f, int area = 1)
     {
         EntityId id = _entities.Create();
         EnsureCapacity(_entities.SlotCount);
@@ -371,6 +458,13 @@ public sealed class CropSystem : ISimSystem, IHashableState
         _stage[i] = CropStage.Fallow;
         _growth[i] = 0f;
         _fertility[i] = Math.Clamp(fertility, 0f, 1f);
+        _area[i] = Math.Max(0, area);
+        // A fresh buffer, never the recycled slot's one cleared out: an
+        // EntityId's generation invalidates a stale *handle*, and nothing
+        // invalidates a stale reference to the object behind it. Reusing the
+        // instance would quietly show the last field's holder this field's
+        // grain. One allocation per field marked is nothing.
+        _output[i] = new ItemBuffer(CapacityFor(_area[i]));
         _owner[i] = fieldId;
         return id;
     }
@@ -401,20 +495,57 @@ public sealed class CropSystem : ISimSystem, IHashableState
     public float FertilityOf(EntityId id) => _entities.IsAlive(id) ? _fertility[id.Index] : 0f;
 
     /// <summary>
-    /// Rewrites the field's fertility. The one caller is the world, when a
-    /// field's cells change under it (bulldozing shrinks one), because the
-    /// aggregate is only true of the cells it was computed over. Deliberately
-    /// <b>not</b> a per-tick refresh: the ground does not move, and a value
-    /// pushed on change is one the sim can hash without asking the world.
-    /// False for a stale handle.
+    /// How much ground the field covers, in cells — a <i>count</i>, never the
+    /// cells themselves. It is what makes a big field worth more than a small
+    /// one at the same soil, and it sizes the output buffer.
     /// </summary>
-    public bool SetFertility(EntityId id, float fertility)
+    public int AreaOf(EntityId id) => _entities.IsAlive(id) ? _area[id.Index] : 0;
+
+    /// <summary>
+    /// The field's output buffer — where its harvests land and where M5 comes
+    /// to collect. Null for a dead handle, which is the honest answer: there is
+    /// no buffer, as opposed to an empty one.
+    /// </summary>
+    public ItemBuffer? OutputOf(EntityId id) =>
+        _entities.IsAlive(id) ? _output[id.Index] : null;
+
+    /// <summary>
+    /// What harvesting this field would put in its buffer, or 0 while there is
+    /// nothing in the ground. <b>The same computation the harvest runs</b>, so
+    /// the number the inspector shows before the cut is the number that lands
+    /// in the buffer after it — two formulas that agreed on the day they were
+    /// written would not stay agreed.
+    ///
+    /// It does not fall as the crop grows or rise as it ripens: the yield is a
+    /// property of the ground, so it is a promise made at sowing and kept, and
+    /// a field that cannot fit it is refused rather than paid short.
+    /// </summary>
+    public int ProjectedYield(EntityId id) =>
+        _entities.IsAlive(id) && HasCrop(_stage[id.Index]) ? YieldOf(id.Index) : 0;
+
+    /// <summary>
+    /// Rewrites the ground the field stands on. The one caller is the world,
+    /// when a field's cells change under it (bulldozing shrinks one), because
+    /// both numbers are only true of the cells they were taken over. One door
+    /// for both, since there is exactly one moment either can change.
+    /// Deliberately <b>not</b> a per-tick refresh: the ground does not move,
+    /// and a value pushed on change is one the sim can hash without asking the
+    /// world. False for a stale handle.
+    ///
+    /// The buffer is resized with the field but never emptied to fit, so a
+    /// field bulldozed down to a corner can hold more than its new capacity
+    /// until something collects — see <see cref="ItemBuffer.SetCapacity"/>.
+    /// </summary>
+    public bool SetGround(EntityId id, float fertility, int area)
     {
         if (!_entities.IsAlive(id))
         {
             return false;
         }
-        _fertility[id.Index] = Math.Clamp(fertility, 0f, 1f);
+        int i = id.Index;
+        _fertility[i] = Math.Clamp(fertility, 0f, 1f);
+        _area[i] = Math.Max(0, area);
+        _output[i].SetCapacity(CapacityFor(_area[i]));
         return true;
     }
 
@@ -445,9 +576,21 @@ public sealed class CropSystem : ISimSystem, IHashableState
         _ => false,
     };
 
-    /// <summary>Whether the operation would be accepted on this field right now.</summary>
-    public bool CanApply(EntityId id, CropOperation operation) =>
-        _entities.IsAlive(id) && Allows(_stage[id.Index], operation);
+    /// <summary>
+    /// Whether the operation would be accepted on this field right now — the
+    /// stage test <i>and</i> the room test, because a scheduler that only asked
+    /// <see cref="Allows"/> would keep sending a machine to a field whose
+    /// buffer is full.
+    /// </summary>
+    public bool CanApply(EntityId id, CropOperation operation)
+    {
+        if (!_entities.IsAlive(id) || !Allows(_stage[id.Index], operation))
+        {
+            return false;
+        }
+        int i = id.Index;
+        return operation != CropOperation.Harvest || _output[i].HasRoomFor(YieldOf(i));
+    }
 
     /// <summary>
     /// The one operation the field is waiting for, or null while all it is
@@ -475,8 +618,9 @@ public sealed class CropSystem : ISimSystem, IHashableState
     /// for every caller — dev key today, M5's machine orders tomorrow — so a
     /// precondition cannot be skipped by picking a different door.
     ///
-    /// Harvest currently only empties the field: the item stack it should leave
-    /// behind is #28's, and hangs off this line.
+    /// A harvest is the one operation that produces something, and it is
+    /// all-or-nothing: the whole yield goes into the field's buffer or the
+    /// field is left exactly as it was, ripe and waiting.
     /// </summary>
     public CropOpResult Apply(EntityId id, CropOperation operation)
     {
@@ -489,6 +633,13 @@ public sealed class CropSystem : ISimSystem, IHashableState
         if (!Allows(_stage[i], operation))
         {
             return CropOpResult.WrongStage;
+        }
+
+        // Deposited before the stage moves, so a refusal cannot half-apply: the
+        // crop is only cut once its yield is somewhere real.
+        if (operation == CropOperation.Harvest && !_output[i].TryAdd(_harvestItem, YieldOf(i)))
+        {
+            return CropOpResult.OutputFull;
         }
 
         _stage[i] = operation switch
@@ -556,6 +707,27 @@ public sealed class CropSystem : ISimSystem, IHashableState
     private float GrowthPerTick(int slot, float seasonFactor) =>
         _baseGrowthRate * _fertility[slot] * seasonFactor * _waterGrowth;
 
+    /// <summary>Whether there is something in the ground worth a yield.</summary>
+    private static bool HasCrop(CropStage stage) =>
+        stage is CropStage.Sown or CropStage.Growing or CropStage.Harvestable;
+
+    /// <summary>
+    /// Units this field gives when it is cut: its ground, floored, and never
+    /// less than one — a ripe field that harvested to nothing would read as a
+    /// bug rather than as poor soil, and soil poor enough to round to nothing
+    /// is too poor to have ripened in the first place.
+    /// </summary>
+    private int YieldOf(int slot) =>
+        _area[slot] <= 0 ? 0 : Math.Max(1, (int)(_yieldPerCell * _area[slot] * _fertility[slot]));
+
+    /// <summary>
+    /// The buffer size for a field of that area: whole harvests off
+    /// <b>perfect</b> ground, so the first cut always fits and the ground
+    /// decides how many more do.
+    /// </summary>
+    private int CapacityFor(int area) =>
+        area <= 0 ? 0 : Math.Max(1, (int)(_yieldPerCell * area)) * _outputHarvests;
+
     /// <summary>The name this system's state is filed under in a state hash.</summary>
     public string StateName => StateSourceName;
 
@@ -579,6 +751,9 @@ public sealed class CropSystem : ISimSystem, IHashableState
         // here, since that is the difference between seasons mattering and not.
         hash.Write(_baseGrowthRate);
         hash.Write(_waterGrowth);
+        hash.Write(_yieldPerCell);
+        hash.Write(_outputHarvests);
+        hash.Write(_harvestItem.Id);
         hash.Write(_calendar != null);
         for (int i = 0; i < _seasonGrowth.Length; i++)
         {
@@ -597,6 +772,11 @@ public sealed class CropSystem : ISimSystem, IHashableState
             hash.Write((int)_stage[i]);
             hash.Write(_growth[i]);
             hash.Write(_fertility[i]);
+            hash.Write(_area[i]);
+            // Contents are sim state — a save writes them and two runs that
+            // harvested differently must not hash alike — and the buffer's own
+            // stack order is canonical, so this walk needs no fold.
+            _output[i].HashState(hash);
             hash.Write(_owner[i]);
         }
     }
@@ -634,6 +814,8 @@ public sealed class CropSystem : ISimSystem, IHashableState
         Array.Resize(ref _stage, capacity);
         Array.Resize(ref _growth, capacity);
         Array.Resize(ref _fertility, capacity);
+        Array.Resize(ref _area, capacity);
+        Array.Resize(ref _output, capacity);
         Array.Resize(ref _owner, capacity);
     }
 }

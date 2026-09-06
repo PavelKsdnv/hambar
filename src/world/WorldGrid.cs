@@ -149,6 +149,21 @@ public partial class WorldGrid : Node3D, IHashableState
     /// </summary>
     [Export] public int FertilityChunkSize { get; set; } = DefaultFertilityChunkSize;
 
+    /// <summary>
+    /// Units of produce a cell of perfect ground gives when it is cut. The
+    /// other half of what fertility buys — good soil ripens sooner and yields
+    /// more — and the knob that scales every harvest in the game at once.
+    /// </summary>
+    [Export] public float CropYieldPerCell { get; set; } = CropSystem.DefaultYieldPerCell;
+
+    /// <summary>
+    /// How many harvests off perfect ground a field's output buffer holds
+    /// before it refuses the next one. <b>The backpressure knob</b>: the field
+    /// stops itself when nothing has collected, and this says how much slack
+    /// there is before it does. See <see cref="CropSystem.DefaultOutputHarvests"/>.
+    /// </summary>
+    [Export] public int FieldOutputHarvests { get; set; } = CropSystem.DefaultOutputHarvests;
+
     private static readonly Color[] MachineColors =
     [
         new(0.75f, 0.22f, 0.17f), // tractor red
@@ -230,7 +245,8 @@ public partial class WorldGrid : Node3D, IHashableState
         _crops = new CropSystem(
             _sim?.Calendar.TicksPerDay ?? GameCalendar.DefaultTicksPerDay,
             CropDaysToSprout, CropDaysToRipen, StubbleNeedsPloughing,
-            CropBaseGrowthRate, CropSeasonGrowth, CropWaterGrowth, _sim?.Calendar);
+            CropBaseGrowthRate, CropSeasonGrowth, CropWaterGrowth, _sim?.Calendar,
+            CropYieldPerCell, FieldOutputHarvests);
         _sim?.Register(_crops);
 
         // The world is state, not a system: it has nothing to tick, but a
@@ -438,11 +454,12 @@ public partial class WorldGrid : Node3D, IHashableState
         _fieldsCreated++;
         // The crop row is opened before the field so the handle can be
         // constructor input: a Field is never observable without one. The
-        // ground it stands on is aggregated here and pushed down, because the
-        // sim has no idea what a cell is.
+        // ground it stands on — how good it is and how much of it there is —
+        // is aggregated here and pushed down, because the sim has no idea what
+        // a cell is.
         var field = new Field(
             _fieldsCreated, $"Field {_fieldsCreated}", cells,
-            _crops.Create(_fieldsCreated, ChunkedFertility(cells)));
+            _crops.Create(_fieldsCreated, ChunkedFertility(cells), cells.Count));
         _fields.Add(field);
         foreach (Vector2I cell in cells)
         {
@@ -568,11 +585,11 @@ public partial class WorldGrid : Node3D, IHashableState
         if (field.CellCount > 0)
         {
             // The aggregate is only true of the cells it was taken over, so a
-            // field that lost its best corner grows slower from now on. Pushed
-            // on change rather than read per tick: the ground itself never
-            // moves, and the sim must be able to hash the number without
-            // asking the world for it.
-            _crops.SetFertility(field.Crop, ChunkedFertility(field.Cells));
+            // field that lost its best corner grows slower and yields less from
+            // now on, and its output buffer holds less. Pushed on change rather
+            // than read per tick: the ground itself never moves, and the sim
+            // must be able to hash the numbers without asking the world.
+            _crops.SetGround(field.Crop, ChunkedFertility(field.Cells), field.CellCount);
             return;
         }
 
