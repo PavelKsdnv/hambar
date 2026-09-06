@@ -26,6 +26,16 @@ namespace Arable;
 /// </summary>
 public sealed class MachineSystem : ISimSystem
 {
+    /// <summary>
+    /// The system's named RNG stream. One stream for the whole system, not one
+    /// per machine: the tick walks slots in a fixed order, so a single sequence
+    /// is already reproducible, and #24's guarantee is about draws crossing
+    /// <i>system</i> boundaries. It is also what removed the last reference-typed
+    /// column here — a per-machine generator is a per-entity allocation and one
+    /// more thing for a save to walk, buying nothing.
+    /// </summary>
+    public const string StreamName = "machines";
+
     /// <summary>Random destinations tried before a machine gives up for this tick.</summary>
     private const int RouteAttempts = 8;
 
@@ -33,6 +43,7 @@ public sealed class MachineSystem : ISimSystem
     private const int InitialCapacity = 16;
 
     private readonly WorldGrid _world;
+    private readonly RandomStream _rng;
     private readonly EntityStore _entities = new();
     private readonly SpatialHash _occupancy = new();
 
@@ -49,16 +60,18 @@ public sealed class MachineSystem : ISimSystem
     private Vector2I[] _cell = [];
     private int[] _routeNext = [];
 
-    // The two reference-typed columns. The route list is allocated once per
+    // The one reference-typed column left. The route list is allocated once per
     // slot and refilled in place, so a machine that plans a thousand routes
-    // allocates one list, and recycling a slot reuses it. The Random is
-    // per-machine so a spawn sequence is reproducible — #24 replaces it with
-    // serializable RNG streams, which is when this column stops being a
-    // reference at all.
+    // allocates one list, and recycling a slot reuses it. It is also derived
+    // state — the route can be replanned from the world — so nothing needs to
+    // save or hash it.
     private List<Vector3>[] _route = [];
-    private Random[] _rng = [];
 
-    public MachineSystem(WorldGrid world) => _world = world;
+    public MachineSystem(WorldGrid world, RandomStream rng)
+    {
+        _world = world;
+        _rng = rng;
+    }
 
     /// <summary>Machines alive right now.</summary>
     public int Count => _entities.Count;
@@ -80,7 +93,7 @@ public sealed class MachineSystem : ISimSystem
     /// Adds a machine at a world position. Every component is written here,
     /// because a recycled slot still holds the previous occupant's values.
     /// </summary>
-    public EntityId Spawn(Vector3 position, float speed, float turnSpeed, Random rng)
+    public EntityId Spawn(Vector3 position, float speed, float turnSpeed)
     {
         EntityId id = _entities.Create();
         EnsureCapacity(_entities.SlotCount);
@@ -91,7 +104,6 @@ public sealed class MachineSystem : ISimSystem
         _speed[i] = speed;
         _turnSpeed[i] = turnSpeed;
         _parked[i] = false;
-        _rng[i] = rng;
         _route[i].Clear();
         _routeNext[i] = 0;
         _cell[i] = _world.WorldToCell(position);
@@ -231,7 +243,7 @@ public sealed class MachineSystem : ISimSystem
 
         for (int attempt = 0; attempt < RouteAttempts; attempt++)
         {
-            Vector2I destination = _world.RandomRoadCell(_rng[i]);
+            Vector2I destination = _world.RandomRoadCell(_rng);
             if (destination == current)
             {
                 continue;
@@ -295,7 +307,6 @@ public sealed class MachineSystem : ISimSystem
         Array.Resize(ref _cell, capacity);
         Array.Resize(ref _routeNext, capacity);
         Array.Resize(ref _route, capacity);
-        Array.Resize(ref _rng, capacity);
 
         // An empty List allocates no backing array until the first Add, so
         // filling the new slots up front costs nothing and keeps the column

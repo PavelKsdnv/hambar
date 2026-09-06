@@ -51,6 +51,7 @@ TickRate = 20
 MaxTicksPerFrame = 5
 TicksPerDay = 600
 DaysPerSeason = 12
+WorldSeed = 20260904
 SpeedSteps = PackedFloat32Array(0, 1, 2, 3)
 StartSpeedIndex = 1
 

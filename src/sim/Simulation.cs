@@ -29,6 +29,12 @@ namespace Arable;
 /// moves the first and never the second, which is why 3× runs the game three
 /// times as fast without a day becoming any shorter in ticks.
 ///
+/// <b>Randomness is sim state, and it is derived, not shared.</b>
+/// <see cref="Streams"/> hands every system its own named sequence off
+/// <see cref="WorldSeed"/>, so a roll added in one system cannot shift what
+/// another one draws — see <see cref="RandomStreams"/> for why that is the
+/// whole point.
+///
 /// <b>Speed is not sim state.</b> It decides <i>when</i> ticks happen in real
 /// time, never <i>what</i> a tick does, so it is deliberately outside anything
 /// #25 hashes or a replay reproduces: the same run at 1× and at 3× is the same
@@ -68,6 +74,15 @@ public partial class Simulation : Node
     [Export] public int DaysPerSeason { get; set; } = GameCalendar.DefaultDaysPerSeason;
 
     /// <summary>
+    /// <b>The one seed the whole world is derived from.</b> It lives on the sim
+    /// rather than on <c>WorldGrid</c> because terrain is only its loudest
+    /// consumer, not its owner: M7's prices and M9's hazards draw from the same
+    /// seed and have no business reaching into the world grid for it. Changing
+    /// it is starting a different world — see <see cref="RandomStreams.Reseed"/>.
+    /// </summary>
+    [Export] public int WorldSeed { get; set; } = RandomStreams.DefaultWorldSeed;
+
+    /// <summary>
     /// The speed ladder the player steps through, as multipliers on real time.
     /// The UI builds one button per entry, in this order, so adding a 5× for a
     /// playtest is editing this list — the same trick <c>BuildPalette</c> plays
@@ -84,6 +99,7 @@ public partial class Simulation : Node
 
     private SimClock _clock = new();
     private GameCalendar _calendar = new();
+    private RandomStreams _streams = new();
     private readonly List<ISimSystem> _systems = new();
     private readonly List<ISimView> _views = new();
     private float[] _speeds = [0f, 1f];
@@ -109,6 +125,12 @@ public partial class Simulation : Node
     /// <see cref="Clock"/>.
     /// </summary>
     public GameCalendar Calendar => _calendar;
+
+    /// <summary>
+    /// The world's randomness: one seed, a named stream per system. Sim state —
+    /// a stream advances only inside a tick, and #25 hashes it with the rest.
+    /// </summary>
+    public RandomStreams Streams => _streams;
 
     public long TickCount => _clock.TickCount;
 
@@ -137,6 +159,7 @@ public partial class Simulation : Node
         ProcessPriority = TicksFirst;
         _clock = new SimClock(TickRate, MaxTicksPerFrame);
         _calendar = new GameCalendar(TicksPerDay, DaysPerSeason);
+        _streams = new RandomStreams(WorldSeed);
         _speeds = VetSpeeds(SpeedSteps);
         _lastRunningIndex = FirstRunningIndex();
         if (!SetSpeed(StartSpeedIndex))

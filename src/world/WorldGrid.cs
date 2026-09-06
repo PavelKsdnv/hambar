@@ -10,7 +10,7 @@ namespace Arable;
 /// Two independent layers live here:
 /// <list type="bullet">
 /// <item><b>terrain</b> — what the land is (<see cref="TerrainType"/> plus a
-/// fertility scalar). Generated from <see cref="WorldSeed"/>, bounded by
+/// fertility scalar). Derived from <see cref="WorldSeed"/>, bounded by
 /// <see cref="MapHalfExtent"/>, and never edited by the player.</item>
 /// <item><b>placement</b> — what the player built (<see cref="TileType"/>).
 /// Sparse; clearing it back to <see cref="TileType.Empty"/> leaves the terrain
@@ -42,10 +42,17 @@ public partial class WorldGrid : Node3D
     private const int StructureItem = 8;
 
     /// <summary>
-    /// Offset that derives the rock/water mask seed from the world seed, so a
-    /// single seed still describes the whole map.
+    /// The stream machine spawn placement draws from. Separate from
+    /// <c>MachineSystem.StreamName</c> on purpose: spawning is the world laying
+    /// the game out, wandering is a machine deciding what to do, and a debug
+    /// session that spawns an extra tractor should not reroute the ones already
+    /// driving.
     /// </summary>
-    private const int MaskSeedOffset = 7919;
+    public const string SpawnStreamName = "world.spawn";
+
+    /// <summary>Names the two terrain noise fields derive their seeds from.</summary>
+    private const string FertilityNoiseName = "world.terrain.fertility";
+    private const string MaskNoiseName = "world.terrain.mask";
 
     [Export] public PackedScene? MachineScene { get; set; }
     [Export] public int MachineCount { get; set; } = 0;
@@ -58,8 +65,19 @@ public partial class WorldGrid : Node3D
     /// </summary>
     [Export] public int MapHalfExtent { get; set; } = 48;
 
-    /// <summary>Single seed for the whole map: both noise fields derive from it.</summary>
-    [Export] public int WorldSeed { get; set; } = 20260904;
+    /// <summary>
+    /// The world seed, which the <c>Simulation</c> owns (<see cref="Streams"/>)
+    /// — this is the door terrain code and the smoke tests already knew about,
+    /// kept so there is still exactly one number and not a world copy of it.
+    /// Setting it starts a different world: every stream jumps back to the
+    /// beginning of its sequence. It deliberately does <b>not</b> regenerate the
+    /// map — <see cref="GenerateTerrain"/> is a separate, explicit act.
+    /// </summary>
+    public int WorldSeed
+    {
+        get => Streams.WorldSeed;
+        set => Streams.Reseed(value);
+    }
 
     /// <summary>Noise frequency (per cell) of the fertility field.</summary>
     [Export] public float FertilityFrequency { get; set; } = 0.04f;
@@ -115,7 +133,8 @@ public partial class WorldGrid : Node3D
     /// </summary>
     private int _halfExtent = -1;
 
-    private readonly Random _spawnRng = new(1234);
+    private RandomStreams? _streams;
+    private RandomStream _spawnRng = null!;
     private int _machinesSpawned;
 
     // Machines are sim entities, so their state lives in flat arrays rather
@@ -129,8 +148,12 @@ public partial class WorldGrid : Node3D
     public override void _Ready()
     {
         _gridMap = GetNode<GridMap>("GridMap");
-        _machines = new MachineSystem(this);
         _sim = Simulation.For(this);
+
+        // The streams are taken once and held: they are the same objects for
+        // the life of the world, and a reseed rewrites them in place.
+        _spawnRng = Streams.For(SpawnStreamName);
+        _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
         _sim?.Register(_machines);
         GenerateTerrain();
         GenerateStartRoad();
@@ -143,6 +166,33 @@ public partial class WorldGrid : Node3D
     // The machine system holds this world; leaving it registered would tick it
     // against a freed WorldGrid.
     public override void _ExitTree() => _sim?.Unregister(_machines);
+
+    /// <summary>
+    /// The world's randomness, which the <c>Simulation</c> owns. Resolved
+    /// lazily rather than in <c>_Ready</c> because <see cref="WorldSeed"/> is
+    /// readable before the world is built; a scene with no sim node gets a
+    /// private registry and a warning, the way the rest of the codebase repairs
+    /// a bad scene instead of taking it down.
+    /// </summary>
+    private RandomStreams Streams
+    {
+        get
+        {
+            if (_streams != null)
+            {
+                return _streams;
+            }
+
+            RandomStreams? fromSim = Simulation.For(this)?.Streams;
+            if (fromSim == null)
+            {
+                GD.PushWarning("WorldGrid: no Simulation in the tree; "
+                    + "world randomness falls back to a private registry.");
+                fromSim = new RandomStreams();
+            }
+            return _streams = fromSim;
+        }
+    }
 
     /// <summary>Side length of the generated map, in cells.</summary>
     public int MapSize => _halfExtent < 0 ? 0 : _halfExtent * 2 + 1;
@@ -468,7 +518,7 @@ public partial class WorldGrid : Node3D
         return new Vector2I(cell.X, cell.Z);
     }
 
-    public Vector2I RandomRoadCell(Random rng) => _roadCells[rng.Next(_roadCells.Count)];
+    public Vector2I RandomRoadCell(RandomStream rng) => _roadCells[rng.NextInt(_roadCells.Count)];
 
     /// <summary>
     /// Breadth-first shortest path over road cells, including both endpoints.
@@ -726,7 +776,7 @@ public partial class WorldGrid : Node3D
 
         var fertilityNoise = new FastNoiseLite
         {
-            Seed = WorldSeed,
+            Seed = Streams.DeriveSeed(FertilityNoiseName),
             NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
             Frequency = FertilityFrequency,
             FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
@@ -734,7 +784,7 @@ public partial class WorldGrid : Node3D
         };
         var maskNoise = new FastNoiseLite
         {
-            Seed = WorldSeed + MaskSeedOffset,
+            Seed = Streams.DeriveSeed(MaskNoiseName),
             NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
             Frequency = MaskFrequency,
             FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
@@ -817,9 +867,9 @@ public partial class WorldGrid : Node3D
     /// <summary>
     /// Spawns one machine at a random road cell: a row in
     /// <see cref="Machines"/> for the sim, and a node bound to it for the view.
-    /// Position and behavior seeds come from a fixed-seed spawn counter, so a
-    /// given spawn sequence is reproducible. Returns null when no machine scene
-    /// is assigned.
+    /// The spot comes off the world's spawn stream, so a given spawn sequence is
+    /// reproducible for a world seed. Returns null when no machine scene is
+    /// assigned.
     /// </summary>
     public Machine? SpawnMachine()
     {
@@ -833,8 +883,7 @@ public partial class WorldGrid : Node3D
         // sim never looks at the node again.
         var machine = MachineScene.Instantiate<Machine>();
         Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
-        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed,
-            new Random(1000 + _machinesSpawned));
+        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed);
         machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
         machine.Position = spawn;
         AddChild(machine);

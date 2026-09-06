@@ -7,7 +7,7 @@ namespace Arable;
 /// Headless smoke test for the world grid and machines: instances Main.tscn and
 /// asserts the generated terrain (seeded, bounded, varied, deterministic) and
 /// the starting road, that terrain and placement are independent layers,
-/// exercises the entity store and spatial hash directly, then spawns a machine
+/// exercises the entity store, spatial hash and RNG streams directly, then spawns a machine
 /// via dev key 9 and asserts its sim row drives the road on the fixed tick with
 /// the node interpolating behind it, exercises the road-build
 /// tool (armed from the build palette, then anchor click + place click →
@@ -87,6 +87,7 @@ public partial class WorldSmokeTest : Node
             CheckGameCalendar();
             CheckSpeedSchedule();
             CheckEntityStorage();
+            CheckRandomStreams();
 
             // Dev key 9 spawns a machine — one of the two shortcuts left over
             // from the number-key menu the build palette replaced.
@@ -525,6 +526,149 @@ public partial class WorldSmokeTest : Node
         hash.Remove(cell, reused);
         hash.Remove(cell + Vector2I.Down, second);
         Check("emptied cells are dropped from the index", hash.OccupiedCells == 0);
+    }
+
+    /// <summary>
+    /// The RNG streams, and in particular the claim the whole design rests on:
+    /// <b>a draw in one system cannot move another system's sequence</b>. That
+    /// is checked by building two registries on the same world seed, crowding
+    /// one of them with systems that do not exist yet and draining one of those,
+    /// and requiring the stream under test to produce the identical sequence in
+    /// both. A shared pool fails it on the first draw.
+    ///
+    /// The rest is what M10 needs: a stream resumes from one saved integer at
+    /// the point it was saved, not at the start.
+    /// </summary>
+    private void CheckRandomStreams()
+    {
+        const int worldSeed = 20260904;
+        const int draws = 32;
+
+        // The derivation is a contract, not an implementation detail: changing
+        // it silently changes every world that was ever generated. These are
+        // golden values, so moving them has to be a decision somebody makes on
+        // purpose rather than a side effect of tidying the hash.
+        GD.Print($"rng: hash(machines)={RandomStream.HashName(MachineSystem.StreamName):X16} "
+            + $"seed64={RandomStream.Seed64(worldSeed, MachineSystem.StreamName):X16}");
+        Check("the stream derivation is unchanged",
+            RandomStream.HashName(MachineSystem.StreamName) == 0x27B77DFCCA1759B3UL
+            && RandomStream.Seed64(worldSeed, MachineSystem.StreamName) == 0x21034AF9D3EC7C54UL);
+
+        // Two registries on one seed. The busy one opens two systems that do
+        // not exist yet and drains one of them before it ever asks for the
+        // stream under test -- exactly the change that shifts every later roll
+        // when randomness comes out of a shared pool.
+        var plain = new RandomStreams(worldSeed);
+        var busy = new RandomStreams(worldSeed);
+        RandomStream weather = busy.For("weather");
+        for (int i = 0; i < 500; i++)
+        {
+            weather.NextUInt();
+        }
+        busy.For("prices");
+
+        uint[] alone = Draw(plain.For(MachineSystem.StreamName), draws);
+        uint[] crowded = Draw(busy.For(MachineSystem.StreamName), draws);
+        Check("draws in other systems do not move this system's sequence",
+            SameDraws(alone, crowded));
+        Check("and neither does the order the streams were opened in",
+            busy.Ordered.Count == 3 && plain.Count == 1);
+
+        Check("two systems in one world get different sequences",
+            !SameDraws(alone, Draw(plain.For("weather"), draws)));
+        Check("the same system in another world gets a different sequence",
+            !SameDraws(alone, Draw(new RandomStreams(worldSeed + 1)
+                .For(MachineSystem.StreamName), draws)));
+
+        // Save/load's half of the deal: the whole of a stream is one integer,
+        // and restoring it has to resume mid-sequence.
+        var saved = new RandomStreams(worldSeed);
+        RandomStream stream = saved.For(MachineSystem.StreamName);
+        uint[] fromStart = Draw(stream, draws);
+        ulong state = stream.State;
+        uint[] next = Draw(stream, draws);
+        stream.State = state;
+        Check("a stream resumes mid-sequence from its saved state",
+            SameDraws(next, Draw(stream, draws)));
+        Check("resuming mid-sequence is not the same as starting over",
+            !SameDraws(next, fromStart));
+        Check("a stream is the same object every time it is asked for",
+            ReferenceEquals(stream, saved.For(MachineSystem.StreamName)));
+
+        saved.Reseed(worldSeed);
+        Check("reseeding rewinds a stream somebody is already holding",
+            SameDraws(fromStart, Draw(stream, draws)));
+
+        // The walk #25 hashes and M10 saves: ordinal by name, so it cannot
+        // depend on which system happened to draw first.
+        var forward = new RandomStreams(worldSeed);
+        var backward = new RandomStreams(worldSeed);
+        forward.For("aaa");
+        forward.For("mmm");
+        forward.For("zzz");
+        backward.For("zzz");
+        backward.For("mmm");
+        backward.For("aaa");
+        bool sameWalk = forward.Count == backward.Count;
+        for (int i = 0; i < forward.Count && sameWalk; i++)
+        {
+            sameWalk = forward.Ordered[i].Name == backward.Ordered[i].Name
+                && forward.Ordered[i].State == backward.Ordered[i].State;
+        }
+        Check("streams walk by name, not by which one was opened first", sameWalk);
+
+        bool inRange = true;
+        RandomStream range = plain.For("range");
+        for (int i = 0; i < 4096; i++)
+        {
+            int below = range.NextInt(7);
+            int between = range.NextInt(-3, 4);
+            float unit = range.NextFloat();
+            inRange &= below is >= 0 and < 7 && between is >= -3 and < 4
+                && unit >= 0f && unit < 1f;
+        }
+        Check("draws stay inside the range they were asked for", inRange);
+        Check("a degenerate range answers the only value in it",
+            range.NextInt(1) == 0 && range.NextInt(0) == 0);
+
+        // The proof above is worth nothing if the game wired its own registry:
+        // the world and the machines have to be drawing from the sim's.
+        Check("the world and the machines draw from the sim's registry",
+            _sim.Streams.Has(WorldGrid.SpawnStreamName)
+            && _sim.Streams.Has(MachineSystem.StreamName));
+        int worldsSeed = _world.WorldSeed;
+        Check("the world reads its seed from the sim's registry",
+            worldsSeed == _sim.Streams.WorldSeed);
+        _world.WorldSeed = worldsSeed + 1;
+        Check("and setting it reseeds that registry rather than a copy",
+            _sim.Streams.WorldSeed == worldsSeed + 1);
+        _world.WorldSeed = worldsSeed;
+    }
+
+    private static uint[] Draw(RandomStream stream, int count)
+    {
+        var values = new uint[count];
+        for (int i = 0; i < count; i++)
+        {
+            values[i] = stream.NextUInt();
+        }
+        return values;
+    }
+
+    private static bool SameDraws(uint[] a, uint[] b)
+    {
+        if (a.Length != b.Length)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.Length; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static double[] Frames(double delta, int count)
