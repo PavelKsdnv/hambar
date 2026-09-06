@@ -50,7 +50,23 @@ public partial class Economy : Node
     /// <summary>What the readout says — the label's text, kept for the tests.</summary>
     public string Text { get; private set; } = string.Empty;
 
-    public override void _Ready() => SetBalance(StartingBalance);
+    /// <summary>
+    /// Opens the account. <see cref="StartingBalance"/> is inspector input, so
+    /// this is the boundary a bad number actually arrives at — the one place in
+    /// the game that can hand <see cref="SetBalance"/> a negative, since
+    /// <see cref="TrySpend"/> and <see cref="Credit"/> both vet their own. A bad
+    /// export should leave the player broke and the log loud, not take the scene
+    /// down on load.
+    /// </summary>
+    public override void _Ready()
+    {
+        if (StartingBalance < 0)
+        {
+            GD.PushWarning(
+                $"Economy: StartingBalance is negative ({StartingBalance}); clamped to 0.");
+        }
+        SetBalance(StartingBalance);
+    }
 
     /// <summary>Whether that much could be spent right now.</summary>
     public bool CanAfford(int amount) => amount <= Balance;
@@ -100,15 +116,17 @@ public partial class Economy : Node
     /// This is also the only door a number can come through without
     /// <see cref="TrySpend"/> having vetted it — a mistyped
     /// <see cref="StartingBalance"/> in the inspector, a corrupt save — so it is
-    /// where "never negative" is actually enforced. A negative input is clamped
-    /// to zero and warned about rather than thrown on: a bad export should leave
-    /// the player broke and the log loud, not take the scene down on load.
+    /// where "never negative" is actually enforced, by clamping rather than
+    /// throwing. It clamps <i>quietly</i>: the invariant has to hold however
+    /// this is called, but complaining about a bad number is the job of whoever
+    /// accepted it from outside (see <see cref="_Ready"/> for the exported one).
+    /// Enforcement everywhere, noise only at the boundary — which is what lets a
+    /// caller deliberately test the clamp without the log crying wolf.
     /// </summary>
     public void SetBalance(int balance)
     {
         if (balance < 0)
         {
-            GD.PushWarning($"Economy: refusing a negative balance ({balance}); clamped to 0.");
             balance = 0;
         }
         Balance = balance;

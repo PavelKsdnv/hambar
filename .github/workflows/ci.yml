@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Bump these three together. Note the zip's folder and the binary inside it
+  # spell the architecture differently: "_x86_64" vs ".x86_64".
+  GODOT_TAG: 4.7-stable
+  GODOT_DIR: Godot_v4.7-stable_mono_linux_x86_64
+  GODOT_BIN: Godot_v4.7-stable_mono_linux.x86_64
+  # SHA-256 of $GODOT_DIR.zip. Cross-checked against the SHA512-SUMS.txt
+  # published alongside the release rather than taken from a bare download,
+  # so this pins the archive Godot shipped, not merely one that downloaded
+  # cleanly. Bump it with the three above.
+  GODOT_SHA256: 69e855001e34b108eb8124ff1eae8445026b2a30a83b6e6314f705ae963d0fe1
+
+jobs:
+  build-and-test:
+    name: Build and smoke tests
+    runs-on: ubuntu-latest
+    # Nothing here writes to the repo or its metadata; it only reads the code
+    # and fetches Godot. Everything left unlisted is disabled outright.
+    permissions:
+      contents: read
+    # A missing C# assembly makes the smoke tests hang rather than fail, so the
+    # job carries a backstop and every Godot step is individually bounded.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Godot ${{ env.GODOT_TAG }} (.NET build)
+        run: |
+          curl -fsSL -o godot.zip \
+            "https://github.com/godotengine/godot-builds/releases/download/$GODOT_TAG/$GODOT_DIR.zip"
+          echo "$GODOT_SHA256  godot.zip" | sha256sum --check --strict -
+          unzip -q godot.zip -d "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/$GODOT_DIR/$GODOT_BIN"
+          echo "GODOT=$RUNNER_TEMP/$GODOT_DIR/$GODOT_BIN" >> "$GITHUB_ENV"
+
+      # Must precede every Godot step: Godot.NET.Sdk writes the assembly into
+      # .godot/mono/temp/bin/, and without it Godot cannot instantiate the test
+      # scripts, so _Ready never runs and the scene never calls Quit.
+      - name: Build
+        run: dotnet build Arable.sln
+
+      # .godot/ is gitignored, so a fresh checkout has no import cache. Skipping
+      # this does not fail — the tests still exit 0 while logging resource load
+      # errors, which is a green run over a broken load. The wrapper is what
+      # turns that logged-but-green case into a red build; see the script.
+      - name: Import assets
+        # Measured at 5-7s across runs; bounded like the tests below, since a
+        # hung import is the same silent stall as a hung scene.
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh --import
+
+      - name: Camera smoke test
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh res://scenes/dev/CameraSmokeTest.tscn
+
+      - name: World smoke test
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh res://scenes/dev/WorldSmokeTest.tscn
+
+      - name: Build smoke test
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh res://scenes/dev/BuildSmokeTest.tscn
