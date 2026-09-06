@@ -235,7 +235,9 @@ system, not a central list; a typo therefore opens a *new* stream, hence constan
 **Three traps.** `WorldGrid.WorldSeed` forwards to the seed on `Simulation`
 (terrain is its loudest consumer, not its owner), but that `[Export]` is the
 **authored** seed and `Streams.WorldSeed` the live one — a reseed does not write
-back. **`FastNoiseLite` is not a stream** (one int in, its own field out), so
+back. Out of the tree there is no `Simulation` to forward to: a *read* is silent
+(the throwaway registry answering it is dropped on entry), a *write* is dropped
+with it and warns. **`FastNoiseLite` is not a stream** (one int in, its own field out), so
 terrain takes its int from `DeriveSeed`; that killed the `WorldSeed + 7919` mask
 offset — adjacent noise seeds are not guaranteed unrelated — and **changed the
 generated map**, so the same authored seed gives different terrain than before
@@ -643,6 +645,10 @@ Headless end-to-end checks, each printing `PASS`/`FAIL` lines and exiting 0/1.
 CLAUDE.md has the command and names them; what each asserts is in the test file.
 What is *not*, and costs an afternoon:
 
+- **A warning fails CI.** `run_godot.sh` reds the build on any logged
+  `WARNING`/`ERROR`, since a scene quits 0 over a failed load. A `PushWarning`
+  must therefore be narrow enough never to fire in a healthy run: a test that
+  legitimately trips one indicts the warning, not itself.
 - **Synthetic input needs the right door.** `Input.ActionPress` works for held
   actions, but event-driven ones only reach `_UnhandledInput` via
   `Input.ParseInputEvent(InputEventAction)`.

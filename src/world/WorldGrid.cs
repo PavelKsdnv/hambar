@@ -102,7 +102,23 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public int WorldSeed
     {
         get => Streams.WorldSeed;
-        set => Streams.Reseed(value);
+        set
+        {
+            // Reading a detached world's seed is harmless; reseeding one is
+            // not. The new seed lands on the throwaway registry of
+            // <see cref="Streams"/> and is gone the moment the world enters
+            // the tree and takes the Simulation's, so the world starts on a
+            // seed nobody asked for. Guarded on _streams as well as the tree
+            // because a world that already resolved keeps the sim's registry
+            // after it leaves, and that reseed is kept.
+            if (_streams == null && !IsInsideTree())
+            {
+                GD.PushWarning("WorldGrid: reseeded before entering the tree; "
+                    + "the new seed is dropped when the world takes the "
+                    + "Simulation's randomness. Set Simulation.WorldSeed.");
+            }
+            Streams.Reseed(value);
+        }
     }
 
     /// <summary>Noise frequency (per cell) of the fertility field.</summary>
@@ -319,8 +335,20 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
             RandomStreams? fromSim = Simulation.For(this)?.Streams;
             if (fromSim == null)
             {
-                GD.PushWarning("WorldGrid: no Simulation in the tree; "
-                    + "world randomness falls back to a private registry.");
+                // Two situations arrive here and only one of them is a defect.
+                // Out of the tree is the transient case this lazy resolve
+                // exists for: WorldSeed is readable before the world is built,
+                // nothing is wrong, and the registry below is dropped again on
+                // entry — so the warning would be a false alarm, and its text
+                // ("in the tree") untrue besides. In the tree with no
+                // Simulation is the broken scene, and the only one worth a
+                // word. The lossy half of a detached access — a reseed that
+                // gets dropped — warns from the WorldSeed setter instead.
+                if (IsInsideTree())
+                {
+                    GD.PushWarning("WorldGrid: no Simulation in the tree; "
+                        + "world randomness falls back to a private registry.");
+                }
                 // Deliberately not cached into _streams: an access from outside
                 // the tree must not decide the world's randomness for the rest
                 // of the run. Caching it here would leave _Ready building the
