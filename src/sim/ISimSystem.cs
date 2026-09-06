@@ -4,10 +4,14 @@ namespace Arable;
 /// Something that <b>writes</b> sim state, advanced once per fixed tick.
 ///
 /// Split from <see cref="ISimView"/> on purpose: the pair is the ownership rule
-/// made into types. Today <c>Machine</c> implements both, because one node is
-/// still both the state and its own drawing. When entity state moves into flat
-/// arrays the array owner keeps this half and the node keeps only the other,
-/// and nothing else in the loop has to change.
+/// made into types, and the seam entity state moved across. A system is the
+/// <b>owner of a set of component arrays</b> — <c>MachineSystem</c> is the
+/// first — and it ticks every entity in them; the node that draws one keeps
+/// only <see cref="ISimView"/>. Nothing in the loop had to change when that
+/// happened, which was the point of splitting the interfaces first.
+///
+/// Systems tick in registration order and entities within a system in slot
+/// order, so the whole tick has one fixed, reproducible sequence.
 /// </summary>
 public interface ISimSystem
 {

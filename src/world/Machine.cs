@@ -1,22 +1,25 @@
-using System;
-using System.Collections.Generic;
 using Godot;
 
 namespace Arable;
 
 /// <summary>
-/// A vehicle (tractor, combine, truck, ...) that drives the road network.
-/// For now it wanders: pick a random road cell, BFS a path along roads, drive
-/// waypoint to waypoint, repeat.
+/// The <b>drawing</b> of a vehicle (tractor, combine, truck, ...). The machine
+/// itself — position, yaw, route, whether it is parked — is a row of
+/// <see cref="MachineSystem"/>'s arrays, addressed by <see cref="Entity"/>;
+/// this node owns nothing but the mesh, and its transform is a picture of that
+/// row rather than the place the machine is. Read <see cref="SimPosition"/> for
+/// where it actually is.
 ///
-/// One node, two halves, kept apart on purpose. <see cref="Tick"/> is the sim:
-/// it advances <see cref="SimPosition"/> and the yaw on the fixed tick and is
-/// the only thing allowed to write them. <see cref="Interpolate"/> is the view:
-/// it blends the last two sim poses into the node transform every rendered
-/// frame and writes nothing else. The transform is therefore a *drawing* of the
-/// machine, not where the machine is — read <see cref="SimPosition"/> for that.
+/// So it is an <see cref="ISimView"/> and nothing else. It used to be both
+/// halves, which is why the interfaces were split before the arrays existed:
+/// moving the state out cost this file its <c>Tick</c> and touched no other
+/// part of the loop.
+///
+/// The exports are <b>spawn input</b>, read once by <c>WorldGrid.SpawnMachine</c>
+/// and copied into the arrays. Changing <see cref="Speed"/> on a live node does
+/// nothing; the sim never reads them again.
 /// </summary>
-public partial class Machine : Node3D, ISimSystem, ISimView
+public partial class Machine : Node3D, ISimView
 {
     /// <summary>Top surface of road tiles — machines drive at this height.</summary>
     public const float DeckHeight = 0.1f;
@@ -25,33 +28,26 @@ public partial class Machine : Node3D, ISimSystem, ISimView
     [Export] public float TurnSpeed { get; set; } = 8f;
     [Export] public Color BodyColor { get; set; } = new(0.75f, 0.22f, 0.17f);
 
-    private const int RouteAttempts = 8;
-
-    private WorldGrid? _world;
+    private MachineSystem? _machines;
     private Simulation? _sim;
-    private Random _rng = new();
-    private readonly Queue<Vector3> _waypoints = new();
 
-    // Sim state, plus the previous tick's copy of it for the view to blend from.
-    private Vector3 _position;
-    private Vector3 _previousPosition;
-    private float _yaw;
-    private float _previousYaw;
-    private bool _parked;
+    /// <summary>The sim entity this node draws, or <see cref="EntityId.None"/>.</summary>
+    public EntityId Entity { get; private set; } = EntityId.None;
 
     /// <summary>Where the machine is as of the last tick. Sim truth.</summary>
-    public Vector3 SimPosition => _position;
+    public Vector3 SimPosition => _machines?.PositionOf(Entity) ?? Position;
 
     /// <summary>Where it was the tick before — the other end of the view's blend.</summary>
-    public Vector3 PreviousSimPosition => _previousPosition;
+    public Vector3 PreviousSimPosition => _machines?.PreviousPositionOf(Entity) ?? Position;
 
-    /// <summary>Set once it strands off-road: it stops ticking but stays registered.</summary>
-    public bool Parked => _parked;
+    /// <summary>Set once it strands off-road: it stays alive but stops moving.</summary>
+    public bool Parked => _machines?.IsParked(Entity) ?? false;
 
-    public void Setup(WorldGrid world, Random rng, Color color)
+    /// <summary>Binds the node to the row it draws. Called before it enters the tree.</summary>
+    public void Setup(MachineSystem machines, EntityId entity, Color color)
     {
-        _world = world;
-        _rng = rng;
+        _machines = machines;
+        Entity = entity;
         BodyColor = color;
     }
 
@@ -61,121 +57,42 @@ public partial class Machine : Node3D, ISimSystem, ISimView
         GetNode<MeshInstance3D>("Model/Body").MaterialOverride =
             new StandardMaterial3D { AlbedoColor = BodyColor };
 
-        // The transform is spawn *input* up to this point — whoever placed the
-        // node chose it. From here on the sim owns the pose and the view writes
-        // the transform, so snapshot it once and never read it back.
-        _position = _previousPosition = Position;
-        _yaw = _previousYaw = Rotation.Y;
-
         _sim = Simulation.For(this);
         if (_sim == null)
         {
-            GD.PushWarning($"{Name} found no Simulation node; it will not move.");
+            GD.PushWarning($"{Name} found no Simulation node; it will not be drawn.");
             return;
         }
-        _sim.Register(this);
         _sim.RegisterView(this);
     }
 
+    /// <summary>
+    /// Freeing the node retires the entity with it. Creating and destroying an
+    /// entity is lifecycle, not a state write, so it is allowed here for the
+    /// same reason <c>Simulation.Register</c> is — outside a tick. Nothing else
+    /// knows the node went away, and a row left behind would be an invisible
+    /// machine still driving the roads.
+    /// </summary>
     public override void _ExitTree()
     {
-        _sim?.Unregister(this);
         _sim?.UnregisterView(this);
+        _machines?.Despawn(Entity);
+        Entity = EntityId.None;
     }
 
     /// <summary>
-    /// One fixed sim tick. <paramref name="dt"/> never varies, so the travel
-    /// budget below is the same every tick and the drive is reproducible.
-    /// </summary>
-    public void Tick(float dt)
-    {
-        _previousPosition = _position;
-        _previousYaw = _yaw;
-
-        if (_world == null || _parked)
-        {
-            return;
-        }
-        if (_waypoints.Count == 0 && !TryPlanRoute())
-        {
-            return;
-        }
-
-        // Spend the tick's travel budget across waypoints so corners don't
-        // lose distance.
-        float budget = Speed * dt;
-        while (budget > 0f && _waypoints.Count > 0)
-        {
-            Vector3 target = _waypoints.Peek();
-            Vector3 toTarget = target - _position;
-            float distance = toTarget.Length();
-            if (distance <= budget)
-            {
-                _position = target;
-                budget -= distance;
-                _waypoints.Dequeue();
-            }
-            else
-            {
-                Vector3 direction = toTarget / distance;
-                _position += direction * budget;
-                FaceDirection(direction, dt);
-                budget = 0f;
-            }
-        }
-    }
-
-    /// <summary>
-    /// View half: pose the node between the last two sim states. Nothing here
-    /// may touch sim state — this runs at frame rate, which is exactly the
-    /// coupling the sim loop exists to remove.
+    /// Pose the node between the last two sim states. Nothing here may write
+    /// sim state — this runs at frame rate, which is exactly the coupling the
+    /// sim loop exists to remove.
     /// </summary>
     public void Interpolate(float alpha)
     {
-        Position = _previousPosition.Lerp(_position, alpha);
-        Rotation = new Vector3(0f, Mathf.LerpAngle(_previousYaw, _yaw, alpha), 0f);
-    }
-
-    private bool TryPlanRoute()
-    {
-        Vector2I current = _world!.WorldToCell(_position);
-        if (!_world.IsRoad(current))
+        if (_machines == null || !_machines.IsAlive(Entity))
         {
-            GD.PushWarning($"Machine at {_position} is stranded off-road; not moving.");
-            _parked = true;
-            return false;
+            return;
         }
-
-        for (int i = 0; i < RouteAttempts; i++)
-        {
-            Vector2I destination = _world.RandomRoadCell(_rng);
-            if (destination == current)
-            {
-                continue;
-            }
-            List<Vector2I>? path = _world.FindRoadPath(current, destination);
-            if (path == null)
-            {
-                continue;
-            }
-            // String-pull the cell path into long straight runs so the drive
-            // is smooth instead of turning at every cell.
-            path = _world.SmoothRoadPath(path);
-            for (int j = 1; j < path.Count; j++)
-            {
-                _waypoints.Enqueue(_world.CellToWorld(path[j]) + Vector3.Up * DeckHeight);
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private void FaceDirection(Vector3 direction, float dt)
-    {
-        // -Z is the machine's forward. Exponential smoothing, so the turn takes
-        // the same wall-clock time whatever the tick rate is set to.
-        float targetYaw = Mathf.Atan2(-direction.X, -direction.Z);
-        float weight = 1f - Mathf.Exp(-TurnSpeed * dt);
-        _yaw = Mathf.LerpAngle(_yaw, targetYaw, weight);
+        Position = _machines.PreviousPositionOf(Entity).Lerp(_machines.PositionOf(Entity), alpha);
+        Rotation = new Vector3(0f,
+            Mathf.LerpAngle(_machines.PreviousYawOf(Entity), _machines.YawOf(Entity), alpha), 0f);
     }
 }

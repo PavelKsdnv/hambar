@@ -118,9 +118,20 @@ public partial class WorldGrid : Node3D
     private readonly Random _spawnRng = new(1234);
     private int _machinesSpawned;
 
+    // Machines are sim entities, so their state lives in flat arrays rather
+    // than in the nodes that draw them (see MachineSystem). The registry lives
+    // here for the same reason the field and structure registries do: this
+    // class already owns the road queries the machines run on, and there is
+    // exactly one world.
+    private MachineSystem _machines = null!;
+    private Simulation? _sim;
+
     public override void _Ready()
     {
         _gridMap = GetNode<GridMap>("GridMap");
+        _machines = new MachineSystem(this);
+        _sim = Simulation.For(this);
+        _sim?.Register(_machines);
         GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
@@ -128,6 +139,10 @@ public partial class WorldGrid : Node3D
             SpawnMachine();
         }
     }
+
+    // The machine system holds this world; leaving it registered would tick it
+    // against a freed WorldGrid.
+    public override void _ExitTree() => _sim?.Unregister(_machines);
 
     /// <summary>Side length of the generated map, in cells.</summary>
     public int MapSize => _halfExtent < 0 ? 0 : _halfExtent * 2 + 1;
@@ -794,9 +809,17 @@ public partial class WorldGrid : Node3D
     }
 
     /// <summary>
-    /// Spawns one machine at a random road cell. Position and behavior seeds
-    /// come from a fixed-seed spawn counter, so a given spawn sequence is
-    /// reproducible. Returns null when no machine scene is assigned.
+    /// Every machine's sim state, in flat arrays. Ticked by the
+    /// <see cref="Simulation"/>; the <see cref="Machine"/> nodes only draw it.
+    /// </summary>
+    public MachineSystem Machines => _machines;
+
+    /// <summary>
+    /// Spawns one machine at a random road cell: a row in
+    /// <see cref="Machines"/> for the sim, and a node bound to it for the view.
+    /// Position and behavior seeds come from a fixed-seed spawn counter, so a
+    /// given spawn sequence is reproducible. Returns null when no machine scene
+    /// is assigned.
     /// </summary>
     public Machine? SpawnMachine()
     {
@@ -805,10 +828,15 @@ public partial class WorldGrid : Node3D
             return null;
         }
 
+        // The node is instanced first only to read the exports the scene
+        // carries — Speed and TurnSpeed are spawn input to the arrays, and the
+        // sim never looks at the node again.
         var machine = MachineScene.Instantiate<Machine>();
-        machine.Setup(this, new Random(1000 + _machinesSpawned),
-            MachineColors[_machinesSpawned % MachineColors.Length]);
-        machine.Position = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
+        Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
+        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed,
+            new Random(1000 + _machinesSpawned));
+        machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
+        machine.Position = spawn;
         AddChild(machine);
         _machinesSpawned++;
         return machine;

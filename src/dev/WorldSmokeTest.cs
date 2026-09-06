@@ -6,9 +6,10 @@ namespace Arable;
 /// <summary>
 /// Headless smoke test for the world grid and machines: instances Main.tscn and
 /// asserts the generated terrain (seeded, bounded, varied, deterministic) and
-/// the starting road, that terrain and placement are independent layers, then
-/// spawns a machine via dev key 9 and asserts it drives the road on the fixed
-/// sim tick with the view interpolating behind it, exercises the road-build
+/// the starting road, that terrain and placement are independent layers,
+/// exercises the entity store and spatial hash directly, then spawns a machine
+/// via dev key 9 and asserts its sim row drives the road on the fixed tick with
+/// the node interpolating behind it, exercises the road-build
 /// tool (armed from the build palette, then anchor click + place click →
 /// straight road with diagonal steps), and drives known screen pixels
 /// through the shared cell picker to check the hover readout (dev key 8). Run
@@ -63,6 +64,7 @@ public partial class WorldSmokeTest : Node
             CheckLayersAreIndependent();
             CheckStartRoad();
             CheckSimClock();
+            CheckEntityStorage();
 
             // Dev key 9 spawns a machine — one of the two shortcuts left over
             // from the number-key menu the build palette replaced.
@@ -75,7 +77,15 @@ public partial class WorldSmokeTest : Node
                 _startPositions[(Machine)node] = ((Machine)node).Position;
             }
             Check("dev key 9 spawned a machine", _startPositions.Count == 1);
-            Check("the machine registered with the sim", _sim.SystemCount == 1);
+            // One system for every machine, not one system per machine: the
+            // sim registration count must not track the entity count.
+            Check("the machine registered with the sim",
+                _sim.SystemCount == 1 && _world.Machines.Count == 1);
+            foreach (Machine machine in _startPositions.Keys)
+            {
+                Check("the machine node draws a live sim entity",
+                    _world.Machines.IsAlive(machine.Entity));
+            }
 
             // The build palette is how a tool is armed: the first entry is the
             // road tool, and Select is the same call its button makes.
@@ -193,6 +203,67 @@ public partial class WorldSmokeTest : Node
             stalled.DroppedTicks > 190 && next <= 1);
     }
 
+    /// <summary>
+    /// The entity store and the spatial hash, driven directly rather than
+    /// through a machine: like the clock, they are plain classes, so the cases
+    /// worth pinning — a recycled slot, a stale handle, an emptied bucket — can
+    /// be produced on demand instead of waited for.
+    /// </summary>
+    private void CheckEntityStorage()
+    {
+        var store = new EntityStore();
+        EntityId first = store.Create();
+        EntityId second = store.Create();
+        Check("fresh handles are alive and distinct",
+            store.IsAlive(first) && store.IsAlive(second) && first != second && store.Count == 2);
+        Check("the default handle is never alive", !store.IsAlive(EntityId.None));
+
+        Check("destroying frees the entity",
+            store.Destroy(first) && !store.IsAlive(first) && store.Count == 1);
+        Check("destroying a stale handle does nothing", !store.Destroy(first));
+
+        EntityId reused = store.Create();
+        Check("a freed slot is recycled rather than grown past",
+            reused.Index == first.Index && store.SlotCount == 2 && store.IsAlive(reused));
+        Check("the stale handle does not address its replacement",
+            reused != first && !store.IsAlive(first));
+
+        int walked = 0;
+        for (int i = 0; i < store.SlotCount; i++)
+        {
+            if (store.IsAliveSlot(i))
+            {
+                walked++;
+            }
+        }
+        Check("a slot walk reaches every live entity", walked == store.Count);
+
+        var hash = new SpatialHash();
+        var found = new List<EntityId>();
+        var cell = new Vector2I(3, 4);
+        hash.Insert(cell, reused);
+        hash.Insert(cell, second);
+        hash.Query(cell, 0, found);
+        Check("the hash answers the cell it filed under", found.Count == 2);
+
+        found.Clear();
+        hash.Query(cell + new Vector2I(1, 1), 1, found);
+        Check("a neighbourhood query reaches the cells around it", found.Count == 2);
+
+        found.Clear();
+        hash.Query(new Vector2I(20, 20), 2, found);
+        Check("a query away from everything finds nothing", found.Count == 0);
+
+        hash.Move(cell, cell + Vector2I.Down, second);
+        found.Clear();
+        hash.Query(cell, 0, found);
+        Check("moving an entity re-files it", found.Count == 1 && found[0] == reused);
+
+        hash.Remove(cell, reused);
+        hash.Remove(cell + Vector2I.Down, second);
+        Check("emptied cells are dropped from the index", hash.OccupiedCells == 0);
+    }
+
     private static double[] Frames(double delta, int count)
     {
         var frames = new double[count];
@@ -254,6 +325,15 @@ public partial class WorldSmokeTest : Node
             Check($"{machine.Name} moved", machine.SimPosition.DistanceTo(start) > 1f);
             Check($"{machine.Name} is on a road",
                 _world.IsRoad(_world.WorldToCell(machine.SimPosition)));
+
+            // The spatial index followed it across the cells it drove through,
+            // which a rebuild-free index only does if every move re-files.
+            Vector2I cell = _world.WorldToCell(machine.SimPosition);
+            var here = new List<EntityId>();
+            _world.Machines.Occupancy.Query(cell, 0, here);
+            Check($"{machine.Name} is indexed on the cell it drove to",
+                _world.Machines.CellOf(machine.Entity) == cell
+                && here.Count == 1 && here[0] == machine.Entity);
         }
         Check("the view stays between the last two sim states", _sawViewBetweenSimStates);
         Check("the view draws poses between ticks", _sawInterpolatedPose);
@@ -462,7 +542,8 @@ public partial class WorldSmokeTest : Node
         Check("road spans to both ends", _world.IsRoad(new Vector2I(-16, 0))
             && _world.IsRoad(new Vector2I(16, 0)));
         Check("cell off the road is empty", _world.GetTile(new Vector2I(0, 1)) == TileType.Empty);
-        Check("no machines at start", GetTree().GetNodesInGroup("machines").Count == 0);
+        Check("no machines at start", GetTree().GetNodesInGroup("machines").Count == 0
+            && _world.Machines.Count == 0 && _world.Machines.SlotCount == 0);
     }
 
     private (TerrainType[] Terrain, float[] Fertility) Snapshot()

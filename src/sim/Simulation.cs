@@ -13,8 +13,9 @@ namespace Arable;
 /// <see cref="ISimSystem"/> is the only thing allowed to change sim state, and
 /// it may only do so inside <see cref="ISimSystem.Tick"/>. An
 /// <see cref="ISimView"/> is handed the interpolation alpha and poses visuals
-/// from state it must treat as read-only. A node that is currently both (a
-/// <c>Machine</c>) implements both halves and keeps them in separate methods.
+/// from state it must treat as read-only. A system owns component arrays for
+/// many entities (<c>MachineSystem</c>); a view node draws exactly one row of
+/// them and writes nothing back.
 ///
 /// The loop is fed from <c>_Process</c> — real frame time — and not from
 /// <c>_PhysicsProcess</c>: a sim clocked off Godot's 60 Hz physics step would
