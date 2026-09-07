@@ -968,7 +968,9 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// required to be, so "arrived" for an order means reaching this cell —
     /// the same neighbour <see cref="PlacementRules.HasRoadAccess"/> already
     /// asks the structure tool to require, asked here for the actual cell
-    /// rather than a yes/no. Entering the footprint itself is #36's to add.
+    /// rather than a yes/no. `#36` closed road pathing on this reading of
+    /// arrival; entering the footprint, lane discipline and multiple vehicles
+    /// sharing one door stay out of scope, not queued to any issue.
     /// </summary>
     public Vector2I? FindRoadAccess(IReadOnlyList<Vector2I> cells)
     {

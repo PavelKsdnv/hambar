@@ -37,20 +37,16 @@ truck" and "redirect it instantly, it hadn't done anything yet" — from the one
 rule, which is the point: no order kind gets its own bespoke cutover logic.
 
 **Trap: "arrived" has to mean the route is empty, not that the cell matches.**
-The first cut compared `_cell[i]` (the coarse, discrete cell a continuous
-position rounds to) against the target and started the field or haul work the
-tick they matched. A vehicle enters the destination *cell* slightly before its
-position reaches the exact point `Drive` is steering it to — cell size is
-coarser than a tick's travel budget — so that read "arrived" a tick or two
-early, while `_routeNext` still had one short waypoint left uncounted. Nothing
-about ploughing or unloading broke, because those only need the cell; the
-`committed` check above did, because a nonempty route reads as mid-commitment,
-so a re-point queued in that window sat un-promoted indefinitely — the vehicle
-kept "arriving" every tick without ever finishing. Fixed by folding both tests
-into one `HasArrived`: `_routeNext[i] >= _route[i].Count && _cell[i] ==
-target`. Caught by the smoke test's mid-haul re-point section, not by
-inspection — the lesson is that this predicate is worth re-deriving from
-scratch rather than guessing at, the next time something reads it.
+The first cut compared `_cell[i]` — the coarse, discrete cell a continuous
+position rounds to — against the target and started the field or haul work the
+tick they matched. A vehicle enters the destination cell slightly before
+`Drive` finishes steering it there, so that read "arrived" a tick or two early
+while `_routeNext` still had one short waypoint uncounted. Ploughing and
+unloading never noticed, since those only need the cell; the `committed` check
+above did, because a nonempty route reads as mid-commitment, so a re-point
+queued in that window sat un-promoted forever. Fixed by folding both tests into
+one `HasArrived`: `_routeNext[i] >= _route[i].Count && _cell[i] == target`.
+Caught by the smoke test's mid-haul re-point section, not by inspection.
 
 **`OrderStep`/`OrderBlock` are recomputed every tick and never hashed.** Both
 are pure functions of the order plus already-hashed state (cargo contents,
@@ -72,9 +68,13 @@ all, can it hold anything at all.
 entering its footprint.** `WorldGrid.FindRoadAccess` walks a footprint's cells
 for the first road neighbour, in footprint order, so the answer never depends
 on a dictionary walk. A `Field` is legal with no road frontage at all — nothing
-required one when it was marked — so `null` here is `OrderBlock.NoRoadAccess`,
-the ordinary shape of a blocked vehicle, not a bug. Physically entering a
-footprint, lane discipline and multiple vehicles sharing one door are `#36`'s.
+required one when it was marked — so `null` here is `OrderBlock.NoRoadAccess`.
+`#36` folded the *other* way "nowhere to go" happens — frontage that exists but
+that `FindRoadPath` cannot reach from wherever the vehicle sits — into that
+same value rather than a second one: from the seat of the vehicle a missing
+neighbour and an unreachable one read identically. Entering a footprint, lane
+discipline and several vehicles sharing one door stay out of scope; nothing
+has asked for them yet.
 
 **A vehicle with no driver runs no order**, and "no driver" is the *resolved*
 answer: `MachineSystem.CrewOf` is deliberately raw and can hand back somebody

@@ -51,6 +51,8 @@ public partial class OrderSmokeTest : Node
     private Field _field2 = null!;
     private Structure _structA = null!;
     private Structure _structB = null!;
+    private Structure _structC = null!;
+    private Structure _structD = null!;
 
     private EntityId _tractor;
     private EntityId _truck;
@@ -105,6 +107,7 @@ public partial class OrderSmokeTest : Node
         CheckANoSuchVehicleHandleIsRefused();
         CheckAFieldWithNoRoadAccessBlocksForever();
         CheckHaulingMovesGoodsAndFinishesBeforeRepointing();
+        CheckAStructureOnADisconnectedRoadBlocksForever();
         CheckHarvestFillsTheFieldsOwnBufferNotTheVehicles();
         CheckOrdersAreHashedSimState();
 
@@ -114,22 +117,30 @@ public partial class OrderSmokeTest : Node
     /// <summary>
     /// One straight road out of the starting strip, and the fixtures this
     /// test hangs off it: a reachable field, an isolated one with no road
-    /// frontage at all, and two structures for the haul. False (and every
-    /// section below skipped) only if the generated ground has no soil at
-    /// all along a 45-cell run, which nothing in this world's noise settings
-    /// should ever produce.
+    /// frontage at all, two structures for the main haul, and a fourth
+    /// reachable structure kept free of that haul's traffic for the
+    /// disconnected-network section below. The second, short road that
+    /// section builds is deliberately **not** built here — see
+    /// <see cref="CheckAStructureOnADisconnectedRoadBlocksForever"/> — so it
+    /// cannot change where <see cref="SpawnMachine"/>'s draw-and-walk parks
+    /// the tractor, the first truck or the harvester every other section
+    /// depends on. False (and every section below skipped) only if the
+    /// generated ground has no soil at all along a 49-cell run, which nothing
+    /// in this world's noise settings should ever produce.
     /// </summary>
     private bool SetupWorld()
     {
-        _world.BuildRoadLine(new Vector2I(16, 0), new Vector2I(16, 45));
+        _world.BuildRoadLine(new Vector2I(16, 0), new Vector2I(16, 49));
 
         Vector2I? fieldSite = FindSiteAlongRoad(16, 5, 19);
         Vector2I? sourceSite = FindSiteAlongRoad(16, 20, 29);
         Vector2I? destSite = FindSiteAlongRoad(16, 31, 44);
+        Vector2I? spareSite = FindSiteAlongRoad(16, 46, 49);
         Check("a soil site beside the new road is found for the field", fieldSite != null);
         Check("...for the haul source", sourceSite != null);
         Check("...for the haul destination", destSite != null);
-        if (fieldSite == null || sourceSite == null || destSite == null)
+        Check("...for a structure not shared with that haul", spareSite != null);
+        if (fieldSite == null || sourceSite == null || destSite == null || spareSite == null)
         {
             return false;
         }
@@ -141,11 +152,14 @@ public partial class OrderSmokeTest : Node
         _field2 = _world.MarkField([new Vector2I(-40, -40)])!;
         _structA = _world.PlaceStructure([sourceSite.Value])!;
         _structB = _world.PlaceStructure([destSite.Value])!;
+        _structD = _world.PlaceStructure([spareSite.Value])!;
         Check("field 1 is marked", _field1 != null);
         Check("the isolated field is marked", _field2 != null);
         Check("the haul source is placed", _structA != null);
         Check("the haul destination is placed", _structB != null);
-        return _field1 != null && _field2 != null && _structA != null && _structB != null;
+        Check("the spare structure is placed", _structD != null);
+        return _field1 != null && _field2 != null && _structA != null && _structB != null
+            && _structD != null;
     }
 
     private void CheckAFreshVehicleHasNoOrder()
@@ -338,6 +352,78 @@ public partial class OrderSmokeTest : Node
         bool reloaded = StepUntil(() => !_machines.CargoOf(_truck)!.IsEmpty, 400, _truck, seen);
         Check("and the new order runs for real, picking up from B",
             reloaded && _machines.CargoOf(_truck)!.CountOf(ItemTypes.Grain) == 80);
+    }
+
+    /// <summary>
+    /// The second road, and the structure on it, are built here rather than in
+    /// <see cref="SetupWorld"/> — after every vehicle that needs to park on the
+    /// *first* road has already spawned and parked, so this road's cells can
+    /// never be the one <see cref="WorldGrid.SpawnMachine"/>'s draw-and-walk
+    /// picks for them. <c>_structC</c> has real road frontage — unlike
+    /// <c>_field2</c>, this is not the no-frontage case — but that frontage
+    /// sits on a road nothing connects to the network every other fixture
+    /// lives on. A truck sent to haul there loads at the reachable source,
+    /// then finds no path at all to the destination: the same
+    /// <see cref="OrderBlock.NoRoadAccess"/> as the no-frontage case, reached
+    /// through <c>WorldGrid.FindRoadPath</c> instead of
+    /// <c>FindRoadAccess</c>, and it waits there, still carrying the load,
+    /// rather than dropping it at the reachable structure that never appeared
+    /// in the order. Hauls from <c>_structD</c> rather than <c>_structA</c> so
+    /// the still-running truck from the section above — mid-cycle, delivering
+    /// back into <c>_structA</c> — cannot add unrelated stock this check would
+    /// then over-count.
+    /// </summary>
+    private void CheckAStructureOnADisconnectedRoadBlocksForever()
+    {
+        Machine? node = _world.SpawnMachine(MachineKind.Truck);
+        Check("a second truck is on the road", node != null);
+        EntityId truck2 = node!.Entity;
+
+        _world.BuildRoadLine(new Vector2I(-16, 10), new Vector2I(-16, 13));
+        Vector2I? islandSite = FindSiteAlongRoad(-16, 10, 13);
+        Check("a soil site beside the disconnected road is found", islandSite != null);
+        if (islandSite == null)
+        {
+            return;
+        }
+        _structC = _world.PlaceStructure([islandSite.Value])!;
+        Check("the structure on the disconnected road is placed", _structC != null);
+        if (_structC == null)
+        {
+            return;
+        }
+
+        Check("the disconnected structure has its own road frontage",
+            _world.FindRoadAccess(_structC.Cells) != null);
+        Check("but nothing connects that frontage to the road the fleet lives on",
+            _world.FindRoadPath(_machines.CellOf(_truck), _world.FindRoadAccess(_structC.Cells)!.Value)
+                == null);
+
+        _structD.Storage.Add(ItemTypes.Grain, 50);
+        Check("a worker can crew it",
+            _pool.TryHire(out EntityId driver) == HireResult.Ok
+            && _fleet.TryAssign(driver, truck2) == AssignResult.Ok);
+        Check("a haul from the reachable source to the disconnected structure is accepted",
+            _machines.SetOrder(truck2, Order.Haul(ItemTypes.Grain, _structD.Id, _structC.Id))
+                == SetOrderResult.Ok);
+
+        var seen = new HashSet<(OrderStep, OrderBlock)>();
+        bool loaded = StepUntil(() => !_machines.CargoOf(truck2)!.IsEmpty, 400, truck2, seen);
+        Check("the truck still reaches the reachable source and loads", loaded);
+
+        _sim.Step(30);
+        Vector2I stuckAt = _machines.CellOf(truck2);
+        Check("it never reaches the disconnected structure",
+            _machines.RouteLengthOf(truck2) == 0
+            && _machines.StepOf(truck2) == OrderStep.DrivingToDestination
+            && _machines.BlockOf(truck2) == OrderBlock.NoRoadAccess);
+
+        _sim.Step(30);
+        Check("it waits there holding the load rather than dropping it elsewhere or trying again",
+            _machines.CellOf(truck2) == stuckAt
+            && _machines.BlockOf(truck2) == OrderBlock.NoRoadAccess
+            && _machines.CargoOf(truck2)!.CountOf(ItemTypes.Grain) == 50
+            && _structC.Storage.IsEmpty);
     }
 
     /// <summary>

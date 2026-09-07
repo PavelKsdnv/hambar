@@ -24,10 +24,10 @@ namespace Arable;
 /// exactly where it was left is still the ordinary state rather than a fault.
 /// It used to wander to a random road cell forever, and that scaffolding hid
 /// the one thing M5 has to be able to show: that a farm only does what it was
-/// told to. Road pathing's finer points — entering a field's own footprint
-/// rather than stopping at its road frontage, lane discipline, several
-/// vehicles queuing for the same door — are #36's; this system only calls
-/// <c>WorldGrid.FindRoadPath</c> and stops at the nearest road cell.
+/// told to. This system calls <c>WorldGrid.FindRoadPath</c> and stops at the
+/// road cell beside a target's footprint — deliberately, per #36, rather than
+/// entering it; lane discipline and several vehicles queuing for the same
+/// door stay out of scope.
 ///
 /// <b>Not a Node.</b> It has no tree lifecycle of its own — <c>WorldGrid</c>
 /// constructs it, registers it with the <c>Simulation</c>, and is the only
@@ -89,8 +89,9 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     // allocates one list, and recycling a slot reuses it. It is also derived
     // state — a route can be replanned from the order that produced it — so
     // nothing needs to save or hash it. Filled by AdvanceOrder (below) from
-    // WorldGrid.FindRoadPath; #36 is the finer points of that drive, not
-    // whether one exists.
+    // WorldGrid.FindRoadPath, smoothed by WorldGrid.SmoothRoadPath — #36's
+    // wiring of an order's target into that call, and its NoRoadAccess block
+    // when no path exists.
     private List<Vector3>[] _route = [];
 
     // The order a vehicle is running, and the one queued to replace it once
@@ -436,7 +437,7 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     /// <summary>
     /// Spends the tick's travel budget across waypoints, so a machine turning a
     /// corner loses no distance. Kept whole through the removal of wandering:
-    /// #36 supplies the route, and this is what drives it.
+    /// order execution supplies the route, and this is what drives it.
     /// </summary>
     private void Drive(int i, float dt)
     {
