@@ -28,6 +28,16 @@ public partial class Machine : Node3D, ISimView
     [Export] public float TurnSpeed { get; set; } = 8f;
     [Export] public Color BodyColor { get; set; } = new(0.75f, 0.22f, 0.17f);
 
+    /// <summary>
+    /// Units this vehicle can carry at once. <b>The knob the hauling game is
+    /// played on</b>: it is deliberately smaller than a grown field's output
+    /// buffer, so clearing a field is several trips and a bigger farm needs
+    /// more trucks rather than the same one running faster. Per-vehicle,
+    /// because the roster M5 grows into is a small truck and a big one, and
+    /// that difference is this number.
+    /// </summary>
+    [Export] public int CargoCapacity { get; set; } = 50;
+
     private MachineSystem? _machines;
     private Simulation? _sim;
 
@@ -42,6 +52,14 @@ public partial class Machine : Node3D, ISimView
 
     /// <summary>Set once it strands off-road: it stays alive but stops moving.</summary>
     public bool Parked => _machines?.IsParked(Entity) ?? false;
+
+    /// <summary>
+    /// What the machine is carrying, read off its row. A view read like the
+    /// two above — the node holds no cargo of its own, and
+    /// <see cref="CargoCapacity"/> is the spawn input the row was sized from,
+    /// not the size it is now.
+    /// </summary>
+    public ItemBuffer? Cargo => _machines?.CargoOf(Entity);
 
     /// <summary>Binds the node to the row it draws. Called before it enters the tree.</summary>
     public void Setup(MachineSystem machines, EntityId entity, Color color)

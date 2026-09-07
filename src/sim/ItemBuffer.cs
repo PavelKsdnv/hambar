@@ -21,6 +21,13 @@ namespace Arable;
 /// nothing in the design has asked for one. A buffer holding several goods
 /// therefore shares its room between them, first come first served.
 ///
+/// <b>Moving a good between two carriers is <see cref="Transfer"/> or
+/// <see cref="TryTransfer"/>, never a <see cref="Remove"/> beside an
+/// <see cref="Add"/>.</b> Every pairing written by hand is another place the
+/// two halves can disagree about how much moved, and an item lost that way
+/// surfaces as a determinism divergence with nothing pointing back at the line
+/// that caused it. One entry point means one order of operations to get right.
+///
 /// <b>Stacks are held ascending by <see cref="ItemType.Id"/>, one per good.</b>
 /// Merging on insert keeps "how much grain is in here" a single number rather
 /// than a walk, and the sorted order makes the hash walk canonical without a
@@ -160,6 +167,78 @@ public sealed class ItemBuffer
         }
         Total -= taken;
         return taken;
+    }
+
+    /// <summary>
+    /// Moves as much of one good as both ends allow and answers how much went
+    /// — the partial door of <see cref="Add"/>, one level up: a truck pouring
+    /// into a silo that fills halfway through keeps the rest of its load and
+    /// comes back. Bounded by three numbers at once (what was asked for, what
+    /// the source holds, what the destination has room for), so a caller never
+    /// has to check any of them first.
+    ///
+    /// <b>The destination is written first, and the source is debited by what
+    /// it accepted.</b> That order is the whole guarantee: taking first and
+    /// then failing to deposit is the shape that loses grain, and it fails
+    /// silently — the sum across the two buffers drops, nothing throws, and the
+    /// determinism harness reports it thousands of ticks later as a hash
+    /// divergence with no cause attached. Written this way the intermediate
+    /// state double-counts instead, which cannot escape: no tick boundary, no
+    /// hash and no other caller runs between the two lines, and the debit is
+    /// bounded by an accept that already happened, so it cannot come up short.
+    ///
+    /// <b>A buffer never transfers to itself</b> — that is a no-op answering 0,
+    /// not a move of its own contents onto themselves. With the add first it
+    /// would otherwise "succeed" by consuming its own room and handing it back,
+    /// which is a lie a caller iterating a list of carriers would believe.
+    ///
+    /// One good per call, on purpose. Emptying a mixed buffer is a loop over
+    /// <see cref="StackAt"/> in the caller, which is where the decision about
+    /// what to prioritise belongs — and a drain written in here would be a walk
+    /// over a collection it is itself mutating.
+    /// </summary>
+    public static int Transfer(ItemBuffer from, ItemBuffer to, ItemType type, int quantity)
+    {
+        if (ReferenceEquals(from, to) || type.IsNone || quantity <= 0)
+        {
+            return 0;
+        }
+
+        int moving = Math.Min(quantity, from.CountOf(type));
+        if (moving <= 0)
+        {
+            return 0;
+        }
+
+        int accepted = to.Add(type, moving);
+        from.Remove(type, accepted);
+        return accepted;
+    }
+
+    /// <summary>
+    /// Moves the whole lot, or <b>nothing at all</b> — the atomic door,
+    /// <see cref="TryAdd"/> one level up. What a haul order takes when its unit
+    /// of work is a load rather than a trickle: a delivery that arrived half
+    /// finished would leave the order needing a "partly delivered" state that
+    /// nothing has, so the refusal leaves the load on the truck instead.
+    ///
+    /// Refused whole when the source is short as well as when the destination
+    /// is full: a caller asking for a quantity it has not got is a bug being
+    /// reported, not a smaller transfer being negotiated. Use
+    /// <see cref="Transfer"/> for that.
+    /// </summary>
+    public static bool TryTransfer(ItemBuffer from, ItemBuffer to, ItemType type, int quantity)
+    {
+        if (ReferenceEquals(from, to)
+            || type.IsNone
+            || quantity <= 0
+            || from.CountOf(type) < quantity
+            || !to.HasRoomFor(quantity))
+        {
+            return false;
+        }
+        Transfer(from, to, type, quantity);
+        return true;
     }
 
     /// <summary>Throws away the contents, keeping the capacity.</summary>

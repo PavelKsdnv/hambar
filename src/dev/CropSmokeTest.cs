@@ -183,6 +183,7 @@ public partial class CropSmokeTest : Node
         CheckCropStateIsHashed();
         CheckAFullBufferRefusesTheHarvest();
         CheckTheOutputBufferIsHashed();
+        CheckTransfersConserveItems();
         CheckThePostHarvestStageIsTunable();
         CheckGrowthIsCountedInTicksNotSeconds();
         CheckBulldozingClosesTheRow();
@@ -543,6 +544,73 @@ public partial class CropSmokeTest : Node
         right.OutputOf(b)!.Add(ItemTypes.Grain, 1);
         Check("and the same unit in the other brings them back together",
             HashOf(left) == HashOf(right));
+    }
+
+    /// <summary>
+    /// <b>The invariant M5's hauling is built on: a transfer conserves items.</b>
+    /// Every case here asserts the sum across both ends as well as the answer,
+    /// because the failure this is guarding against is not a wrong return value
+    /// — it is grain that stopped existing, which nothing notices until the
+    /// determinism harness reports a hash divergence with no cause attached
+    /// thousands of ticks later.
+    ///
+    /// On bare buffers rather than a field and a truck: the arithmetic of a
+    /// full destination and a short source is the whole subject, and neither
+    /// carrier has anything to add to it.
+    /// </summary>
+    private void CheckTransfersConserveItems()
+    {
+        var field = new ItemBuffer(100);
+        var truck = new ItemBuffer(10);
+        field.Add(ItemTypes.Grain, 40);
+        int total = field.Total + truck.Total;
+
+        Check("a transfer that fits moves exactly what was asked for",
+            ItemBuffer.Transfer(field, truck, ItemTypes.Grain, 4) == 4
+            && truck.CountOf(ItemTypes.Grain) == 4 && field.CountOf(ItemTypes.Grain) == 36);
+        Check("and the two ends between them hold what they did before",
+            field.Total + truck.Total == total);
+
+        Check("a transfer into a destination with less room fills it and says how much",
+            ItemBuffer.Transfer(field, truck, ItemTypes.Grain, 30) == 6 && truck.IsFull);
+        Check("the overflow stayed in the source rather than evaporating",
+            field.CountOf(ItemTypes.Grain) == 30 && field.Total + truck.Total == total);
+        Check("a transfer into a full destination moves nothing at all",
+            ItemBuffer.Transfer(field, truck, ItemTypes.Grain, 5) == 0
+            && field.Total + truck.Total == total);
+
+        // Back the other way, which is also how the truck is emptied for the
+        // atomic cases below: a Remove here would take the units out of the
+        // world and quietly break the sum every check above asserts.
+        Check("the same door runs the other way, tipping the load back",
+            ItemBuffer.Transfer(truck, field, ItemTypes.Grain, truck.Total) == 10
+            && truck.IsEmpty && field.CountOf(ItemTypes.Grain) == 40
+            && field.Total + truck.Total == total);
+
+        // The atomic door, which is what an order with a load-sized unit of
+        // work takes: whole, or the load stays where it was.
+        Check("the whole-or-nothing door refuses a load the destination cannot take",
+            !ItemBuffer.TryTransfer(field, truck, ItemTypes.Grain, 11)
+            && truck.IsEmpty && field.CountOf(ItemTypes.Grain) == 40);
+        Check("and refuses a load the source has not got, rather than moving less",
+            !ItemBuffer.TryTransfer(field, truck, ItemTypes.Grain, 200)
+            && truck.IsEmpty && field.CountOf(ItemTypes.Grain) == 40);
+        Check("a load that fits at both ends goes over whole",
+            ItemBuffer.TryTransfer(field, truck, ItemTypes.Grain, 10)
+            && truck.CountOf(ItemTypes.Grain) == 10 && field.CountOf(ItemTypes.Grain) == 30);
+        Check("a transfer of nothing-at-all moves nothing",
+            ItemBuffer.Transfer(field, truck, ItemType.None, 5) == 0
+            && field.Total + truck.Total == total);
+
+        // The trap the add-then-debit order would otherwise walk into: a buffer
+        // asked to fill itself would consume its own room and hand it straight
+        // back, reporting a move that did not happen.
+        Check("a buffer never transfers to itself, and says so",
+            ItemBuffer.Transfer(field, field, ItemTypes.Grain, 5) == 0
+            && !ItemBuffer.TryTransfer(field, field, ItemTypes.Grain, 5)
+            && field.CountOf(ItemTypes.Grain) == 30);
+        Check("nothing was lost or made across every case above",
+            field.Total + truck.Total == total);
     }
 
     /// <summary>

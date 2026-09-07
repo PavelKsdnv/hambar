@@ -199,6 +199,16 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// </summary>
     [Export] public int FieldOutputHarvests { get; set; } = CropSystem.DefaultOutputHarvests;
 
+    /// <summary>
+    /// Units a building holds (<see cref="Structure.Storage"/>). An order of
+    /// magnitude over a field's buffer, because a silo is where a farm's output
+    /// piles up between sales while the fields keep cutting — a store that
+    /// filled as fast as one field would make hauling a shuffle rather than a
+    /// gain. One number for every building while there is one kind of building;
+    /// M6's roster is what makes it per-kind.
+    /// </summary>
+    [Export] public int StructureStorageCapacity { get; set; } = 500;
+
     private static readonly Color[] MachineColors =
     [
         new(0.75f, 0.22f, 0.17f), // tractor red
@@ -630,7 +640,8 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
 
         _structuresCreated++;
         var structure = new Structure(
-            _structuresCreated, $"Structure {_structuresCreated}", cells);
+            _structuresCreated, $"Structure {_structuresCreated}", cells,
+            StructureStorageCapacity);
         foreach (Vector2I cell in cells)
         {
             DemolishStructureAt(cell);
@@ -1300,6 +1311,11 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
             {
                 member.Write(cell);
             }
+            // What it is holding. A building is not an entity row yet, so its
+            // store is hashed here with the rest of it rather than by a system
+            // walking slots — the line moves with the object when M5 or M6
+            // gives buildings state worth ticking.
+            structure.Storage.HashState(member);
             fold = StateHash.Fold(fold, member.Value);
         }
         hash.WriteUnordered(fold, _structures.Count);
@@ -1339,11 +1355,12 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         }
 
         // The node is instanced first only to read the exports the scene
-        // carries — Speed and TurnSpeed are spawn input to the arrays, and the
-        // sim never looks at the node again.
+        // carries — Speed, TurnSpeed and CargoCapacity are spawn input to the
+        // arrays, and the sim never looks at the node again.
         var machine = MachineScene.Instantiate<Machine>();
         Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
-        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed);
+        EntityId entity = _machines.Spawn(
+            spawn, machine.Speed, machine.TurnSpeed, machine.CargoCapacity);
         machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
         machine.Position = spawn;
         AddChild(machine);

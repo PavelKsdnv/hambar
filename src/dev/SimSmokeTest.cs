@@ -324,6 +324,7 @@ public partial class SimSmokeTest : Node
         if (probeWorldState)
         {
             CheckPlacementIsHashed(sim, world);
+            CheckCarrierInventoriesAreHashed(sim, world);
         }
 
         main.QueueFree();
@@ -350,6 +351,55 @@ public partial class SimSmokeTest : Node
         Check("placing a tile changes the hash", SimStateHash.Of(sim) != before);
         world.SetTile(free.Value, TileType.Empty);
         Check("clearing it again brings the hash back", SimStateHash.Of(sim) == before);
+    }
+
+    /// <summary>
+    /// What a carrier is holding is sim state, so a run whose truck came home
+    /// loaded must not hash like one whose truck came home empty. Worth its own
+    /// check for the reason the placement layer is: a column left out of a
+    /// <c>HashState</c> is invisible to every other assertion here — both runs
+    /// would agree perfectly while the harness watched none of the cargo.
+    ///
+    /// Run on a world about to be freed, after its hashes are recorded, so
+    /// writing to sim state outside a tick cannot reach the comparison.
+    /// </summary>
+    private void CheckCarrierInventoriesAreHashed(Simulation sim, WorldGrid world)
+    {
+        ulong before = SimStateHash.Of(sim);
+        ItemBuffer? cargo = world.Machines.CargoOf(world.Machines.IdAt(0));
+        Check("a spawned machine has a cargo hold with room in it",
+            cargo != null && cargo.IsEmpty && cargo.Capacity > 0);
+        if (cargo == null)
+        {
+            return;
+        }
+
+        cargo.Add(ItemTypes.Grain, 1);
+        Check("one unit in a machine's hold moves the hash", SimStateHash.Of(sim) != before);
+        cargo.Remove(ItemTypes.Grain, 1);
+        Check("unloading it again brings the hash back", SimStateHash.Of(sim) == before);
+
+        Vector2I? free = FindEmptyCell(world);
+        if (free == null)
+        {
+            return;
+        }
+
+        Structure? store = world.PlaceStructure([free.Value]);
+        ulong placed = SimStateHash.Of(sim);
+        Check("a placed building has a store sized by the world's tunable",
+            store != null && store.Storage.IsEmpty
+            && store.Storage.Capacity == world.StructureStorageCapacity);
+        if (store == null)
+        {
+            return;
+        }
+
+        store.Storage.Add(ItemTypes.Grain, 1);
+        Check("one unit in a building's store moves the hash", SimStateHash.Of(sim) != placed);
+        store.Storage.Remove(ItemTypes.Grain, 1);
+        Check("taking it out again brings the hash back", SimStateHash.Of(sim) == placed);
+        world.SetTile(free.Value, TileType.Empty);
     }
 
     /// <summary>

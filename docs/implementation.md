@@ -9,7 +9,7 @@ it, stop (`sed -n '/^## World grid/,/^## /p'`). It holds only what reading `src/
 does not recover: why a thing is shaped as it is, what was rejected, what is
 deferred. CLAUDE.md carries the rest of the rule and the budget.
 
-Last updated: 2026-09-06.
+Last updated: 2026-09-07.
 
 ## Index
 
@@ -20,7 +20,7 @@ Last updated: 2026-09-06.
 | `## Simulation` | touching the tick, sim state, or anything the view draws |
 | `### Entity storage` | adding an entity kind, or asking what is near a cell |
 | `### State hashing` | hashing sim state, or chasing a determinism bug |
-| `### Items and buffers` | carrying, storing or counting a good |
+| `### Items and buffers` | carrying, storing, moving or counting a good |
 | `## Game calendar` | touching days, seasons, game speed or pause |
 | `## Randomness` | drawing a random number, or seeding anything |
 | `## Camera` | touching `CameraRig`, projection or input |
@@ -116,33 +116,29 @@ that depends on spawn history, plus an allocation per entity.
 
 > **Determinism is a claim nobody can eyeball, so it is a number.**
 > `SimStateHash.Of(sim)` walks all sim state into 64 bits, taken after *every*
-> tick of two runs from one seed because one hash at the end answers "did they
-> diverge" with a boolean and bisecting by hand is the afternoon this prevents.
-> M10 takes the same number either side of a save/load cycle — hence a
-> `Simulation` argument and nothing test-shaped.
+> tick of two runs from one seed — one hash at the end answers only "did they
+> diverge", and bisecting by hand is the afternoon this prevents. M10 takes the
+> same number either side of a save/load, hence a `Simulation` argument and
+> nothing test-shaped.
 
 **Order independence is the whole difficulty**: two runs holding identical state
 can enumerate a `Dictionary` differently, so hashing that walk in order reports
 a divergence that is not one. Entities go in by slot walk, streams by
-`RandomStreams.Ordered`, and anything whose order is not itself state — placed
-tiles, the registries, the state sources — is folded with a commutative *add* of
-mixed member hashes, plus a count. Xor was rejected: it cancels a member against
-its duplicate.
+`RandomStreams.Ordered`, and anything whose order is not itself state is folded
+with a commutative *add* of mixed member hashes, plus a count. Xor was rejected:
+it cancels a member against its duplicate.
 
 **State hashes itself** (`IHashableState`) rather than a walker reaching into
 everyone's arrays, so the milestone that adds a column adds one line where it is
 already editing.
 
-**Left out on purpose.** Speed, the accumulator behind `Alpha` and
-`DroppedTicks` are real-time quantities — hashing them fails the harness on a
-slow frame, which is how a determinism check gets switched off. Derived state
-(routes, the spatial hash, cell → owner lookups) is out because M10 will not save
-it and a correct rebuild would then fail the comparison; the cost is a machine
-planning a *different* route showing one tick late. Floats go in **by their
-bits**: determinism is bit-exact, and rounding hides the drift.
-
-**`Simulation.Step(n)` is the offline door**, because feeding `_Process` a
-synthetic delta measures the accumulator rather than the sim.
+**Left out on purpose.** Speed, the tick accumulator and `DroppedTicks` are
+real-time quantities — hashing them fails the harness on a slow frame, which is
+how a determinism check gets switched off. Derived state (routes, the spatial
+hash, cell → owner lookups) is out because M10 will not save it and a correct
+rebuild would then fail the comparison; the cost is a machine planning a
+*different* route showing one tick late. Floats go in **by their bits**:
+determinism is bit-exact, and rounding hides the drift.
 
 **Trap for M10:** the entity free list is not hashed, only *which* slots are
 free. A load rebuilding it in another order hashes equal today and hands out
@@ -163,7 +159,32 @@ reordered, because a save writes the number.
 "the output is full, so production stops" is what M6's chains are made of.
 Rejected: per-good limits, needing a rule for splitting a mixed buffer's room
 that nothing has asked for. Contents are **never dropped to fit** a capacity
-lowered under them — that is grain vanishing because a corner got bulldozed.
+lowered under them, and a surplus is never spilled: both are grain evaporating,
+which is the logistics game deleting itself.
+
+**A move between two buffers is `Transfer`/`TryTransfer`, never a `Remove`
+beside an `Add`** — a hand-written pairing is a place the halves disagree about
+how much moved, and the item lost that way surfaces much later as a hash
+divergence with nothing pointing at the line. The pair mirrors `Add`/`TryAdd`
+rather than inventing a third convention. **The destination is credited first
+and the source debited by what it accepted**: taking first and then failing to
+deposit is the shape that loses items, while this order only double-counts,
+across two statements with nothing in between. Hence a buffer transferring to
+*itself* is a no-op answering 0 — add-then-debit would otherwise "succeed" by
+handing back its own room — and one call moves one good, a mixed drain being a
+priority decision the caller owns.
+
+**Every carrier holds the same type**: a field's crop row, a vehicle's `Cargo`,
+a building's `Storage`, so a haul is one call whatever its ends are. Each is
+sized from an export, one capacity per kind while there is one kind of each, and
+a truck's is deliberately under a grown field's so clearing one is several trips.
+Per-kind sizes are M6's roster, and a building's *single* store is not an
+input/output pair until M6 says which side a silo's is. A row takes a **fresh**
+buffer at spawn, never the recycled slot's emptied out: a generation invalidates
+a stale *handle*, never a stale reference to the object behind one.
+
+**Deferred:** an item having a position of its own; until then a unit exists
+only inside some buffer, which is what makes "nothing was lost" testable.
 
 ## Game calendar (`src/sim/GameCalendar.cs`, `src/ui/TimeControls.cs`)
 
@@ -237,11 +258,10 @@ system, not a central list; a typo therefore opens a *new* stream, hence constan
 **authored** seed and `Streams.WorldSeed` the live one — a reseed does not write
 back. Out of the tree there is no `Simulation` to forward to: a *read* is silent
 (the throwaway registry answering it is dropped on entry), a *write* is dropped
-with it and warns. **`FastNoiseLite` is not a stream** (one int in, its own field out), so
-terrain takes its int from `DeriveSeed`; that killed the `WorldSeed + 7919` mask
-offset — adjacent noise seeds are not guaranteed unrelated — and **changed the
-generated map**, so the same authored seed gives different terrain than before
-#24. And **never `string.GetHashCode`**: randomised per process, it would seed a
+with it and warns. **`FastNoiseLite` is not a stream** (one int in, its own field
+out), so terrain takes its int from `DeriveSeed` rather than an offset like
+`WorldSeed + 7919`: adjacent noise seeds are not guaranteed unrelated. And
+**never `string.GetHashCode`**: randomised per process, it would seed a
 different stream every launch, a bug reproducing in no single run — the name
 hash is FNV-1a over the bytes, pinned to golden values in the smoke test.
 
@@ -275,8 +295,9 @@ both — a registry entry here and a crop row in the sim (`### Crops`).
 **Two layers, stored separately.** What the land *is* (terrain plus fertility,
 from the seed) and what the player *built* (`TileType`, sparse) never share
 storage — which is what makes bulldozing lossless: clearing back to `Empty`
-leaves the terrain untouched. `GetTerrain` answers `OutOfBounds` rather than
-throwing, so "not on the map" is one call.
+leaves the terrain untouched. One `GridMap` draws both, placement *hiding*
+terrain rather than overwriting it. `GetTerrain` answers `OutOfBounds` rather
+than throwing, so "not on the map" is one call.
 
 **Terrain generation** (`GenerateTerrain`, run before the start road):
 
@@ -292,9 +313,6 @@ throwing, so "not on the map" is one call.
 - Re-running it is **bit-exact** for a seed and never touches the placement
   layer. The starting road strip (z = 0, x = -16..16) is **carved** to soil
   rather than biasing the noise, so the seed still owns every other cell.
-
-**How the two layers render.** One `GridMap` draws both, placement *hiding*
-terrain rather than overwriting it.
 
 **A field cell draws its crop stage** (`### Crops`): one MeshLibrary item per
 `CropStage`, consecutive from a base id, the arithmetic the fertility tiers
@@ -312,11 +330,11 @@ event out of `CropSystem`, which would run the view half-way through a tick and
 point the dependency from the sim at the renderer. `MarkField` draws its own new
 field rather than waiting for a frame, because a stepped run has none.
 
-**Stage art needs height *and* colour**: at `ZoomMax` a 2 m cell is a few pixels
-tall so only colour reads, while close in height is what separates two browns.
-**Keep the ramp out of the terrain palette** — grey is rock, olive is soil — a
-trap paid for once, when a grey-brown fallow field read as a rock outcrop at the
-zoom limit. Warm earth → green → gold is what is left, and M10 inherits it.
+**Stage art needs height *and* colour**: at `ZoomMax` only colour reads, close in
+height is what separates two browns. **Keep the ramp out of the terrain palette**
+— grey is rock, olive is soil — a trap paid for once, when a grey-brown fallow
+field read as a rock outcrop at the zoom limit. Warm earth → green → gold is
+what is left, and M10 inherits it.
 
 **Road-network queries live here**, because they are questions about the grid
 rather than about a vehicle:
@@ -354,6 +372,9 @@ system, because machines run on the road queries it already owns.
   each frame from the row's last two sim poses; `SimPosition` is where the
   machine is. The exports are spawn *input*, read once off the instanced scene
   and copied into the arrays — changing one on a live node does nothing.
+- **A machine carries a load** it cannot yet fill or empty (`### Items and
+  buffers`): the column and its place in the hash are here so #34's orders add
+  the *moving*, not the storage, and a truck that hauled shows in the hash.
 - **Behavior:** wander. Smoothing keeps a stair-stepped diagonal road from being
   driven as a zigzag. A tick spends a travel budget (`Speed·dt`) across waypoints
   so corners lose no distance, and the previous pose is snapshotted for *every*
@@ -499,12 +520,11 @@ position. The season is read live off `GameCalendar` instead: it is sim state,
 and a copy taken at startup is wrong the first time a save loads in autumn.
 
 **A harvest deposits a stack into the field's own buffer** (`### Items and
-buffers`), reached through the crop row like the stage, and is **refused whole**
-when the yield will not fit (`OutputFull`), leaving the crop standing ripe —
-M4's only backpressure, and M5's collection is what clears it. Rejected:
-spilling the surplus, which teaches that uncollected grain evaporates and is the
-logistics game deleting itself; and a partial fill, needing a half-cut field the
-state machine has no stage for. **Yield is the ground, not the growth banked** —
+buffers`), reached through the crop row like the stage, and takes that section's
+atomic door — **refused whole** when the yield will not fit (`OutputFull`),
+leaving the crop standing ripe, because a partial fill would need a half-cut
+field the state machine has no stage for. M4's only backpressure, and M5's
+collection is what clears it. **Yield is the ground, not the growth banked** —
 `YieldPerCell × area × fertility`, floored — because banked growth stops at ripe
 and is the same for every field that finished, while the ground pays fertility
 twice: good soil ripens sooner *and* cuts heavier. Season stays out on purpose,
@@ -515,23 +535,20 @@ a second pushed-down column**, taken with fertility; it sizes the buffer at
 
 **Traps.** A row takes its ground at `MarkField` and whenever the field's cells
 change, never per tick — so moving `FertilityChunkSize` at runtime re-aggregates
-fields marked *after* it, not those already standing. That holds because the size
-is frozen onto the `Field` at marking and re-read from there: without it, the
-export being live would make bulldozing one corner re-chunk a field at a
-granularity it was never marked at. Neither the multiply order nor the chunk walk
+fields marked *after* it, not those already standing. The size is frozen onto the
+`Field` at marking and re-read from there; without that, the live export would
+re-chunk a field at a granularity it was never marked at the moment one corner
+of it was bulldozed. Neither the multiply order nor the chunk walk
 may be reordered (float arithmetic is not associative), which is why the walk
 sorts the cells by (chunk row, chunk column, input index) and never enumerates a
 dictionary — the index breaks every tie, so summation order is a function of the
 cells alone. Sorted rather than bucketed into an array over the chunk bounding
-box, which is what it did first: the cell list is unvalidated and cells off the
-map are legal, so two far-apart cells size that array by the *gap* between them —
-unbounded allocation, through a width × height multiply that wraps negative
-first. Sorting costs what the cells cost. The factors hash beside
-the thresholds, or two differently tuned worlds hash alike. A row gets a *fresh*
-`ItemBuffer` at `Create`: a generation invalidates a stale handle, never a stale
-reference to the object behind one. And the harvested good is configuration, not
-a column, exactly as the crop kind is — both become columns the day a second
-crop lands.
+box, which is what it did first: cells off the map are legal, so two far-apart
+ones size that array by the *gap* between them — unbounded allocation through a
+width × height multiply that wraps negative first. The factors hash beside the
+thresholds, or two differently tuned worlds hash alike. And the harvested good
+is configuration, not a column, exactly as the crop kind is — both become
+columns the day a second crop lands.
 
 ### Structures (`src/world/Structure.cs`, `src/ui/build/StructureBuildTool.cs`)
 
@@ -545,7 +562,9 @@ needs behaviour: M5 sends a vehicle to *a silo*, M6 hangs a recipe off *that*
 mill, a save has to name it. `Id` is that handle — creation order, never reused,
 resolving to null once the building is gone, so an order pointing at a
 demolished mill fails loudly rather than hitting its replacement. Bolting the
-entity on later would have meant migrating every bare tile already stamped.
+entity on later would have meant migrating every bare tile already stamped. It
+now carries a `Storage` buffer (`### Items and buffers`) hashed with the rest of
+the registry entry, so a building is state before it is an entity row.
 
 **Where a building parts company with a field** — the one deliberate asymmetry:
 a building is **atomic**. A field shrinks cell by cell; clearing *any* cell of a
@@ -696,20 +715,19 @@ settle by **time**, not frame count, because the rig smooths on `delta`.
 
 ## Not yet implemented (deliberate)
 
-- **Nothing moves an item, and no machine works a field.** A harvest fills the
-  field's own buffer, the panel names what is in it, and there it stays: hauling
-  and the work itself are M5's, and a full buffer is M4's only backpressure.
-- **Structures have no behavior** and there is one generic kind; the roster is
-  M5's (silo) and M6's (cleaner, mill, bakery). They are also the last placed
-  thing still a plain object in `WorldGrid`'s registries rather than an entity
-  row, and move when M5 gives them state worth ticking.
+- **Nothing moves an item, and no machine works a field.** Every carrier has a
+  hold and there is one call that moves a good between two of them; what nobody
+  has written is the *deciding* — the orders and the silo, later in M5.
+- **Structures have no behavior** beyond holding what is put in them, and there
+  is one generic kind; the roster is M5's (silo) and M6's (cleaner, mill,
+  bakery). They are also the last placed thing still a plain object in
+  `WorldGrid`'s registries rather than an entity row.
 - **Player interaction is the palette, four tools, the time bar and the field
   panel**, plus three dev keys. The unlock *seam* exists (`ToolAvailability`)
   and none of the rules — M8's; the HUD pass is M10's.
-- **Money is a stub number**: placements are charged and the balance is shown,
-  but nothing puts money *in*, and every price is a tunable placeholder.
-- **Removing something refunds nothing**, on purpose: `RefundFor` has the shape
-  of a refund and none of the economics, which are M7's.
+- **Nothing puts money in and nothing refunds** — both seams exist and pay
+  nothing, and the economics behind them are M7's (`### Money and build costs`,
+  `### Bulldozing`).
 - **Nothing stops a road being bulldozed out from under a machine** driving it,
   and nothing re-checks a building's road access when the road beside it goes.
   Both are M5 cases; the notes sit on `WorldGrid.Clear`, where M5 will be.

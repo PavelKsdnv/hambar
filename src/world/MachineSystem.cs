@@ -48,8 +48,8 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     private readonly SpatialHash _occupancy = new();
 
     // Parallel component arrays, all sized to _entities.SlotCount. Kept
-    // deliberately few: M4/M5 decide what machines really carry, and inventing
-    // components now would be guessing.
+    // deliberately few — a column is added by the milestone that reads it, not
+    // in advance of one.
     private Vector3[] _position = [];
     private Vector3[] _previousPosition = [];
     private float[] _yaw = [];
@@ -59,6 +59,12 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     private bool[] _parked = [];
     private Vector2I[] _cell = [];
     private int[] _routeNext = [];
+
+    // What the vehicle is carrying. A reference-typed column like the crop
+    // system's output buffers, and for the same reason: the contents are a
+    // container with a capacity, not a number, and every carrier in the game
+    // holds the same type so a haul can move between any two of them.
+    private ItemBuffer[] _cargo = [];
 
     // The one reference-typed column left. The route list is allocated once per
     // slot and refilled in place, so a machine that plans a thousand routes
@@ -93,7 +99,7 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     /// Adds a machine at a world position. Every component is written here,
     /// because a recycled slot still holds the previous occupant's values.
     /// </summary>
-    public EntityId Spawn(Vector3 position, float speed, float turnSpeed)
+    public EntityId Spawn(Vector3 position, float speed, float turnSpeed, int cargoCapacity)
     {
         EntityId id = _entities.Create();
         EnsureCapacity(_entities.SlotCount);
@@ -104,6 +110,12 @@ public sealed class MachineSystem : ISimSystem, IHashableState
         _speed[i] = speed;
         _turnSpeed[i] = turnSpeed;
         _parked[i] = false;
+        // A fresh buffer, not the recycled slot's one emptied out — the same
+        // rule CropSystem.Create keeps. A generation bump invalidates a stale
+        // *handle*, and nothing invalidates a stale reference to the object
+        // behind it: reusing the instance would show whoever still held the
+        // dead machine's buffer the new machine's load.
+        _cargo[i] = new ItemBuffer(cargoCapacity);
         _route[i].Clear();
         _routeNext[i] = 0;
         _cell[i] = _world.WorldToCell(position);
@@ -145,6 +157,16 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     /// <summary>The cell the machine is filed under in <see cref="Occupancy"/>.</summary>
     public Vector2I CellOf(EntityId id) =>
         _entities.IsAlive(id) ? _cell[id.Index] : Vector2I.Zero;
+
+    /// <summary>
+    /// What the machine is carrying, or null for a dead handle — the buffer
+    /// itself, so a caller can hand it straight to
+    /// <see cref="ItemBuffer.Transfer"/>. Writing to it is a sim state write
+    /// and belongs inside a tick; nothing loads or unloads a machine yet, which
+    /// is #34's job.
+    /// </summary>
+    public ItemBuffer? CargoOf(EntityId id) =>
+        _entities.IsAlive(id) ? _cargo[id.Index] : null;
 
     /// <summary>Waypoints left in the machine's current route.</summary>
     public int RouteLengthOf(EntityId id) =>
@@ -221,6 +243,10 @@ public sealed class MachineSystem : ISimSystem, IHashableState
             hash.Write(_turnSpeed[i]);
             hash.Write(_parked[i]);
             hash.Write(_cell[i]);
+            // The load is state a tick moves and a save writes; two runs that
+            // hauled differently must not hash alike. The buffer's own stack
+            // order is canonical, so this walk needs no fold.
+            _cargo[i].HashState(hash);
         }
     }
 
@@ -345,6 +371,7 @@ public sealed class MachineSystem : ISimSystem, IHashableState
         Array.Resize(ref _parked, capacity);
         Array.Resize(ref _cell, capacity);
         Array.Resize(ref _routeNext, capacity);
+        Array.Resize(ref _cargo, capacity);
         Array.Resize(ref _route, capacity);
 
         // An empty List allocates no backing array until the first Add, so
