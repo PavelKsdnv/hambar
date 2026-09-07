@@ -58,10 +58,11 @@ WorldSeed = 20260904
 SpeedSteps = PackedFloat32Array(0, 1, 2, 3)
 StartSpeedIndex = 1
 
-[node name="World" type="Node3D" parent="." node_paths=PackedStringArray("Labour")]
+[node name="World" type="Node3D" parent="." node_paths=PackedStringArray("Labour", "Economy")]
 script = ExtResource("2_world")
 MachineScene = ExtResource("4_machine")
 Labour = NodePath("../LabourPool")
+Economy = NodePath("../Economy")
 
 [node name="GridMap" type="GridMap" parent="World"]
 mesh_library = ExtResource("3_tiles")
@@ -92,6 +93,16 @@ DisplayName = "Silo"
 Icon = ExtResource("15_icon_structure")
 CostPerCell = 250
 StorageCapacity = 500
+
+[node name="DepotTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
+script = ExtResource("9_structuretool")
+World = NodePath("../World")
+Economy = NodePath("../Economy")
+Kind = 1
+DisplayName = "Depot"
+Icon = ExtResource("15_icon_structure")
+CostPerCell = 300
+StorageCapacity = 200
 
 [node name="BulldozeTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("10_bulldozetool")
@@ -135,7 +146,7 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("12_palette")
-Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../BulldozeTool")]
+Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../DepotTool"), NodePath("../../BulldozeTool")]
 
 [node name="TimeControls" type="Control" parent="Hud" node_paths=PackedStringArray("Sim")]
 anchor_right = 1.0

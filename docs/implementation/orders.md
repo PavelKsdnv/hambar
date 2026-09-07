@@ -101,3 +101,15 @@ single call, bounded by capacity on both ends, rather than topping up over
 several ticks: nothing yet produces goods fast enough for the difference to
 matter, and a policy for "wait for a fuller load" is a decision nobody has
 asked for yet.
+
+**`#38`'s depot special-cases the unload half of that split, and only after
+the fact.** `RunHaulOrder` runs the ordinary `Transfer` into `structure.Storage`
+first — so `OrderBlock.DestinationFull` is still decided exactly the way it is
+for a silo — and only for `StructureKind.Depot` does it then remove what just
+landed and hand it to `Economy.Sell`, in the same tick. A depot's `Storage` is
+therefore a mouth, not a store: written to only to be drained before the next
+delivery can ever arrive, so it needs capacity for one truckload, never an
+economy, and a repeat delivery never sees `DestinationFull` because nothing is
+left behind to fill it. `Economy.PriceOf` is the one function `#38` puts a
+unit's worth behind — a flat constant per `ItemType` today, M7's live series
+later — so that swap touches nothing in this file or in `MachineSystem`.

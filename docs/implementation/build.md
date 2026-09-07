@@ -63,29 +63,26 @@ tool gets it free and the palette knows no rule.
 > reached with `WorldGrid.GetStructure`; the cells carry `TileType.Structure`
 > only so the view can draw them and `PlacementRules` can call them occupied.
 
-**Why an entity and not just a tile value.** `TileType.Structure` says that *a*
-building is here, not *which*, and identity is needed long before behaviour is:
-`#37` sends a vehicle to *a silo* by `Id`, M6 hangs a recipe off *that* mill, a
-save has to name it. `Id` is creation order, never reused, resolving to null
-once the building is gone, so an order pointing at a demolished mill fails
-loudly rather than hitting its replacement. Its `Storage` buffer
-([`## Items and buffers`](items.md)) is hashed with the registry entry, so a
-building is state before it is an entity row.
+**Why an entity and not just a tile value.** `TileType.Structure` says a
+building is here, not *which*, and identity is needed long before behaviour:
+`#37`'s silo and `#38`'s depot are both addressed by `Id`, and a save has to
+name it too. `Id` is creation order, never reused, resolving to null once the
+building is gone, so an order to a demolished building fails loudly rather than
+hitting its replacement. Its `Storage` is hashed with the registry entry
+([`## Items and buffers`](items.md)), so a building is state before an entity row.
 
 **`StructureKind` is the roster, and one tool places every row in it.**
-`StructureBuildTool` places whichever `Kind` its own export names, so the depot
-(`#38`) is a second Main.tscn node with a different `Kind`, name, price and
-`StorageCapacity`, never a subclass. Capacity sits on the *tool*, not the kind,
-for the reason `CostPerCell` does — a playtest argues about the number — and
+`StructureBuildTool` places whichever `Kind` its own export names — the depot
+(`#38`) landed as a second Main.tscn node with a different `Kind`, name, price
+and capacity, never a subclass. Capacity sits on the *tool*, not the kind, and
 `StructureKinds` only backs a `PlaceStructure` that skips a tool: dev fixtures.
 
-**Where a building parts company with a field** — the one deliberate asymmetry:
-a building is **atomic**. A field shrinks cell by cell; clearing *any* cell of
-a building demolishes the whole thing, because half a mill is not a mill.
-`SetTile` detaches the whole footprint from the registry *before* writing any
-tile, so the clearing writes cannot re-enter it. With 1×1 footprints the two
-rules are indistinguishable; the difference is written now, not when four cells
-make it urgent.
+**Where a building parts company with a field** — the one deliberate
+asymmetry: a building is **atomic** (clearing any cell demolishes the whole
+thing; half a mill is not a mill), where a field shrinks cell by cell instead.
+`SetTile` detaches the footprint from the registry *before* writing any tile,
+so the clearing writes cannot re-enter it — written now, with 1×1 footprints,
+before four cells make the difference urgent.
 
 **Trap: fill the cell → structure map *before* writing the tile.** `SetTile`
 redraws as it writes and `ViewItem` picks the mesh by reading the kind back out
@@ -128,9 +125,8 @@ today and is handed the entity, so a building can be priced by *what* it is.
 
 > **Building costs money, and "you cannot afford this" is a placement refusal
 > like any other** — decided with the rest of the verdict, so the ghost shows
-> it before the click instead of the click discovering it. Money itself is a
-> **stub number** until M7 gives it a market: this is the plumbing, not the
-> economy.
+> it before the click discovers it. Money is a **stub number** until M7 gives
+> it a market: this is the plumbing, not the economy.
 
 `Economy` **owns the balance**, so there is one number to serialize; `TrySpend`
 takes the money **or changes nothing**, so it cannot go negative — an invariant
@@ -138,13 +134,17 @@ takes the money **or changes nothing**, so it cannot go negative — an invarian
 
 **Cost is a validation input, not a post-hoc check.** A tool's `CostPerCell`
 and the balance go into `PlacementRules.Check` as a `PlacementBudget` — a
-*value*, never a handle on the account, which keeps the evaluator the pure
-thing it was — and `Check` refuses with `CannotAfford`. Deciding it inside
-`ClickCell` instead would have made the ghost lie, showing as legal a placement
-the click refused. Like `TouchesRoad` it is a property of the **whole
-placement** (all of a ten-cell road or none of it), judged **last**, so a drag
-into water blames the water.
+*value*, never a handle on the account — so `Check` refuses with
+`CannotAfford` instead of `ClickCell` discovering it and the ghost lying. Like
+`TouchesRoad`, it prices the **whole placement**, judged last.
 
 **Charged on commit, never on preview**, so a refused click is free however
 often the ghost is recomputed. A tool with **no** `Economy` wired builds for
 free: that is "there is no money in this scene", not "the player is broke".
+
+**`Economy.Sell` (#38) is the account's other door.** A depot's delivery
+credits `PriceOf(good) * quantity` from `MachineSystem.RunHaulOrder` when a
+haul finishes, not validated up front the way a placement's cost is. `PriceOf`
+is the one function M7 swaps for a live series — see
+[`## Orders`](orders.md)'s closing section for why the depot's `Storage` is
+never where the credited amount is read from.

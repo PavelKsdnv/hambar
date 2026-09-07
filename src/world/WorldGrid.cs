@@ -68,6 +68,9 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// <summary>Dev art for a silo: a squat cylinder, distinct from the generic box.</summary>
     private const int SiloItem = 15;
 
+    /// <summary>Dev art for a depot: a low gold platform, distinct from the silo and the box.</summary>
+    private const int DepotItem = 16;
+
     /// <summary>
     /// The stream machine spawn placement draws from. <b>The only randomness a
     /// vehicle is subject to</b>: where a bought one is parked is the world
@@ -90,6 +93,16 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
 
     [Export] public PackedScene? MachineScene { get; set; }
     [Export] public int MachineCount { get; set; } = 0;
+
+    /// <summary>
+    /// Where a depot delivery's money goes (#38). Read only by
+    /// <see cref="MachineSystem.RunHaulOrder"/>, and only for a
+    /// <see cref="StructureKind.Depot"/> unload; null means this scene has no
+    /// money at all, the same "no such thing here" reading a build tool with no
+    /// <see cref="Economy"/> already has — a dev scene can haul into a depot
+    /// with nothing credited.
+    /// </summary>
+    [Export] public Economy? Economy { get; set; }
 
     /// <summary>
     /// The people who can be in a cab, so order execution can tell a live
@@ -891,6 +904,7 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     private static int MeshItemFor(StructureKind kind) => kind switch
     {
         StructureKind.Silo => SiloItem,
+        StructureKind.Depot => DepotItem,
         _ => StructureItem,
     };
 

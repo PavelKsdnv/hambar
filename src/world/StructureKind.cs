@@ -1,16 +1,25 @@
 namespace Arable;
 
 /// <summary>
-/// What kind of building a <see cref="Structure"/> is. One entry today — the
-/// silo, #37's buffer with an in/out interface — and the seam #38's depot and
-/// M6's roster (cleaner, mill, bakery) extend: a new kind is a new row here
-/// plus a new <see cref="StructureBuildTool"/> node in Main.tscn, never a
-/// second way to place or address a building.
+/// What kind of building a <see cref="Structure"/> is. Two entries today — the
+/// silo (#37's buffer with an in/out interface) and the depot (#38's fixed-
+/// price sale point) — and the seam M6's roster (cleaner, mill, bakery)
+/// extends: a new kind is a new row here plus a new
+/// <see cref="StructureBuildTool"/> node in Main.tscn, never a second way to
+/// place or address a building.
 /// </summary>
 public enum StructureKind
 {
     /// <summary>Holds whatever is hauled into it, up to a capacity. Nothing processes it.</summary>
     Silo,
+
+    /// <summary>
+    /// Turns a delivery into money at <see cref="Economy.PriceOf"/> and removes
+    /// it from the world — see <c>## Orders</c>'s closing section for why its
+    /// <see cref="Structure.Storage"/> never actually holds anything between
+    /// ticks. No price movement, no margin, no merchant board: those are M7's.
+    /// </summary>
+    Depot,
 }
 
 /// <summary>
@@ -37,6 +46,9 @@ public static class StructureKinds
     private static readonly StructureSpec[] Specs =
     [
         new("Silo", 500),
+        // Capacity only has to clear one truckload (see MachineKinds), since a
+        // depot's Storage is drained the same tick it is filled.
+        new("Depot", 200),
     ];
 
     /// <summary>

@@ -36,5 +36,14 @@ splitting it is a decision M6 still owns, not one a silo forced. A row takes a
 **fresh** buffer at spawn, never the recycled slot's emptied out: a generation
 invalidates a stale *handle*, not a reference to the object behind it.
 
+**#38's depot is the one place a unit leaves every buffer for good.** A sale
+calls `ItemBuffer.Remove` directly rather than `Transfer` — there is no second
+buffer to move into, the unit is being converted to money, not carried — paired
+with one `Economy.Credit` in the same call so nothing is ever mid-flight
+between "in the world" and "in the account". Everywhere else "never dropped,
+never spilled" holds unconditionally; this is the one deliberate exception, and
+the reason it is not a third quiet way to lose an item is that it is paired
+with a credit a determinism hash can also see.
+
 **Deferred:** an item having a position of its own; until then a unit exists
 only inside some buffer, which is what makes "nothing was lost" testable.

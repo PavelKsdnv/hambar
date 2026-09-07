@@ -679,6 +679,15 @@ public sealed class MachineSystem : ISimSystem, IHashableState
             _step[i] = OrderStep.Unloading;
             int amount = cargo.CountOf(order.Good);
             int moved = ItemBuffer.Transfer(cargo, structure.Storage, order.Good, amount);
+            if (structure.Kind == StructureKind.Depot && moved > 0)
+            {
+                // #38: a depot's Storage is a mouth, not a store. What just
+                // landed is sold and removed the same tick, so Storage reads
+                // empty again before the next delivery ever arrives — capacity
+                // only has to clear one truckload, never the whole economy.
+                structure.Storage.Remove(order.Good, moved);
+                _world.Economy?.Sell(order.Good, moved);
+            }
             _block[i] = moved >= amount ? OrderBlock.None : OrderBlock.DestinationFull;
         }
     }

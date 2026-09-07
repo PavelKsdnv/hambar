@@ -78,6 +78,13 @@ public partial class Economy : Node, IHashableState
 
     public override void _ExitTree() => _sim?.UnregisterState(this);
 
+    /// <summary>
+    /// What one unit of grain sells for at the depot (#38). Exported, like
+    /// <see cref="StartingBalance"/>, so a playtest can retune it without a
+    /// rebuild — there is no market yet to derive it from.
+    /// </summary>
+    [Export] public int GrainPrice { get; set; } = 8;
+
     /// <summary>The name the balance is filed under in a state hash.</summary>
     public string StateName => "economy";
 
@@ -125,6 +132,32 @@ public partial class Economy : Node, IHashableState
             return;
         }
         SetBalance(Balance + amount);
+    }
+
+    /// <summary>
+    /// <b>M7 SWAP POINT.</b> What a unit of <paramref name="type"/> is worth
+    /// right now — a flat constant per type today, the live price series
+    /// (demand shocks, margins) M7 replaces this body with. Every sale in the
+    /// game is required to go through this one function, named here so the
+    /// swap has exactly one place to happen: nothing outside <see cref="Sell"/>
+    /// may read <see cref="GrainPrice"/> directly.
+    /// </summary>
+    public int PriceOf(ItemType type) => type == ItemTypes.Grain ? GrainPrice : 0;
+
+    /// <summary>
+    /// The depot's whole economy: credits <see cref="PriceOf"/> times
+    /// <paramref name="quantity"/>. The caller (<c>MachineSystem.RunHaulOrder</c>)
+    /// has already removed the units from the depot's <see cref="Structure.Storage"/>
+    /// — this only ever moves money, the same split <see cref="Credit"/> keeps
+    /// from a build refund.
+    /// </summary>
+    public void Sell(ItemType type, int quantity)
+    {
+        if (quantity <= 0)
+        {
+            return;
+        }
+        Credit(PriceOf(type) * quantity);
     }
 
     /// <summary>
