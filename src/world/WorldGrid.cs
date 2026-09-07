@@ -407,57 +407,88 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     ///
     /// Chunks are aligned to the <b>world origin</b>, not to the field's own
     /// corner, so the same ground always falls in the same chunks whoever marks
-    /// it. Walked over a flat array in ascending chunk order and never over a
-    /// dictionary: float addition is not associative, so an enumeration order
-    /// that depended on insertion history would be a determinism bug that only
-    /// showed up as a crop ripening a tick late.
+    /// it. The cells are sorted into ascending chunk order and summed in that
+    /// order, never enumerated out of a dictionary: float addition is not
+    /// associative, so an order that depended on insertion history would be a
+    /// determinism bug that only showed up as a crop ripening a tick late. The
+    /// sort key carries each cell's index in the input, so cells sharing a chunk
+    /// keep the order they were handed in and no two keys can tie.
+    ///
+    /// <b>Sorted rather than bucketed into an array over the chunk bounding
+    /// box</b>, which is how this read first. The cell list is unvalidated — dev
+    /// and scenario code marks fields directly, and cells off the map are legal
+    /// input that simply weigh 0 — so two cells far apart size that array by the
+    /// <i>gap</i> between them rather than by how many cells there are: an
+    /// allocation with no upper bound, reached through a width × height multiply
+    /// that wraps to a negative length before it gets there. Sorting is bounded
+    /// by the input, and the walk it produces is the same one, in the same
+    /// order, to the bit.
     ///
     /// <b>Trap:</b> a row is given this number when the field is marked and
     /// when its cells change (see <c>ReleaseFieldCell</c>) — never per tick. So
     /// moving <see cref="FertilityChunkSize"/> at runtime re-aggregates the
-    /// fields marked after it, not the ones already standing.
+    /// fields marked after it, not the ones already standing: a field re-measures
+    /// its ground at the size it was marked at
+    /// (<see cref="Field.FertilityChunkSize"/>), so bulldozing a corner off it
+    /// cannot also silently re-chunk it at whatever the knob has moved to since.
     /// </summary>
-    public float ChunkedFertility(IReadOnlyList<Vector2I> cells)
+    public float ChunkedFertility(IReadOnlyList<Vector2I> cells) =>
+        ChunkedFertility(cells, EffectiveFertilityChunkSize);
+
+    /// <summary>
+    /// The aggregate at a chunk size <i>given</i> rather than read off the
+    /// export — what a standing field re-measures its ground at. See the trap
+    /// on <see cref="ChunkedFertility(IReadOnlyList{Vector2I})"/>.
+    /// </summary>
+    private float ChunkedFertility(IReadOnlyList<Vector2I> cells, int size)
     {
         if (cells.Count == 0)
         {
             return 0f;
         }
 
-        int size = Math.Max(1, FertilityChunkSize);
-        Vector2I min = ChunkOf(cells[0], size);
-        Vector2I max = min;
-        for (int i = 1; i < cells.Count; i++)
+        // Chunk row, chunk column, then where the cell came in the input: the
+        // first two group and order the chunks, the third breaks every tie, so
+        // the summation order is a function of the cells alone and not of how
+        // the sort happened to move equal keys around.
+        var keys = new (int ChunkY, int ChunkX, int Index)[cells.Count];
+        for (int i = 0; i < cells.Count; i++)
         {
             Vector2I chunk = ChunkOf(cells[i], size);
-            min = new Vector2I(Mathf.Min(min.X, chunk.X), Mathf.Min(min.Y, chunk.Y));
-            max = new Vector2I(Mathf.Max(max.X, chunk.X), Mathf.Max(max.Y, chunk.Y));
+            keys[i] = (chunk.Y, chunk.X, i);
         }
-
-        int width = max.X - min.X + 1;
-        var sums = new float[width * (max.Y - min.Y + 1)];
-        var counts = new int[sums.Length];
-        foreach (Vector2I cell in cells)
-        {
-            Vector2I chunk = ChunkOf(cell, size);
-            int i = (chunk.Y - min.Y) * width + (chunk.X - min.X);
-            sums[i] += GetFertility(cell);
-            counts[i]++;
-        }
+        Array.Sort(keys);
 
         float total = 0f;
-        int occupied = 0;
-        for (int i = 0; i < sums.Length; i++)
+        int chunks = 0;
+        int start = 0;
+        while (start < keys.Length)
         {
-            if (counts[i] == 0)
+            float sum = 0f;
+            int end = start;
+            while (end < keys.Length
+                && keys[end].ChunkY == keys[start].ChunkY
+                && keys[end].ChunkX == keys[start].ChunkX)
             {
-                continue;
+                sum += GetFertility(cells[keys[end].Index]);
+                end++;
             }
-            total += sums[i] / counts[i];
-            occupied++;
+            total += sum / (end - start);
+            chunks++;
+            start = end;
         }
-        return occupied == 0 ? 0f : total / occupied;
+        // Every cell lands in exactly one chunk, so a non-empty region always
+        // covered at least one of them.
+        return total / chunks;
     }
+
+    /// <summary>
+    /// <see cref="FertilityChunkSize"/> as the aggregation may actually use it.
+    /// An export is a number a playtest can leave at 0 or below; a chunk is at
+    /// least one cell, and one cell is the knob's off position rather than an
+    /// error worth refusing a field over.
+    /// </summary>
+    private int EffectiveFertilityChunkSize => Math.Max(1, FertilityChunkSize);
 
     /// <summary>
     /// The chunk a cell falls in. Floor division, not C#'s truncation, or the
@@ -467,8 +498,14 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     private static Vector2I ChunkOf(Vector2I cell, int size) =>
         new(FloorDiv(cell.X, size), FloorDiv(cell.Y, size));
 
-    private static int FloorDiv(int value, int divisor) =>
-        value >= 0 ? value / divisor : -((divisor - 1 - value) / divisor);
+    // Corrected by the remainder rather than by negating a shifted dividend:
+    // the shift overflows near int.MinValue, and this is handed raw cell
+    // coordinates from callers that never validated them.
+    private static int FloorDiv(int value, int divisor)
+    {
+        int quotient = value / divisor;
+        return value % divisor < 0 ? quotient - 1 : quotient;
+    }
 
     /// <summary>Whether the terrain is workable ground.</summary>
     public bool IsSoil(Vector2I cell) => GetTerrain(cell) == TerrainType.Soil;
@@ -515,9 +552,13 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         // ground it stands on — how good it is and how much of it there is —
         // is aggregated here and pushed down, because the sim has no idea what
         // a cell is.
+        // Read once and carried on the field: the size the ground was measured
+        // at is part of what the field is, not a knob it re-reads later.
+        int chunkSize = EffectiveFertilityChunkSize;
         var field = new Field(
             _fieldsCreated, $"Field {_fieldsCreated}", cells,
-            _crops.Create(_fieldsCreated, ChunkedFertility(cells), cells.Count));
+            _crops.Create(_fieldsCreated, ChunkedFertility(cells, chunkSize), cells.Count),
+            chunkSize);
         _fields.Add(field);
         foreach (Vector2I cell in cells)
         {
@@ -654,7 +695,10 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
             // now on, and its output buffer holds less. Pushed on change rather
             // than read per tick: the ground itself never moves, and the sim
             // must be able to hash the numbers without asking the world.
-            _crops.SetGround(field.Crop, ChunkedFertility(field.Cells), field.CellCount);
+            _crops.SetGround(
+                field.Crop,
+                ChunkedFertility(field.Cells, field.FertilityChunkSize),
+                field.CellCount);
             return;
         }
 

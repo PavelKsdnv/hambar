@@ -188,6 +188,8 @@ public partial class CropSmokeTest : Node
         CheckBulldozingClosesTheRow();
         CheckTheSeasonIsWiredIntoTheWorld();
         CheckFertilityIsAveragedByChunk();
+        CheckAStandingFieldKeepsItsChunkSize();
+        CheckAFarFlungRegionCostsWhatItsCellsCost();
         CheckAFertileFieldOutgrowsAPoorOne();
         CheckAZeroFactorStallsTheCrop();
     }
@@ -405,10 +407,6 @@ public partial class CropSmokeTest : Node
     }
 
     /// <summary>
-    /// Crop state has to be inside <see cref="SimStateHash"/>, or the
-    /// determinism harness would pass a run whose crops diverged on tick one.
-    /// </summary>
-    /// <summary>
     /// The stage has to be readable off the map without opening anything, which
     /// makes "every stage draws its own tile" an assertion and not a matter of
     /// taste. The ones that arrive by <i>time</i> are the interesting half: no
@@ -443,6 +441,10 @@ public partial class CropSmokeTest : Node
             && _drawn[CropStage.Harvestable] != _drawn[CropStage.Growing]);
     }
 
+    /// <summary>
+    /// Crop state has to be inside <see cref="SimStateHash"/>, or the
+    /// determinism harness would pass a run whose crops diverged on tick one.
+    /// </summary>
     private void CheckCropStateIsHashed()
     {
         Check("the crops are a hashed state source", HasState(_sim, CropSystem.StateSourceName));
@@ -710,6 +712,74 @@ public partial class CropSmokeTest : Node
     }
 
     /// <summary>
+    /// The chunk size is an <c>[Export]</c>, so a playtest can move it between
+    /// marking a field and bulldozing a cell off it. The field re-measures its
+    /// ground on that bulldoze, and it has to do so at the size it was marked
+    /// at: re-chunking a field that has been standing for seasons changes what
+    /// it grows at for a reason the player did nothing to cause.
+    ///
+    /// Marked at 2 so the check can tell the two apart. A three-wide region
+    /// always splits unevenly across 2-cell chunks — two cells in one, one in
+    /// the other — so weighing the chunks equally is not the plain cell mean,
+    /// which is what a re-chunk at 1 would have given.
+    /// </summary>
+    private void CheckAStandingFieldKeepsItsChunkSize()
+    {
+        Vector2I? anchor = FindClearSoilRect();
+        Check("there is still a clear patch to re-measure", anchor != null);
+        if (anchor == null)
+        {
+            return;
+        }
+
+        int chunkSize = _world.FertilityChunkSize;
+        _world.FertilityChunkSize = 2;
+        Field? field = MarkRect(anchor.Value);
+        Check("the patch marked at a 2-cell chunking", field != null);
+        if (field == null)
+        {
+            _world.FertilityChunkSize = chunkSize;
+            return;
+        }
+
+        _world.FertilityChunkSize = 1;
+        _world.Clear(field.Cells[0]);
+        float atOne = _world.ChunkedFertility(field.Cells);
+        _world.FertilityChunkSize = 2;
+        float atTwo = _world.ChunkedFertility(field.Cells);
+        Check($"a standing field re-aggregates at the size it was marked at "
+            + $"({atTwo:F4}), not at the one the knob moved to ({atOne:F4})",
+            Near(_crops.FertilityOf(field.Crop), atTwo));
+        Check("and the two sizes are far enough apart for that to mean something",
+            Math.Abs(atTwo - atOne) > 0.0001f);
+        Check("while the field itself still reports what it was marked at",
+            field.FertilityChunkSize == 2);
+
+        _world.FertilityChunkSize = chunkSize;
+        ClearAll(field);
+    }
+
+    /// <summary>
+    /// The cell list is unvalidated — dev and scenario code marks fields
+    /// directly, and a cell off the map is legal input that simply weighs 0 —
+    /// so the aggregate has to cost what its <i>cells</i> cost and not what the
+    /// distance between them costs. Two cells a million apart span a trillion
+    /// chunks: bucketing them into an array over that bounding box is an
+    /// out-of-memory, or, once the width × height multiply wraps, a negative
+    /// length. A run that regresses this dies here rather than in a playtest
+    /// that dragged a field somewhere odd.
+    /// </summary>
+    private void CheckAFarFlungRegionCostsWhatItsCellsCost()
+    {
+        var near = new Vector2I(0, 0);
+        var far = new Vector2I(1 << 20, 1 << 20);
+        List<Vector2I> cells = [near, far];
+        float expected = (_world.GetFertility(near) + _world.GetFertility(far)) / 2f;
+        Check("two cells a million apart aggregate at the cost of two cells",
+            Near(_world.ChunkedFertility(cells), expected));
+    }
+
+    /// <summary>
     /// <b>The milestone's question, as an assertion.</b> Two fields sown on the
     /// same tick and left for the same number of ticks: the one on better
     /// ground has to be further along, and by the ratio of the ground rather
@@ -919,8 +989,30 @@ public partial class CropSmokeTest : Node
         _crops.Plough(row);
         _crops.Sow(row);
         _panel.Refresh();
-        FieldReport sown = _panel.Current!.Value;
+        if (Report("the sown field", field) is not { } sown)
+        {
+            return;
+        }
+
+        // Every claim below divides by the rate, and a field that banks nothing
+        // has no countdown to be right about. The ground cannot actually be
+        // dead here — it is the richest patch found, on soil, in a world whose
+        // seasons this test flattened to 1 — so a zero is the fixture breaking
+        // rather than a case the panel has to survive, and it is recorded as
+        // the failure it is. What can still be asserted is that the panel says
+        // so, instead of dividing its way to a countdown of infinity.
         float rate = _crops.GrowthPerTick(row);
+        if (rate <= 0f)
+        {
+            Check($"the panel's field grows at all (rate {rate} on fertility "
+                + $"{_crops.FertilityOf(row)}) — nothing below it can run without that",
+                false);
+            Check("and a field banking nothing is at least reported stalled",
+                sown.Stalled && !sown.CountingDown && _panel.TimingText == "stalled");
+            ClearAll(field);
+            return;
+        }
+
         float owed = (_crops.TicksToSprout - _crops.GrowthOf(row)) / rate / _crops.TicksPerDay;
         Check("a sown field counts down to sprouting",
             sown.NextStage == CropStage.Growing && sown.CountingDown && sown.Stalled == false);
@@ -942,7 +1034,10 @@ public partial class CropSmokeTest : Node
         Check("and has sprouted a few ticks after", _crops.StageOf(row) == CropStage.Growing);
 
         _panel.Refresh();
-        FieldReport growing = _panel.Current!.Value;
+        if (Report("the growing field", field) is not { } growing)
+        {
+            return;
+        }
         Check("a growing field counts down to ripe, without being told to refresh",
             growing.NextStage == CropStage.Harvestable && _panel.StageText == "growing"
             && growing.DaysRemaining > 0f);
@@ -957,7 +1052,10 @@ public partial class CropSmokeTest : Node
         float wasFertile = _crops.FertilityOf(row);
         _crops.SetGround(row, 0f, field.CellCount);
         _panel.Refresh();
-        FieldReport stalled = _panel.Current!.Value;
+        if (Report("the stalled field", field) is not { } stalled)
+        {
+            return;
+        }
         Check("a crop banking nothing is reported stalled",
             stalled.Stalled && !stalled.CountingDown && _panel.TimingText == "stalled");
         Check("with no countdown at all, rather than an enormous one",
@@ -985,7 +1083,11 @@ public partial class CropSmokeTest : Node
             _crops.StageOf(row) == CropStage.Harvestable && _panel.StageText == "harvestable"
             && _panel.Current?.NextStage == null && _panel.TimingText == "—");
 
-        int promised = _panel.Current!.Value.Yield;
+        if (Report("the ripe field", field) is not { } ripe)
+        {
+            return;
+        }
+        int promised = ripe.Yield;
         Check("the cut is taken", _crops.Harvest(row) == CropOpResult.Ok);
         _panel.Refresh();
         Check("what the panel promised is what the field is holding",
@@ -1003,6 +1105,26 @@ public partial class CropSmokeTest : Node
         _panel.Refresh();
         Check("a field bulldozed out from under the panel closes it",
             !_panel.IsOpen && !_panel.Panel.Visible && _panel.Current == null);
+    }
+
+    /// <summary>
+    /// The panel's report, with the failure already recorded when there is
+    /// none. Every read in the section above is of a panel that was just
+    /// refreshed while open on the field, so a null is a broken panel rather
+    /// than a case to handle — but it has to come out as a FAIL and a red exit,
+    /// and dereferencing it would instead throw out of <c>_Process</c>, which
+    /// Godot logs and then exits 0 over. The field goes back to bare ground on
+    /// the way out, the way every other abandoned section leaves it.
+    /// </summary>
+    private FieldReport? Report(string what, Field field)
+    {
+        FieldReport? report = _panel.Current;
+        if (report == null)
+        {
+            Check($"the panel still has a report for {what}", false);
+            ClearAll(field);
+        }
+        return report;
     }
 
     /// <summary>

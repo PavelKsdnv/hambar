@@ -5,7 +5,7 @@ What exists in the codebase today and how it fits together. Companion to
 the design decisions taken since.
 
 **Every section is written to be read *alone*** — find it in the index, read
-it, stop (`sed -n '/^## World grid/,/^#/p'`). It holds only what reading `src/`
+it, stop (`sed -n '/^## World grid/,/^## /p'`). It holds only what reading `src/`
 does not recover: why a thing is shaped as it is, what was rejected, what is
 deferred. CLAUDE.md carries the rest of the rule and the budget.
 
@@ -515,9 +515,18 @@ a second pushed-down column**, taken with fertility; it sizes the buffer at
 
 **Traps.** A row takes its ground at `MarkField` and whenever the field's cells
 change, never per tick — so moving `FertilityChunkSize` at runtime re-aggregates
-fields marked *after* it, not those already standing. Neither the multiply order
-nor the chunk walk may be reordered (float arithmetic is not associative), which
-is why that walk is a flat array and not a dictionary. The factors hash beside
+fields marked *after* it, not those already standing. That holds because the size
+is frozen onto the `Field` at marking and re-read from there: without it, the
+export being live would make bulldozing one corner re-chunk a field at a
+granularity it was never marked at. Neither the multiply order nor the chunk walk
+may be reordered (float arithmetic is not associative), which is why the walk
+sorts the cells by (chunk row, chunk column, input index) and never enumerates a
+dictionary — the index breaks every tie, so summation order is a function of the
+cells alone. Sorted rather than bucketed into an array over the chunk bounding
+box, which is what it did first: the cell list is unvalidated and cells off the
+map are legal, so two far-apart cells size that array by the *gap* between them —
+unbounded allocation, through a width × height multiply that wraps negative
+first. Sorting costs what the cells cost. The factors hash beside
 the thresholds, or two differently tuned worlds hash alike. A row gets a *fresh*
 `ItemBuffer` at `Create`: a generation invalidates a stale handle, never a stale
 reference to the object behind one. And the harvested good is configuration, not

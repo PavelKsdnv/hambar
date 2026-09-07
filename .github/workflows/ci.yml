@@ -30,8 +30,12 @@ jobs:
     permissions:
       contents: read
     # A missing C# assembly makes the smoke tests hang rather than fail, so the
-    # job carries a backstop and every Godot step is individually bounded.
-    timeout-minutes: 15
+    # job carries a backstop and every Godot step is individually bounded. The
+    # backstop has to outlast the steps it backs up, or it fires first and a
+    # hung scene is reported as a job timeout with no failing step to point at:
+    # six Godot steps at 3 minutes is 18, plus a couple for checkout, the SDK,
+    # the Godot download and the build. Raise it when a Godot step is added.
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
