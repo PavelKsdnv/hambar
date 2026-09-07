@@ -989,8 +989,30 @@ public partial class CropSmokeTest : Node
         _crops.Plough(row);
         _crops.Sow(row);
         _panel.Refresh();
-        FieldReport sown = _panel.Current!.Value;
+        if (Report("the sown field", field) is not { } sown)
+        {
+            return;
+        }
+
+        // Every claim below divides by the rate, and a field that banks nothing
+        // has no countdown to be right about. The ground cannot actually be
+        // dead here — it is the richest patch found, on soil, in a world whose
+        // seasons this test flattened to 1 — so a zero is the fixture breaking
+        // rather than a case the panel has to survive, and it is recorded as
+        // the failure it is. What can still be asserted is that the panel says
+        // so, instead of dividing its way to a countdown of infinity.
         float rate = _crops.GrowthPerTick(row);
+        if (rate <= 0f)
+        {
+            Check($"the panel's field grows at all (rate {rate} on fertility "
+                + $"{_crops.FertilityOf(row)}) — nothing below it can run without that",
+                false);
+            Check("and a field banking nothing is at least reported stalled",
+                sown.Stalled && !sown.CountingDown && _panel.TimingText == "stalled");
+            ClearAll(field);
+            return;
+        }
+
         float owed = (_crops.TicksToSprout - _crops.GrowthOf(row)) / rate / _crops.TicksPerDay;
         Check("a sown field counts down to sprouting",
             sown.NextStage == CropStage.Growing && sown.CountingDown && sown.Stalled == false);
@@ -1012,7 +1034,10 @@ public partial class CropSmokeTest : Node
         Check("and has sprouted a few ticks after", _crops.StageOf(row) == CropStage.Growing);
 
         _panel.Refresh();
-        FieldReport growing = _panel.Current!.Value;
+        if (Report("the growing field", field) is not { } growing)
+        {
+            return;
+        }
         Check("a growing field counts down to ripe, without being told to refresh",
             growing.NextStage == CropStage.Harvestable && _panel.StageText == "growing"
             && growing.DaysRemaining > 0f);
@@ -1027,7 +1052,10 @@ public partial class CropSmokeTest : Node
         float wasFertile = _crops.FertilityOf(row);
         _crops.SetGround(row, 0f, field.CellCount);
         _panel.Refresh();
-        FieldReport stalled = _panel.Current!.Value;
+        if (Report("the stalled field", field) is not { } stalled)
+        {
+            return;
+        }
         Check("a crop banking nothing is reported stalled",
             stalled.Stalled && !stalled.CountingDown && _panel.TimingText == "stalled");
         Check("with no countdown at all, rather than an enormous one",
@@ -1055,7 +1083,11 @@ public partial class CropSmokeTest : Node
             _crops.StageOf(row) == CropStage.Harvestable && _panel.StageText == "harvestable"
             && _panel.Current?.NextStage == null && _panel.TimingText == "—");
 
-        int promised = _panel.Current!.Value.Yield;
+        if (Report("the ripe field", field) is not { } ripe)
+        {
+            return;
+        }
+        int promised = ripe.Yield;
         Check("the cut is taken", _crops.Harvest(row) == CropOpResult.Ok);
         _panel.Refresh();
         Check("what the panel promised is what the field is holding",
@@ -1073,6 +1105,26 @@ public partial class CropSmokeTest : Node
         _panel.Refresh();
         Check("a field bulldozed out from under the panel closes it",
             !_panel.IsOpen && !_panel.Panel.Visible && _panel.Current == null);
+    }
+
+    /// <summary>
+    /// The panel's report, with the failure already recorded when there is
+    /// none. Every read in the section above is of a panel that was just
+    /// refreshed while open on the field, so a null is a broken panel rather
+    /// than a case to handle — but it has to come out as a FAIL and a red exit,
+    /// and dereferencing it would instead throw out of <c>_Process</c>, which
+    /// Godot logs and then exits 0 over. The field goes back to bare ground on
+    /// the way out, the way every other abandoned section leaves it.
+    /// </summary>
+    private FieldReport? Report(string what, Field field)
+    {
+        FieldReport? report = _panel.Current;
+        if (report == null)
+        {
+            Check($"the panel still has a report for {what}", false);
+            ClearAll(field);
+        }
+        return report;
     }
 
     /// <summary>
