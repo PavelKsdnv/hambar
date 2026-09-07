@@ -21,6 +21,7 @@
 [ext_resource type="Script" path="res://src/ui/FieldInspector.cs" id="19_fieldpanel"]
 [ext_resource type="Script" path="res://src/sim/LabourPool.cs" id="20_labour"]
 [ext_resource type="Script" path="res://src/world/Fleet.cs" id="21_fleet"]
+[ext_resource type="Script" path="res://src/ui/VehicleInspector.cs" id="22_vehiclepanel"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -165,6 +166,16 @@ grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("19_fieldpanel")
 World = NodePath("../../World")
+
+[node name="VehicleInspector" type="Control" parent="Hud" node_paths=PackedStringArray("World", "Fleet")]
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("22_vehiclepanel")
+World = NodePath("../../World")
+Fleet = NodePath("../../Fleet")
 
 [node name="CellInspector" type="Node" parent="." node_paths=PackedStringArray("World", "Readout")]
 script = ExtResource("7_inspector")

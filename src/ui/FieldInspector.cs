@@ -233,6 +233,10 @@ public partial class FieldInspector : Control
         if (@event is InputEventMouseButton { Pressed: true } click
             && click.ButtonIndex == MouseButton.Left)
         {
+            if (ClickBelongsToVehiclePanel(click.Position))
+            {
+                return;
+            }
             SelectAt(click.Position);
             GetViewport().SetInputAsHandled();
         }
@@ -351,6 +355,28 @@ public partial class FieldInspector : Control
     public static string Days(float days) => days < 0.05f
         ? "<0.1 days"
         : days.ToString("0.0", CultureInfo.InvariantCulture) + " days";
+
+    /// <summary>
+    /// Whether this click is <see cref="VehicleInspector"/>'s to claim instead
+    /// of this panel's: it is mid target-pick (<see cref="VehicleInspector.PickingGroup"/>
+    /// — a road cell clicked to name a haul target must not also flip field
+    /// selection under it), or the cell holds a vehicle (which is never a
+    /// field's cell anyway, but is unambiguously a click on that panel rather
+    /// than a deselect of this one). Neither panel holds a reference to the
+    /// other; each reads the one public fact the other exposes for exactly
+    /// this, the same arm's-length coordination <see cref="AnyToolArmed"/>
+    /// already uses for the build tools.
+    /// </summary>
+    private bool ClickBelongsToVehiclePanel(Vector2 screenPosition)
+    {
+        if (IsInsideTree() && GetTree().GetNodesInGroup(VehicleInspector.PickingGroup).Count > 0)
+        {
+            return true;
+        }
+        return World != null
+            && CellPicker.CellAt(this, World, screenPosition) is { } cell
+            && VehicleInspector.VehicleAt(World, cell) != EntityId.None;
+    }
 
     /// <summary>
     /// Whether any build tool is armed, asked of the tools themselves

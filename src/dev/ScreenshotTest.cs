@@ -151,6 +151,12 @@ public partial class ScreenshotTest : Node
         // above grew, so it costs one selection and two frames.
         await ShowFieldPanel(main, rig);
 
+        // The vehicle panel, #35's own surface: a target-picking mode no
+        // earlier view has shown, and the panel it drives. A dedicated road
+        // and field, well clear of the origin every earlier view's fixtures
+        // (and the bulldoze view's cell count) sit near.
+        await ShowVehiclePanel(main, rig);
+
         GD.Print(_failed ? "SCREENSHOT TEST FAILED" : "SCREENSHOT TEST PASSED");
         GetTree().Quit(_failed ? 1 : 0);
     }
@@ -403,6 +409,101 @@ public partial class ScreenshotTest : Node
             $"the same field with its growth rate at zero — next {panel.TimingText}, "
             + $"stage still {panel.StageText}");
         sim.Calendar.SetDate(1, Season.Spring, 1);
+    }
+
+    /// <summary>
+    /// The vehicle panel, in the three states a still picture can tell apart:
+    /// armed for a target pick with legal fields lit on the map, an order
+    /// running with nobody driving (the blocked reason — #7's headline claim
+    /// for the whole milestone, said in a panel rather than left for a test to
+    /// assert), and the same order under way once a driver is in the cab.
+    ///
+    /// <b>Selected and picked, not clicked</b> — the field panel's own rule for
+    /// a screenshot run: there is no cursor, so the vehicle and its target are
+    /// named through the panel's own doors, <see cref="VehicleInspector.Select"/>
+    /// and <see cref="VehicleInspector.PickTargetAt"/>.
+    ///
+    /// Its own road, well east of the origin, so nothing here can touch a cell
+    /// any earlier view's fixtures — or the bulldoze view's cell count — occupy.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowVehiclePanel(Node main, CameraRig rig)
+    {
+        var world = main.GetNodeOrNull<WorldGrid>("World");
+        var sim = main.GetNodeOrNull<Simulation>("Sim");
+        var pool = main.GetNodeOrNull<LabourPool>("LabourPool");
+        var fleet = main.GetNodeOrNull<Fleet>("Fleet");
+        var panel = main.GetNodeOrNull<VehicleInspector>("Hud/VehicleInspector");
+        if (world == null || sim == null || pool == null || fleet == null || panel == null)
+        {
+            GD.Print("FAIL: vehicle panel — no World, Sim, LabourPool, Fleet or "
+                + "VehicleInspector in Main.tscn");
+            _failed = true;
+            return;
+        }
+
+        const int RoadX = 40;
+        world.BuildRoadLine(new Vector2I(RoadX, -10), new Vector2I(RoadX, 10));
+        Vector2I? site = FindSoilBesideRoad(world, RoadX, -10, 10);
+        Field? field = site is { } s ? world.MarkField([s]) : null;
+        Machine? node = world.SpawnMachine(MachineKind.Tractor);
+        if (site is not { } subject || field == null || node == null)
+        {
+            GD.Print("FAIL: vehicle panel — no soil beside its road, or the field/tractor "
+                + "did not spawn");
+            _failed = true;
+            return;
+        }
+        EntityId tractor = node.Entity;
+
+        rig.Position = world.CellToWorld(subject);
+        await ZoomTo(rig, ZoomOutSteps, zoomIn: true);
+
+        panel.Select(tractor);
+        panel.BeginPicking(OrderKind.PloughField);
+        await Settle(0.3f);
+        Capture("20-vehicle-picking",
+            $"picking a plough target — \"{panel.HintText}\", legal fields lit on the map");
+
+        panel.PickTargetAt(field.Cells[0]);
+        // A picked order is queued, not active, until the next tick promotes
+        // it — see Order.cs — so the panel needs one before it has a step or a
+        // blocked reason to show at all.
+        sim.Step(5);
+        panel.Refresh();
+        await Settle(0.3f);
+        Capture("21-vehicle-blocked",
+            $"order set, nobody driving — order \"{panel.OrderLine}\", step \"{panel.StepLine}\", "
+            + $"blocked \"{panel.BlockedLine}\"");
+
+        pool.TryHire(out EntityId driver);
+        fleet.TryAssign(driver, tractor);
+        sim.Step(20);
+        panel.Refresh();
+        await Settle(0.3f);
+        Capture("22-vehicle-driving",
+            $"crewed — driver \"{panel.DriverLine}\", step \"{panel.StepLine}\", "
+            + $"blocked \"{panel.BlockedLine}\"");
+    }
+
+    /// <summary>
+    /// A road-adjacent, empty, soil cell one step east of the road at
+    /// <paramref name="roadX"/> — the same search <c>OrderSmokeTest</c> runs
+    /// headless, so the vehicle panel's view sits wherever the generated
+    /// ground actually has soil rather than at a literal cell a seed change
+    /// could turn to rock.
+    /// </summary>
+    private static Vector2I? FindSoilBesideRoad(WorldGrid world, int roadX, int zFrom, int zTo)
+    {
+        for (int z = zFrom; z <= zTo; z++)
+        {
+            var road = new Vector2I(roadX, z);
+            var site = new Vector2I(roadX + 1, z);
+            if (world.IsRoad(road) && world.IsSoil(site) && world.GetTile(site) == TileType.Empty)
+            {
+                return site;
+            }
+        }
+        return null;
     }
 
     /// <summary>
