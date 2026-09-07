@@ -32,6 +32,16 @@ Headless end-to-end checks, each printing `PASS`/`FAIL` lines and exiting 0/1.
   the point of use — so a seed change cannot quietly turn an assertion into a
   test of something else. **Reuse those helpers** rather than writing literal
   cells into new assertions.
+- **A field's own harvest buffer cannot be a haul's endpoint** — found while
+  writing `AutomationLoopSmokeTest` (#39). `Order.Haul` names two `Structure`
+  ids, and `RunHaulOrder` resolves both only through `WorldGrid.GetStructure`;
+  a field's `CropSystem.OutputOf` buffer has no id in that registry, so no
+  haul order can drain it. "Field to silo" is therefore not one order a
+  player can give today. `AutomationLoopSmokeTest` proves the two halves that
+  do exist — a harvester filling the field's own buffer, and a truck's
+  standing haul clearing a silo into a depot for money — separately, seeding
+  the silo the way `SiloSmokeTest` seeds a source, rather than inventing a
+  fifth order kind to bridge them. Closing that gap is still nobody's job.
 
 ### Canonical views (`scenes/dev/ScreenshotTest.tscn`)
 
