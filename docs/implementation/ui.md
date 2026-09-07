@@ -28,6 +28,13 @@ cell — and formats with `InvariantCulture`, so the text reads the same
 everywhere. **Off the map needs no bounds check**: the terrain layer answers
 `OutOfBounds`. Not the player-facing panel; that is `## Field panel`, and M6's.
 
+**Trap: a building's contents are not in this readout.** `#37`'s silo makes
+`Structure.Storage` worth showing, but `BuildSmokeTest` pins the exact text
+`tile: structure (Name)`; appending a contents summary after the name breaks
+that assertion (`Contains` needs the closing paren right after `Name`). Left
+for the building panel M6 owes structures, the way `## Field panel` already
+reports a field's buffer rather than this one.
+
 ## Field panel (`src/ui/FieldInspector.cs`)
 
 > **It reports facts about the field and never points at the culprit.** A

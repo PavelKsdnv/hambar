@@ -393,9 +393,9 @@ public partial class SimSmokeTest : Node
 
         Structure? store = world.PlaceStructure([free.Value]);
         ulong placed = SimStateHash.Of(sim);
-        Check("a placed building has a store sized by the world's tunable",
+        Check("a placed building has a store sized by its kind's default capacity",
             store != null && store.Storage.IsEmpty
-            && store.Storage.Capacity == world.StructureStorageCapacity);
+            && store.Storage.Capacity == StructureKinds.DefaultStorageCapacity(StructureKind.Silo));
         if (store == null)
         {
             return;

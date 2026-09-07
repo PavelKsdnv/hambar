@@ -1266,6 +1266,10 @@ public partial class BuildSmokeTest : Node
         Check("the structure is the one the world just registered",
             _world.Structures[^1] == structure);
         Check("the structure is named", !string.IsNullOrEmpty(structure.Name));
+        Check("it is a silo — the kind this palette entry places — sized by the tool's own tunable",
+            structure.Kind == StructureKind.Silo
+            && structure.Storage.Capacity == _structureTool.StorageCapacity
+            && structure.Storage.IsEmpty);
         Check("the hover readout names the building on the cell",
             _inspector.Describe(beside).Contains($"tile: structure ({structure.Name})"));
     }

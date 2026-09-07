@@ -29,11 +29,12 @@ one call moves one good, a mixed drain being the caller's priority decision.
 **Every carrier holds the same type**: a field's crop row, a vehicle's `Cargo`,
 a building's `Storage`, so a haul is one call whatever its ends are. Each is
 sized from an export, and a truck's is deliberately under a grown field's so
-clearing one is several trips. Per-kind sizes are M6's roster, and a building's
-*single* store is not an input/output pair until M6 says which side a silo's
-is. A row takes a **fresh** buffer at spawn, never the recycled slot's emptied
-out: a generation invalidates a stale *handle*, not a reference to the object
-behind it.
+clearing one is several trips. `#37` answered the question this used to defer:
+a building's *single* store **is** the in/out interface, not half of a pair —
+a silo deposits and withdraws through the same buffer, and a recipe machine
+splitting it is a decision M6 still owns, not one a silo forced. A row takes a
+**fresh** buffer at spawn, never the recycled slot's emptied out: a generation
+invalidates a stale *handle*, not a reference to the object behind it.
 
 **Deferred:** an item having a position of its own; until then a unit exists
 only inside some buffer, which is what makes "nothing was lost" testable.

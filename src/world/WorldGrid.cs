@@ -46,7 +46,12 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     private const int SoilItemFirst = 4;
     private const int SoilTiers = 4;
 
-    /// <summary>Dev art for a placed building: a tall box, so it reads as one.</summary>
+    /// <summary>
+    /// Dev art fallback for a structure whose <see cref="StructureKind"/> is
+    /// out of range (a corrupt or future save) — a tall box, so it still reads
+    /// as a building. A recognised kind draws its own item instead (see
+    /// <see cref="SiloItem"/>).
+    /// </summary>
     private const int StructureItem = 8;
 
     /// <summary>
@@ -59,6 +64,9 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// zoom a 2 m cell is a few pixels tall and height alone stops carrying.
     /// </summary>
     private const int FieldStageItemFirst = 9;
+
+    /// <summary>Dev art for a silo: a squat cylinder, distinct from the generic box.</summary>
+    private const int SiloItem = 15;
 
     /// <summary>
     /// The stream machine spawn placement draws from. <b>The only randomness a
@@ -208,16 +216,6 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// there is before it does. See <see cref="CropSystem.DefaultOutputHarvests"/>.
     /// </summary>
     [Export] public int FieldOutputHarvests { get; set; } = CropSystem.DefaultOutputHarvests;
-
-    /// <summary>
-    /// Units a building holds (<see cref="Structure.Storage"/>). An order of
-    /// magnitude over a field's buffer, because a silo is where a farm's output
-    /// piles up between sales while the fields keep cutting — a store that
-    /// filled as fast as one field would make hauling a shuffle rather than a
-    /// gain. One number for every building while there is one kind of building;
-    /// M6's roster is what makes it per-kind.
-    /// </summary>
-    [Export] public int StructureStorageCapacity { get; set; } = 500;
 
     private GridMap _gridMap = null!;
 
@@ -639,19 +637,27 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     }
 
     /// <summary>
-    /// Places the cells as <b>one new building</b> — the addressable unit
-    /// buildings come in (see <see cref="Structure"/>) — and returns it, or
-    /// null for an empty footprint. Whatever held those cells is cleared
-    /// first, so the cell → structure map can never disagree with the tile
-    /// layer; the structure tool refuses an occupied cell in the first place,
-    /// but dev and scenario code calls this directly, the way
+    /// Places the cells as <b>one new building</b> of <paramref name="kind"/> —
+    /// the addressable unit buildings come in (see <see cref="Structure"/>) —
+    /// and returns it, or null for an empty footprint. Whatever held those
+    /// cells is cleared first, so the cell → structure map can never disagree
+    /// with the tile layer; a build tool refuses an occupied cell in the first
+    /// place, but dev and scenario code calls this directly, the way
     /// <see cref="BuildRoadLine"/> is the unvalidated way to lay road and
     /// <see cref="MarkField"/> is for farmland.
+    ///
+    /// <paramref name="storageCapacity"/> is what a placing tool's own export
+    /// supplies (<see cref="StructureBuildTool.StorageCapacity"/>); left null
+    /// it falls back to <see cref="StructureKinds"/>' default for
+    /// <paramref name="kind"/> — what every call that skips the tool gets.
     ///
     /// The footprint is a list, so a multi-cell building needs nothing here
     /// beyond a wider list from the tool.
     /// </summary>
-    public Structure? PlaceStructure(IReadOnlyList<Vector2I> cells)
+    public Structure? PlaceStructure(
+        IReadOnlyList<Vector2I> cells,
+        StructureKind kind = StructureKind.Silo,
+        int? storageCapacity = null)
     {
         if (cells.Count == 0)
         {
@@ -659,18 +665,32 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         }
 
         _structuresCreated++;
+        int capacity = storageCapacity ?? StructureKinds.DefaultStorageCapacity(kind);
         var structure = new Structure(
-            _structuresCreated, $"Structure {_structuresCreated}", cells,
-            StructureStorageCapacity);
+            _structuresCreated, kind, $"{StructureKinds.Name(kind)} {_structuresCreated}", cells,
+            capacity);
         foreach (Vector2I cell in cells)
         {
             DemolishStructureAt(cell);
         }
         _structures.Add(structure);
+
+        // Registered before any tile is written, and redrawn after. SetTile
+        // refreshes the cell as it writes, and ViewItem reads the kind back
+        // out of this map to pick the mesh — so filling it afterwards drew
+        // every building as the generic fallback box, silo or not. The
+        // explicit refresh covers the other half: SetTile returns early when
+        // the cell already read as a structure (the footprint this one just
+        // replaced), which would otherwise leave the demolished building's
+        // mesh standing under the new one's name.
+        foreach (Vector2I cell in cells)
+        {
+            _structureOf[cell] = structure;
+        }
         foreach (Vector2I cell in cells)
         {
             SetTile(cell, TileType.Structure);
-            _structureOf[cell] = structure;
+            RefreshCell(cell);
         }
         return structure;
     }
@@ -847,7 +867,10 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
                     ? FieldStageItemFirst + (int)_crops.StageOf(field.Crop)
                     : FieldItem;
             case TileType.Structure:
-                return StructureItem;
+                // Read through to the entity for the same reason a field cell
+                // is: the tile layer only says "a building", which one it
+                // draws is per-kind dev art.
+                return GetStructure(cell) is { } structure ? MeshItemFor(structure.Kind) : StructureItem;
         }
 
         return GetTerrain(cell) switch
@@ -863,6 +886,13 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// <summary>Pushes one cell's current state to the GridMap view.</summary>
     private void RefreshCell(Vector2I cell) =>
         _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), ViewItem(cell));
+
+    /// <summary>The MeshLibrary item a building of this kind draws as.</summary>
+    private static int MeshItemFor(StructureKind kind) => kind switch
+    {
+        StructureKind.Silo => SiloItem,
+        _ => StructureItem,
+    };
 
     /// <summary>
     /// <b>How a crop stage the sim moved reaches the GridMap.</b> Every other
@@ -1401,6 +1431,7 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         {
             member.Reset();
             member.Write(structure.Id);
+            member.Write((int)structure.Kind);
             member.Write(structure.Name);
             foreach (Vector2I cell in structure.Cells)
             {

@@ -90,11 +90,14 @@ reading a tool without an `Economy` has, so a dev scene can put a fabricated
 crew in a cab.
 
 **A haul's endpoints are two `Structure` ids, never a field.** A field's
-harvest still lands in the field's own output buffer (`## Crops`), and nothing
-in `#34` moves it from there into a building — that seam is deferred to
-whichever of `#37` (silo), `#38` (depot) or `#39` (the loop test) first needs
-grain to leave a field. A load or unload takes whatever one
-`ItemBuffer.Transfer` moves in a single call, bounded by capacity on both ends,
-rather than topping up over several ticks: nothing yet produces goods fast
-enough for the difference to matter, and a policy for "wait for a fuller load"
-is a decision nobody has asked for yet.
+harvest still lands in the field's own output buffer (`## Crops`); moving it
+from there into a building is still nobody's job — `#38`'s depot or `#39`'s
+loop test may be first to need it. `#37`'s silo needed **no** new binding here:
+a `Structure.Id` plus its one `Storage` buffer already was the interface a
+haul names and validates against (`NoSuchStructure` on a demolished one), so
+the silo landed as a `StructureKind` and a capacity, never a new order shape.
+A load or unload still takes whatever one `ItemBuffer.Transfer` moves in a
+single call, bounded by capacity on both ends, rather than topping up over
+several ticks: nothing yet produces goods fast enough for the difference to
+matter, and a policy for "wait for a fuller load" is a decision nobody has
+asked for yet.

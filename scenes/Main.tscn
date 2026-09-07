@@ -88,9 +88,10 @@ CostPerCell = 10
 script = ExtResource("9_structuretool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
-DisplayName = "Structure"
+DisplayName = "Silo"
 Icon = ExtResource("15_icon_structure")
 CostPerCell = 250
+StorageCapacity = 500
 
 [node name="BulldozeTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("10_bulldozetool")

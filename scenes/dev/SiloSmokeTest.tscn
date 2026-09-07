@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/dev/SiloSmokeTest.cs" id="1_silosmoke"]
+
+[node name="SiloSmokeTest" type="Node"]
+script = ExtResource("1_silosmoke")
