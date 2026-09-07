@@ -3,12 +3,16 @@
 Headless end-to-end checks, each printing `PASS`/`FAIL` lines and exiting 0/1.
 **Run all of them** — the older ones are the regression net for the newer ones.
 
-CLAUDE.md has the command and names them; what each asserts is in the test
-file. What is *not*, and costs an afternoon:
+`scripts/verify.py` runs them; what each asserts is in the test file. What is
+*not*, and costs an afternoon:
 
-- **A warning fails CI.** `run_godot.sh` reds the build on any logged
-  `WARNING`/`ERROR`, since a scene quits 0 over a failed load. So a
-  `PushWarning` must be narrow enough never to fire in a healthy run.
+- **A warning fails the run.** `verify.py` reds any logged `WARNING`/`ERROR`,
+  since a scene quits 0 over a failed load. So a `PushWarning` must be narrow
+  enough never to fire in a healthy run.
+- **The list is discovered, not written.** `verify.py` globs
+  `scenes/dev/*SmokeTest.tscn`, so a new test is live in CI and in the milestone
+  skill the moment its scene exists. Naming tests in three places is what let
+  `WorkerSmokeTest` ship without CI ever running it.
 - **Synthetic input needs the right door.** `Input.ActionPress` works for held
   actions, but event-driven ones only reach `_UnhandledInput` via
   `Input.ParseInputEvent(InputEventAction)`.

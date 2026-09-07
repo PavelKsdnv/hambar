@@ -29,12 +29,11 @@ jobs:
     # and fetches Godot. Everything left unlisted is disabled outright.
     permissions:
       contents: read
-    # A missing C# assembly makes the smoke tests hang rather than fail, so the
-    # job carries a backstop and every Godot step is individually bounded. The
-    # backstop has to outlast the steps it backs up, or it fires first and a
-    # hung scene is reported as a job timeout with no failing step to point at:
-    # six Godot steps at 3 minutes is 18, plus a couple for checkout, the SDK,
-    # the Godot download and the build. Raise it when a Godot step is added.
+    # A missing C# assembly makes the smoke tests hang rather than fail, so a
+    # hung scene must be killed by something. That is verify.py's --timeout
+    # (180s per command), which names the test that hung and still reports the
+    # rest; the step and job limits below are only backstops behind it, and
+    # neither has to be re-tuned when a smoke test is added.
     timeout-minutes: 25
 
     steps:
@@ -59,34 +58,32 @@ jobs:
       # .godot/mono/temp/bin/, and without it Godot cannot instantiate the test
       # scripts, so _Ready never runs and the scene never calls Quit.
       - name: Build
-        run: dotnet build Arable.sln
+        run: python3 scripts/verify.py --build
 
       # .godot/ is gitignored, so a fresh checkout has no import cache. Skipping
       # this does not fail — the tests still exit 0 while logging resource load
-      # errors, which is a green run over a broken load. The wrapper is what
-      # turns that logged-but-green case into a red build; see the script.
+      # errors, which is a green run over a broken load. verify.py is what turns
+      # that logged-but-green case into a red build: it treats any ERROR,
+      # WARNING or SCRIPT ERROR line as fatal regardless of the exit status.
       - name: Import assets
         # Measured at 5-7s across runs; bounded like the tests below, since a
         # hung import is the same silent stall as a hung scene.
         timeout-minutes: 3
-        run: .github/scripts/run_godot.sh --import
+        run: python3 scripts/verify.py --import
 
-      - name: Camera smoke test
-        timeout-minutes: 3
-        run: .github/scripts/run_godot.sh res://scenes/dev/CameraSmokeTest.tscn
+      # One step, not one per scene: verify.py discovers every
+      # scenes/dev/*SmokeTest.tscn, so a new smoke test is picked up here and in
+      # the milestone skill at once. Hand-listing them is what let
+      # WorkerSmokeTest ship in 0a3ca1a without ever running in CI. Failure
+      # attribution is not lost - the script runs all of them and prints a
+      # per-test table naming the ones that failed.
+      - name: Smoke tests
+        # The import above already ran; --no-import keeps this step from
+        # repeating it once per scene.
+        timeout-minutes: 20
+        run: python3 scripts/verify.py --tests --no-import
 
-      - name: World smoke test
-        timeout-minutes: 3
-        run: .github/scripts/run_godot.sh res://scenes/dev/WorldSmokeTest.tscn
-
-      - name: Build smoke test
-        timeout-minutes: 3
-        run: .github/scripts/run_godot.sh res://scenes/dev/BuildSmokeTest.tscn
-
-      - name: Sim smoke test
-        timeout-minutes: 3
-        run: .github/scripts/run_godot.sh res://scenes/dev/SimSmokeTest.tscn
-
-      - name: Crop smoke test
-        timeout-minutes: 3
-        run: .github/scripts/run_godot.sh res://scenes/dev/CropSmokeTest.tscn
+      # docs/implementation budget, enforced rather than merely asked for. A
+      # rule only the subagent is asked to respect is decoration.
+      - name: Doc budget
+        run: python3 scripts/verify.py --docs
