@@ -34,11 +34,13 @@ public sealed class Field
     private readonly List<Vector2I> _cells;
     private readonly IReadOnlyList<Vector2I> _readOnlyCells;
 
-    public Field(int id, string name, IReadOnlyList<Vector2I> cells, EntityId crop)
+    public Field(int id, string name, IReadOnlyList<Vector2I> cells, EntityId crop,
+        int fertilityChunkSize)
     {
         Id = id;
         Name = name;
         Crop = crop;
+        FertilityChunkSize = Mathf.Max(1, fertilityChunkSize);
         _cells = new List<Vector2I>(cells);
         _readOnlyCells = _cells.AsReadOnly();
     }
@@ -60,6 +62,19 @@ public sealed class Field
 
     /// <summary>What the player calls it. Defaulted at creation, renameable later.</summary>
     public string Name { get; set; }
+
+    /// <summary>
+    /// Cells on a side of the chunks this field's ground was averaged over
+    /// (<see cref="WorldGrid.ChunkedFertility(IReadOnlyList{Vector2I})"/>),
+    /// <b>frozen when the field was marked</b>. Carried here rather than read
+    /// off <see cref="WorldGrid.FertilityChunkSize"/> at use, because that one
+    /// is an export a playtest moves mid-run: without it, bulldozing a single
+    /// cell would re-measure a field that had been standing for seasons at a
+    /// granularity it was never marked at, and two fields on identical ground
+    /// would end up growing at different rates purely by which of them last
+    /// lost a corner.
+    /// </summary>
+    public int FertilityChunkSize { get; }
 
     /// <summary>
     /// Cells the field covers, in the order they were marked. A read-only

@@ -188,6 +188,8 @@ public partial class CropSmokeTest : Node
         CheckBulldozingClosesTheRow();
         CheckTheSeasonIsWiredIntoTheWorld();
         CheckFertilityIsAveragedByChunk();
+        CheckAStandingFieldKeepsItsChunkSize();
+        CheckAFarFlungRegionCostsWhatItsCellsCost();
         CheckAFertileFieldOutgrowsAPoorOne();
         CheckAZeroFactorStallsTheCrop();
     }
@@ -707,6 +709,74 @@ public partial class CropSmokeTest : Node
             _crops.AreaOf(field.Crop) == field.CellCount
             && _crops.OutputOf(field.Crop)!.Capacity < store);
         ClearAll(field);
+    }
+
+    /// <summary>
+    /// The chunk size is an <c>[Export]</c>, so a playtest can move it between
+    /// marking a field and bulldozing a cell off it. The field re-measures its
+    /// ground on that bulldoze, and it has to do so at the size it was marked
+    /// at: re-chunking a field that has been standing for seasons changes what
+    /// it grows at for a reason the player did nothing to cause.
+    ///
+    /// Marked at 2 so the check can tell the two apart. A three-wide region
+    /// always splits unevenly across 2-cell chunks — two cells in one, one in
+    /// the other — so weighing the chunks equally is not the plain cell mean,
+    /// which is what a re-chunk at 1 would have given.
+    /// </summary>
+    private void CheckAStandingFieldKeepsItsChunkSize()
+    {
+        Vector2I? anchor = FindClearSoilRect();
+        Check("there is still a clear patch to re-measure", anchor != null);
+        if (anchor == null)
+        {
+            return;
+        }
+
+        int chunkSize = _world.FertilityChunkSize;
+        _world.FertilityChunkSize = 2;
+        Field? field = MarkRect(anchor.Value);
+        Check("the patch marked at a 2-cell chunking", field != null);
+        if (field == null)
+        {
+            _world.FertilityChunkSize = chunkSize;
+            return;
+        }
+
+        _world.FertilityChunkSize = 1;
+        _world.Clear(field.Cells[0]);
+        float atOne = _world.ChunkedFertility(field.Cells);
+        _world.FertilityChunkSize = 2;
+        float atTwo = _world.ChunkedFertility(field.Cells);
+        Check($"a standing field re-aggregates at the size it was marked at "
+            + $"({atTwo:F4}), not at the one the knob moved to ({atOne:F4})",
+            Near(_crops.FertilityOf(field.Crop), atTwo));
+        Check("and the two sizes are far enough apart for that to mean something",
+            Math.Abs(atTwo - atOne) > 0.0001f);
+        Check("while the field itself still reports what it was marked at",
+            field.FertilityChunkSize == 2);
+
+        _world.FertilityChunkSize = chunkSize;
+        ClearAll(field);
+    }
+
+    /// <summary>
+    /// The cell list is unvalidated — dev and scenario code marks fields
+    /// directly, and a cell off the map is legal input that simply weighs 0 —
+    /// so the aggregate has to cost what its <i>cells</i> cost and not what the
+    /// distance between them costs. Two cells a million apart span a trillion
+    /// chunks: bucketing them into an array over that bounding box is an
+    /// out-of-memory, or, once the width × height multiply wraps, a negative
+    /// length. A run that regresses this dies here rather than in a playtest
+    /// that dragged a field somewhere odd.
+    /// </summary>
+    private void CheckAFarFlungRegionCostsWhatItsCellsCost()
+    {
+        var near = new Vector2I(0, 0);
+        var far = new Vector2I(1 << 20, 1 << 20);
+        List<Vector2I> cells = [near, far];
+        float expected = (_world.GetFertility(near) + _world.GetFertility(far)) / 2f;
+        Check("two cells a million apart aggregate at the cost of two cells",
+            Near(_world.ChunkedFertility(cells), expected));
     }
 
     /// <summary>
