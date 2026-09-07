@@ -93,18 +93,17 @@ number, not your conversation — the brief is self-contained by construction, a
 the clean context is the point. Prompt it to:
 
 - Read the brief: `python scripts/gh_issues_read.py get <n>`.
-- **Read the `docs/implementation.md` sections covering the subsystems it is
-  about to touch — by section, not the whole file.** That file is how previous
-  issues hand over what they decided, and the rationale in it is the part not
-  recoverable from the source. Its `## Index` maps subsystem to section, and one
-  section reads out with
-  `sed -n '/^## World grid/,/^#/p' docs/implementation.md`.
+- **Read the `docs/implementation/` files covering the subsystems it is about
+  to touch — those files, not the set.** They are how previous issues hand over
+  what they decided, and the rationale in them is the part not recoverable from
+  the source. `docs/implementation.md` is the index mapping subsystem to file.
 - Implement it, following `CLAUDE.md` and the settled decisions in
   `docs/tech.md` rather than re-deciding them.
 - Make `dotnet build Arable.sln` succeed and every `scenes/dev/*SmokeTest.tscn`
   pass; write a new smoke test if `Done when` calls for one.
-- Update `docs/implementation.md`. This is the **only** channel by which the
-  next issue's agent learns what this one decided — treat it as required output,
+- Update the `docs/implementation/` file(s) it touched, adding a new one (and
+  an index row) only for a genuinely new subsystem. This is the **only** channel
+  by which the next issue's agent learns what this one decided — treat it as required output,
   not bookkeeping. Two rules on *how*, because that file is read by every later
   agent and its size is a running cost:
   - **Write the durable half only.** Why the shape was chosen, what was
@@ -112,11 +111,12 @@ the clean context is the point. Prompt it to:
     an afternoon. Not member lists, not what a test asserts, not a restatement
     of what the code plainly says — that is derivable, and it goes stale
     silently.
-  - **Stay inside the budget: no section over ~120 lines, and the file under
-    ~700.** Adding a feature is not licence to append. If a section has outgrown
-    that, cut it back in the same commit — usually by deleting inventory that
-    has since been overtaken by the code. Prefer rewriting a section to
-    appending a paragraph to it.
+  - **Stay inside the budget: no file over ~150 lines, no section over ~120.**
+    Adding a feature is not licence to append. If a file has outgrown that, cut
+    it back in the same commit — usually by deleting inventory that has since
+    been overtaken by the code — or split it and add the index row. Prefer
+    rewriting a section to appending a paragraph to it. The budget is per file
+    so that one subsystem's notes never have to be paid for out of another's.
 - Not touch git, not commit, not close the issue. The driver does that.
 - Report back in at most 15 lines: files changed, decisions made, and anything
   in the brief it deviated from or could not do.
@@ -147,12 +147,12 @@ check it against `Done when` yourself.
 asked to respect is decoration:
 
 ```bash
-wc -l docs/implementation.md   # under ~700
+wc -l docs/implementation.md docs/implementation/*.md | sort -n   # each under ~150
 awk '/^#{2,3} /{if(h!="")printf "%5d  %s\n", NR-s, h; h=$0; s=NR} \
-     END{printf "%5d  %s\n", NR-s, h}' docs/implementation.md | sort -rn | head -5
+     END{printf "%5d  %s\n", NR-s, h}' docs/implementation/*.md | sort -rn | head -5
 ```
 
-If the file is over budget or a section is past ~120 lines, cut it back yourself
+If a file is over budget or a section is past ~120 lines, cut it back yourself
 before committing, and say in the report what you cut. What comes out first is
 inventory the code now states plainly — member lists, assertion narration,
 anything a reader would go to the source for anyway. What never comes out is

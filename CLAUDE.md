@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `docs/arable-concept.html` — game concept map (core loop, systems)
 - `docs/tech.md` — engine/tech decisions (read this before making architectural choices)
-- `docs/implementation.md` — how what exists is shaped and *why*: the decisions, rejected alternatives, deferrals and traps that reading `src/` does not recover. **Read it by section, not whole** — its `## Index` maps subsystem to section, and one reads out with `sed -n '/^## World grid/,/^## /p' docs/implementation.md`. Keep it updated as features land, and keep it to the durable half: no member lists, no narration of what a test asserts, no restating what the code plainly says. Budget is ~120 lines per section and ~700 for the file; a section that outgrows it gets cut back in the same commit, not appended to.
+- `docs/implementation.md` — the index, mapping each subsystem to its file under `docs/implementation/`; those files hold how what exists is shaped and *why*: the decisions, rejected alternatives, deferrals and traps that reading `src/` does not recover. **Read the file for the subsystem you are touching, not the set.** Keep them updated as features land, and keep them to the durable half: no member lists, no narration of what a test asserts, no restating what the code plainly says. Budget is ~150 lines per file and ~120 per section; a file that outgrows it gets cut back or split in the same commit, not appended to. The budget is per file so that adding a subsystem never forces edits to another's notes.
 
 ## Engine & toolchain
 
