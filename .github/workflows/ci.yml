@@ -78,3 +78,11 @@ jobs:
       - name: Build smoke test
         timeout-minutes: 3
         run: .github/scripts/run_godot.sh res://scenes/dev/BuildSmokeTest.tscn
+
+      - name: Sim smoke test
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh res://scenes/dev/SimSmokeTest.tscn
+
+      - name: Crop smoke test
+        timeout-minutes: 3
+        run: .github/scripts/run_godot.sh res://scenes/dev/CropSmokeTest.tscn

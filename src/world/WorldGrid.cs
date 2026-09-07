@@ -21,15 +21,23 @@ namespace Arable;
 /// machines. The GridMap is presentation only — game logic must always go
 /// through this class, never read the GridMap back.
 /// </summary>
-public partial class WorldGrid : Node3D, IHashableState
+public partial class WorldGrid : Node3D, IHashableState, ISimView
 {
     private const int StartRoadHalfExtent = 16; // the starting road spans cells -16..16
 
     // MeshLibrary item ids in assets/dev/tile_library.tres.
     private const int RoadItem = 0;
-    private const int FieldItem = 1;
     private const int RockItem = 2;
     private const int WaterItem = 3;
+
+    /// <summary>
+    /// Farmland whose crop row cannot be reached — the one frame inside
+    /// <see cref="MarkField"/> before the cell → field lookup is written, and
+    /// any cell the unvalidated <see cref="SetTile"/> door makes farmland
+    /// without an owning <see cref="Field"/>. Never what the player sees: a
+    /// real field is drawn by its stage below.
+    /// </summary>
+    private const int FieldItem = 1;
 
     /// <summary>
     /// Soil is drawn in <see cref="SoilTiers"/> shades by fertility, as
@@ -42,6 +50,17 @@ public partial class WorldGrid : Node3D, IHashableState
     private const int StructureItem = 8;
 
     /// <summary>
+    /// A field cell is drawn by <b>what is standing on it</b>, one MeshLibrary
+    /// item per <see cref="CropStage"/>, consecutive from this id in enum
+    /// order — the same trick <see cref="SoilItemFirst"/> plays with fertility
+    /// tiers, and for the same reason: the mapping is arithmetic, so adding a
+    /// stage is adding a mesh rather than editing a switch. Each item differs
+    /// in <i>both</i> height and colour, because at the far end of the rig's
+    /// zoom a 2 m cell is a few pixels tall and height alone stops carrying.
+    /// </summary>
+    private const int FieldStageItemFirst = 9;
+
+    /// <summary>
     /// The stream machine spawn placement draws from. Separate from
     /// <c>MachineSystem.StreamName</c> on purpose: spawning is the world laying
     /// the game out, wandering is a machine deciding what to do, and a debug
@@ -49,6 +68,13 @@ public partial class WorldGrid : Node3D, IHashableState
     /// driving.
     /// </summary>
     public const string SpawnStreamName = "world.spawn";
+
+    /// <summary>
+    /// Cells on a side of a fertility chunk: 4, so a chunk is 8 m square — a
+    /// patch of ground about the size of the smallest field worth marking, and
+    /// small enough that a big field still spans several of them.
+    /// </summary>
+    public const int DefaultFertilityChunkSize = 4;
 
     /// <summary>Names the two terrain noise fields derive their seeds from.</summary>
     private const string FertilityNoiseName = "world.terrain.fertility";
@@ -76,7 +102,23 @@ public partial class WorldGrid : Node3D, IHashableState
     public int WorldSeed
     {
         get => Streams.WorldSeed;
-        set => Streams.Reseed(value);
+        set
+        {
+            // Reading a detached world's seed is harmless; reseeding one is
+            // not. The new seed lands on the throwaway registry of
+            // <see cref="Streams"/> and is gone the moment the world enters
+            // the tree and takes the Simulation's, so the world starts on a
+            // seed nobody asked for. Guarded on _streams as well as the tree
+            // because a world that already resolved keeps the sim's registry
+            // after it leaves, and that reseed is kept.
+            if (_streams == null && !IsInsideTree())
+            {
+                GD.PushWarning("WorldGrid: reseeded before entering the tree; "
+                    + "the new seed is dropped when the world takes the "
+                    + "Simulation's randomness. Set Simulation.WorldSeed.");
+            }
+            Streams.Reseed(value);
+        }
     }
 
     /// <summary>Noise frequency (per cell) of the fertility field.</summary>
@@ -90,6 +132,72 @@ public partial class WorldGrid : Node3D, IHashableState
 
     /// <summary>Mask values above this become rock.</summary>
     [Export] public float RockLevel { get; set; } = 0.34f;
+
+    /// <summary>
+    /// Grown days from sowing to the crop showing above ground. Exported with
+    /// the two below because crop cadence is the tempo M4 is trying to find,
+    /// and a playtest that wants to argue about it should not need a rebuild.
+    /// See <see cref="CropSystem"/> for what the numbers mean.
+    /// </summary>
+    [Export] public int CropDaysToSprout { get; set; } = CropSystem.DefaultDaysToSprout;
+
+    /// <summary>Grown days from sowing to ripe — cumulative, not on top of the sprout.</summary>
+    [Export] public int CropDaysToRipen { get; set; } = CropSystem.DefaultDaysToRipen;
+
+    /// <summary>
+    /// Whether a harvested field has to be ploughed again before it can be
+    /// sown. <b>The pacing decision M4 owns</b>: on (the default) harvest
+    /// leaves stubble and every cycle costs a ploughing pass; off, harvest
+    /// leaves the field ready to sow and ploughing is a once-per-field job.
+    /// </summary>
+    [Export] public bool StubbleNeedsPloughing { get; set; } = true;
+
+    /// <summary>
+    /// What a crop banks per tick before any factor is applied — the first term
+    /// of <c>CropSystem</c>'s product, and the knob that rescales the whole
+    /// game's crop tempo at once. Raising it shortens every cycle without
+    /// touching what a "day of growth" means.
+    /// </summary>
+    [Export] public float CropBaseGrowthRate { get; set; } = CropSystem.DefaultBaseGrowthRate;
+
+    /// <summary>
+    /// The growth multiplier per season, in <see cref="Season"/> order:
+    /// spring, summer, autumn, winter. Winter is 0 by default, which is what
+    /// makes an over-wintered crop stall instead of ripening through the dead
+    /// season — see <see cref="CropSystem.DefaultSeasonGrowth"/>.
+    /// </summary>
+    [Export] public float[] CropSeasonGrowth { get; set; } = CropSystem.DefaultSeasonGrowth;
+
+    /// <summary>
+    /// The water factor. <b>Pinned at 1 and inert</b>: nothing in the POC plan
+    /// irrigates or rains, so this is the seam the system that eventually does
+    /// writes into, not a knob with a meaning today. See
+    /// <see cref="CropSystem.DefaultWaterGrowth"/>.
+    /// </summary>
+    [Export] public float CropWaterGrowth { get; set; } = CropSystem.DefaultWaterGrowth;
+
+    /// <summary>
+    /// Cells on a side of a fertility chunk — the granularity a field's ground
+    /// is averaged at (<see cref="ChunkedFertility"/>). 1 makes it the plain
+    /// per-cell mean; larger values weigh each patch of ground the field covers
+    /// equally, however many of its cells landed in that patch.
+    /// </summary>
+    [Export] public int FertilityChunkSize { get; set; } = DefaultFertilityChunkSize;
+
+    /// <summary>
+    /// Units of produce a cell of perfect ground gives when it is cut. The
+    /// other half of what fertility buys — good soil ripens sooner and yields
+    /// more — and the knob that scales every harvest in the game at once.
+    /// </summary>
+    [Export] public float CropYieldPerCell { get; set; } = CropSystem.DefaultYieldPerCell;
+
+    /// <summary>
+    /// How many harvests off perfect ground a field's output buffer holds
+    /// before it refuses the next one. <b>The backpressure knob</b>: the field
+    /// stops itself when nothing has collected, and this says how much slack
+    /// there is before it does. See <see cref="CropSystem.DefaultOutputHarvests"/>.
+    /// </summary>
+    [Export] public int FieldOutputHarvests { get; set; } = CropSystem.DefaultOutputHarvests;
 
     private static readonly Color[] MachineColors =
     [
@@ -110,6 +218,12 @@ public partial class WorldGrid : Node3D, IHashableState
     private readonly List<Field> _fields = new();
     private readonly Dictionary<Vector2I, Field> _fieldOf = new();
     private int _fieldsCreated;
+
+    // The stage each field's cells are currently *drawn* at, so the per-frame
+    // sweep can spot the ones the sim moved and push only those. Pure view
+    // bookkeeping — derived from the crop rows, never hashed, never saved, and
+    // never read by anything that decides something.
+    private readonly Dictionary<int, CropStage> _drawnStage = new();
 
     // Buildings are entities too, and for a stronger reason: a tile enum has
     // no room for the identity M5 delivers to and M6 hangs state off (see
@@ -146,6 +260,12 @@ public partial class WorldGrid : Node3D, IHashableState
     // class already owns the road queries the machines run on, and there is
     // exactly one world.
     private MachineSystem _machines = null!;
+
+    // Crop state is entity rows too, for the reason machine state is: it is
+    // walked and hashed every tick, and a List of Fields is not an order a
+    // load has to reproduce. The registry of *which* cells a field covers stays
+    // above; only what changes with time went down there.
+    private CropSystem _crops = null!;
     private Simulation? _sim;
 
     public override void _Ready()
@@ -159,9 +279,24 @@ public partial class WorldGrid : Node3D, IHashableState
         _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
         _sim?.Register(_machines);
 
+        // The crop schedule is read against the calendar's day, so the tempo
+        // knob moves crop timing with it rather than quietly redefining how
+        // long a wheat crop takes. A scene with no sim still gets a working
+        // system, on the default day length.
+        _crops = new CropSystem(
+            _sim?.Calendar.TicksPerDay ?? GameCalendar.DefaultTicksPerDay,
+            CropDaysToSprout, CropDaysToRipen, StubbleNeedsPloughing,
+            CropBaseGrowthRate, CropSeasonGrowth, CropWaterGrowth, _sim?.Calendar,
+            CropYieldPerCell, FieldOutputHarvests);
+        _sim?.Register(_crops);
+
         // The world is state, not a system: it has nothing to tick, but a
         // determinism run and a save both have to see the map the player built.
         _sim?.RegisterState(this);
+
+        // ...and it is a view as well, because a field's appearance is a
+        // function of a crop stage the sim moves on its own. See Interpolate.
+        _sim?.RegisterView(this);
         GenerateTerrain();
         GenerateStartRoad();
         for (int i = 0; i < MachineCount; i++)
@@ -176,7 +311,9 @@ public partial class WorldGrid : Node3D, IHashableState
     public override void _ExitTree()
     {
         _sim?.Unregister(_machines);
+        _sim?.Unregister(_crops);
         _sim?.UnregisterState(this);
+        _sim?.UnregisterView(this);
     }
 
     /// <summary>
@@ -198,8 +335,20 @@ public partial class WorldGrid : Node3D, IHashableState
             RandomStreams? fromSim = Simulation.For(this)?.Streams;
             if (fromSim == null)
             {
-                GD.PushWarning("WorldGrid: no Simulation in the tree; "
-                    + "world randomness falls back to a private registry.");
+                // Two situations arrive here and only one of them is a defect.
+                // Out of the tree is the transient case this lazy resolve
+                // exists for: WorldSeed is readable before the world is built,
+                // nothing is wrong, and the registry below is dropped again on
+                // entry — so the warning would be a false alarm, and its text
+                // ("in the tree") untrue besides. In the tree with no
+                // Simulation is the broken scene, and the only one worth a
+                // word. The lossy half of a detached access — a reseed that
+                // gets dropped — warns from the WorldSeed setter instead.
+                if (IsInsideTree())
+                {
+                    GD.PushWarning("WorldGrid: no Simulation in the tree; "
+                        + "world randomness falls back to a private registry.");
+                }
                 // Deliberately not cached into _streams: an access from outside
                 // the tree must not decide the world's randomness for the rest
                 // of the run. Caching it here would leave _Ready building the
@@ -239,6 +388,87 @@ public partial class WorldGrid : Node3D, IHashableState
     /// no soil and answer 0.
     /// </summary>
     public float GetFertility(Vector2I cell) => InBounds(cell) ? _fertility[Index(cell)] : 0f;
+
+    /// <summary>
+    /// The one soil-quality number a whole field grows at: the mean of its
+    /// <b>chunk</b> means, where a chunk is a
+    /// <see cref="FertilityChunkSize"/>-cell square of the world.
+    ///
+    /// <b>Why chunks rather than the plain average of the cells.</b> A field is
+    /// a region of ground, and what makes one worth farming is the patches it
+    /// covers, not how many cells of each it happens to contain: averaging by
+    /// cell lets a field lean its rate on whichever patch it clipped most of,
+    /// so the same two patches give a different answer depending on where the
+    /// drag started. Weighing each chunk equally makes the answer a property of
+    /// the ground the field spans. It is also the granularity later work wants
+    /// — #28's yield and M9's hazards are per patch, not per cell — and setting
+    /// the size to 1 collapses it back to the exact cell mean, which is the
+    /// knob's "off".
+    ///
+    /// Chunks are aligned to the <b>world origin</b>, not to the field's own
+    /// corner, so the same ground always falls in the same chunks whoever marks
+    /// it. Walked over a flat array in ascending chunk order and never over a
+    /// dictionary: float addition is not associative, so an enumeration order
+    /// that depended on insertion history would be a determinism bug that only
+    /// showed up as a crop ripening a tick late.
+    ///
+    /// <b>Trap:</b> a row is given this number when the field is marked and
+    /// when its cells change (see <c>ReleaseFieldCell</c>) — never per tick. So
+    /// moving <see cref="FertilityChunkSize"/> at runtime re-aggregates the
+    /// fields marked after it, not the ones already standing.
+    /// </summary>
+    public float ChunkedFertility(IReadOnlyList<Vector2I> cells)
+    {
+        if (cells.Count == 0)
+        {
+            return 0f;
+        }
+
+        int size = Math.Max(1, FertilityChunkSize);
+        Vector2I min = ChunkOf(cells[0], size);
+        Vector2I max = min;
+        for (int i = 1; i < cells.Count; i++)
+        {
+            Vector2I chunk = ChunkOf(cells[i], size);
+            min = new Vector2I(Mathf.Min(min.X, chunk.X), Mathf.Min(min.Y, chunk.Y));
+            max = new Vector2I(Mathf.Max(max.X, chunk.X), Mathf.Max(max.Y, chunk.Y));
+        }
+
+        int width = max.X - min.X + 1;
+        var sums = new float[width * (max.Y - min.Y + 1)];
+        var counts = new int[sums.Length];
+        foreach (Vector2I cell in cells)
+        {
+            Vector2I chunk = ChunkOf(cell, size);
+            int i = (chunk.Y - min.Y) * width + (chunk.X - min.X);
+            sums[i] += GetFertility(cell);
+            counts[i]++;
+        }
+
+        float total = 0f;
+        int occupied = 0;
+        for (int i = 0; i < sums.Length; i++)
+        {
+            if (counts[i] == 0)
+            {
+                continue;
+            }
+            total += sums[i] / counts[i];
+            occupied++;
+        }
+        return occupied == 0 ? 0f : total / occupied;
+    }
+
+    /// <summary>
+    /// The chunk a cell falls in. Floor division, not C#'s truncation, or the
+    /// chunks either side of an axis would be half-width and the origin's
+    /// would be double.
+    /// </summary>
+    private static Vector2I ChunkOf(Vector2I cell, int size) =>
+        new(FloorDiv(cell.X, size), FloorDiv(cell.Y, size));
+
+    private static int FloorDiv(int value, int divisor) =>
+        value >= 0 ? value / divisor : -((divisor - 1 - value) / divisor);
 
     /// <summary>Whether the terrain is workable ground.</summary>
     public bool IsSoil(Vector2I cell) => GetTerrain(cell) == TerrainType.Soil;
@@ -280,7 +510,14 @@ public partial class WorldGrid : Node3D, IHashableState
         }
 
         _fieldsCreated++;
-        var field = new Field(_fieldsCreated, $"Field {_fieldsCreated}", cells);
+        // The crop row is opened before the field so the handle can be
+        // constructor input: a Field is never observable without one. The
+        // ground it stands on — how good it is and how much of it there is —
+        // is aggregated here and pushed down, because the sim has no idea what
+        // a cell is.
+        var field = new Field(
+            _fieldsCreated, $"Field {_fieldsCreated}", cells,
+            _crops.Create(_fieldsCreated, ChunkedFertility(cells), cells.Count));
         _fields.Add(field);
         foreach (Vector2I cell in cells)
         {
@@ -288,6 +525,13 @@ public partial class WorldGrid : Node3D, IHashableState
             SetTile(cell, TileType.Field);
             _fieldOf[cell] = field;
         }
+
+        // The SetTile above ran before the cell → field lookup existed, so it
+        // could only draw the "no crop row" tile. Now that the field is
+        // reachable, draw it at the stage it opened on — a field must look
+        // right the instant it is marked, not on the next rendered frame,
+        // because a stepped headless run has no frames at all.
+        DrawFieldStage(field);
         return field;
     }
 
@@ -403,10 +647,23 @@ public partial class WorldGrid : Node3D, IHashableState
             return;
         }
         field.RemoveCell(cell);
-        if (field.CellCount == 0)
+        if (field.CellCount > 0)
         {
-            _fields.Remove(field);
+            // The aggregate is only true of the cells it was taken over, so a
+            // field that lost its best corner grows slower and yields less from
+            // now on, and its output buffer holds less. Pushed on change rather
+            // than read per tick: the ground itself never moves, and the sim
+            // must be able to hash the numbers without asking the world.
+            _crops.SetGround(field.Crop, ChunkedFertility(field.Cells), field.CellCount);
+            return;
         }
+
+        _fields.Remove(field);
+        _drawnStage.Remove(field.Id);
+        // The row goes with the field, which is what makes every handle to it
+        // answer NoSuchField rather than address whatever field is marked into
+        // the recycled slot next.
+        _crops.Destroy(field.Crop);
     }
 
     /// <summary>
@@ -509,7 +766,11 @@ public partial class WorldGrid : Node3D, IHashableState
             case TileType.Road:
                 return RoadItem;
             case TileType.Field:
-                return FieldItem;
+                // The tile layer only says "farmland"; what is standing on it
+                // is the crop row's business, so the view reads through to it.
+                return GetField(cell) is { } field
+                    ? FieldStageItemFirst + (int)_crops.StageOf(field.Crop)
+                    : FieldItem;
             case TileType.Structure:
                 return StructureItem;
         }
@@ -527,6 +788,50 @@ public partial class WorldGrid : Node3D, IHashableState
     /// <summary>Pushes one cell's current state to the GridMap view.</summary>
     private void RefreshCell(Vector2I cell) =>
         _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), ViewItem(cell));
+
+    /// <summary>
+    /// <b>How a crop stage the sim moved reaches the GridMap.</b> Every other
+    /// tile changes because something called <see cref="SetTile"/>; a crop
+    /// ripens because time passed, and nothing calls anything. So the world
+    /// takes the <see cref="ISimView"/> half as well and sweeps its fields once
+    /// per rendered frame, comparing each against the stage it last drew.
+    ///
+    /// A poll, and deliberately not a callback out of <c>CropSystem</c>: an
+    /// event raised inside <see cref="ISimSystem.Tick"/> would run the view
+    /// half-way through a tick, and it would point the dependency from the sim
+    /// at the renderer — the exact direction the ownership rule forbids. This
+    /// way the sim knows nothing, and the compare is one enum per field per
+    /// frame, over a list a farm keeps in the dozens.
+    ///
+    /// <paramref name="alpha"/> is unused: a tile is a discrete state, so there
+    /// is nothing between two of them to blend.
+    /// </summary>
+    public void Interpolate(float alpha)
+    {
+        for (int i = 0; i < _fields.Count; i++)
+        {
+            Field field = _fields[i];
+            if (!_drawnStage.TryGetValue(field.Id, out CropStage drawn)
+                || drawn != _crops.StageOf(field.Crop))
+            {
+                DrawFieldStage(field);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pushes every cell of one field at its current stage and records what was
+    /// drawn, so the sweep above has something to compare against.
+    /// </summary>
+    private void DrawFieldStage(Field field)
+    {
+        _drawnStage[field.Id] = _crops.StageOf(field.Crop);
+        IReadOnlyList<Vector2I> cells = field.Cells;
+        for (int i = 0; i < cells.Count; i++)
+        {
+            RefreshCell(cells[i]);
+        }
+    }
 
     /// <summary>Center of the cell on the ground plane (y = 0).</summary>
     public Vector3 CellToWorld(Vector2I cell) =>
@@ -927,6 +1232,12 @@ public partial class WorldGrid : Node3D, IHashableState
             member.Reset();
             member.Write(field.Id);
             member.Write(field.Name);
+            // Which row the field's crop state lives in. Not derivable from
+            // either side: the row knows the field id and the field knows the
+            // slot, and a load that paired them differently would be a
+            // different world however identical both registries looked.
+            member.Write(field.Crop.Index);
+            member.Write(field.Crop.Generation);
             foreach (Vector2I cell in field.Cells)
             {
                 member.Write(cell);
@@ -962,6 +1273,12 @@ public partial class WorldGrid : Node3D, IHashableState
     /// <see cref="Simulation"/>; the <see cref="Machine"/> nodes only draw it.
     /// </summary>
     public MachineSystem Machines => _machines;
+
+    /// <summary>
+    /// Every field's crop state, in flat arrays. Reached from a cell through
+    /// <c>GetField(cell).Crop</c>; ticked by the <see cref="Simulation"/>.
+    /// </summary>
+    public CropSystem Crops => _crops;
 
     /// <summary>
     /// Spawns one machine at a random road cell: a row in

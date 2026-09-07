@@ -6,9 +6,12 @@
 #
 # The exit code alone is not a sufficient gate. A scene whose resources failed
 # to import still quits 0 while logging the failure, so a run can be green over
-# a broken load. Warnings are fatal for the same reason they are rare: the two
-# in the codebase both mean a real defect (a stranded machine, a negative
-# starting balance), so one showing up in a passing run is news either way.
+# a broken load. Warnings are fatal because every one the codebase raises marks
+# a real defect -- a stranded machine, a negative starting balance, a scene
+# missing its Simulation -- so one showing up in a passing run is news either
+# way. That rule is a live constraint on the warnings themselves: a warning a
+# smoke test is expected to trip is by definition not reporting a defect, and
+# gets narrowed at the source rather than filtered out here.
 set -uo pipefail
 
 log="$(mktemp)" || {

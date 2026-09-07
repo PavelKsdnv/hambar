@@ -7,8 +7,10 @@ namespace Arable;
 /// One field: the named region of cells the player marked with the field tool,
 /// and <b>the unit farmland is addressed by</b>. Cells carry
 /// <see cref="TileType.Field"/> so the view can draw them, but nothing in the
-/// game refers to "that field cell" — jobs, crops, yields and the output buffer
-/// M4 adds all hang off this object, one per marked rectangle.
+/// game refers to "that field cell" — jobs, crops and yields all hang off this
+/// object, one per marked rectangle. Crop state is one step further out: this
+/// object holds a <see cref="Crop"/> handle into <see cref="CropSystem"/>'s
+/// entity rows, which is where everything the sim ticks actually lives.
 ///
 /// Consequences of that choice, all of them deliberate:
 /// <list type="bullet">
@@ -32,16 +34,29 @@ public sealed class Field
     private readonly List<Vector2I> _cells;
     private readonly IReadOnlyList<Vector2I> _readOnlyCells;
 
-    public Field(int id, string name, IReadOnlyList<Vector2I> cells)
+    public Field(int id, string name, IReadOnlyList<Vector2I> cells, EntityId crop)
     {
         Id = id;
         Name = name;
+        Crop = crop;
         _cells = new List<Vector2I>(cells);
         _readOnlyCells = _cells.AsReadOnly();
     }
 
     /// <summary>Stable identity, handed out in creation order and never reused.</summary>
     public int Id { get; }
+
+    /// <summary>
+    /// The field's row in <see cref="CropSystem"/> — its stage, and everything
+    /// about it that changes with time. <b>Held, not owned</b>: this object is
+    /// the cells and the name, while anything the sim ticks lives in the entity
+    /// arrays, where a slot walk can hash and save it in an order that does not
+    /// depend on the order fields were marked in.
+    ///
+    /// Opened by <see cref="WorldGrid.MarkField"/> and closed when the field
+    /// loses its last cell, so it is alive for exactly as long as the field is.
+    /// </summary>
+    public EntityId Crop { get; }
 
     /// <summary>What the player calls it. Defaulted at creation, renameable later.</summary>
     public string Name { get; set; }

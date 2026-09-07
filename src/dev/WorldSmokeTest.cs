@@ -59,6 +59,9 @@ public partial class WorldSmokeTest : Node
     private float _pausedAlpha;
     private Vector3 _pausedRigPosition;
 
+    /// <summary>Systems registered before dev key 9 spawns anything — spawning must not add one.</summary>
+    private int _systemsBeforeSpawn;
+
     public override void _Ready()
     {
         Node main = GD.Load<PackedScene>("res://scenes/Main.tscn").Instantiate();
@@ -89,8 +92,9 @@ public partial class WorldSmokeTest : Node
             CheckEntityStorage();
             CheckRandomStreams();
 
-            // Dev key 9 spawns a machine — one of the two shortcuts left over
-            // from the number-key menu the build palette replaced.
+            // Dev key 9 spawns a machine — one of the shortcuts left over from
+            // the number-key menu the build palette replaced.
+            _systemsBeforeSpawn = _sim.SystemCount;
             Input.ParseInputEvent(new InputEventAction { Action = "menu_9", Pressed = true });
         }
         else if (_frame == 10)
@@ -101,9 +105,10 @@ public partial class WorldSmokeTest : Node
             }
             Check("dev key 9 spawned a machine", _startPositions.Count == 1);
             // One system for every machine, not one system per machine: the
-            // sim registration count must not track the entity count.
+            // sim registration count must not track the entity count, whatever
+            // else the world has registered beside the machines.
             Check("the machine registered with the sim",
-                _sim.SystemCount == 1 && _world.Machines.Count == 1);
+                _sim.SystemCount == _systemsBeforeSpawn && _world.Machines.Count == 1);
             foreach (Machine machine in _startPositions.Keys)
             {
                 Check("the machine node draws a live sim entity",
