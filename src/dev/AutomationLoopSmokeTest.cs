@@ -15,21 +15,20 @@ namespace Arable;
 /// and reads it back — nothing here ever calls <c>SetOrder</c>,
 /// <c>TryAssign</c> or touches a buffer a second time.
 ///
-/// <b>Finding, not a workaround.</b> <see cref="OrderKind.HaulGoods"/> can only
-/// name a <see cref="Structure"/> at each end — <see cref="Order.Haul"/> takes
-/// two structure ids, and <see cref="MachineSystem"/>'s haul execution only
-/// ever calls <see cref="WorldGrid.GetStructure(int)"/> on them. A field's own
-/// harvest buffer (<see cref="CropSystem.OutputOf"/>) is not a
-/// <see cref="Structure"/> and has no id in that registry, so no haul order
-/// can name it — "field to silo" is not, today, one order a player can give.
-/// See `## Orders` in `orders.md`: it already flagged this as unbuilt and
-/// named this issue as the one that might first need it. This test does not
-/// invent a fifth order kind to bridge that gap; it proves the two halves
-/// that genuinely exist — a harvester filling the field's own buffer
-/// unattended, and a truck's standing haul order unattended clearing a silo
-/// into a depot for money — separately, with the silo seeded at setup exactly
-/// the way <see cref="SiloSmokeTest"/>'s sources are. Closing the actual gap
-/// is left to whoever picks it up next.
+/// <b>One chain, three standing orders, nobody touching it.</b> A harvester
+/// cuts the field into the field's own buffer (`crops.md`), one truck hauls
+/// that buffer into the silo, a second truck hauls the silo into the depot,
+/// which sells. All three orders are given once and repeat; the field takes
+/// several simulated days to ripen, so both trucks legitimately sit on
+/// <see cref="OrderBlock.SourceEmpty"/> until there is something to carry —
+/// waiting, which is the correct behaviour, not a stall to be fixed.
+///
+/// <b>The sale is measured as a rise, tick by tick, never as a final
+/// balance.</b> Three hired workers draw a wage every simulated day and this
+/// run spans several, so the closing balance is worth *less* than the opening
+/// one plus the sale. Only a depot sale ever credits this scene and only a
+/// wage ever debits it, so summing the per-tick increases isolates the grain
+/// revenue exactly, and it stays exact however many pay days the run crosses.
 ///
 /// <b>The second half is a regression guard on a design rule, not a
 /// functional check</b> (<see cref="CheckAnUnprogrammedVehicleTakesNoWork"/>).
@@ -44,8 +43,6 @@ public partial class AutomationLoopSmokeTest : Node
     private const int SiloCapacity = 100;
     private const int DepotCapacity = 100;
 
-    /// <summary>Small on purpose — matches the scale of the silo/depot tests, not a played economy.</summary>
-    private const int SiloStock = 30;
 
     private Node _main = null!;
     private WorldGrid _world = null!;
@@ -98,14 +95,10 @@ public partial class AutomationLoopSmokeTest : Node
         }
 
         ProgramTheCrew(
-            out EntityId harvester, out EntityId truck, out EntityId loner,
-            out Vector2I lonerStart, out int preSaleBalance);
+            out EntityId harvester, out EntityId carter, out EntityId truck,
+            out EntityId loner, out Vector2I lonerStart);
 
-        // The sale finishes in well under a day (see the wage-slack note in
-        // the check itself), so it is checked first; the field takes several
-        // simulated days to ripen and is checked after, in the same run.
-        CheckTheCrewEarnsMoneyUnattended(truck, preSaleBalance);
-        CheckTheFieldIsHarvestedIntoItsOwnBufferUnattended(harvester);
+        CheckTheChainEarnsMoneyUnattended(harvester, carter, truck);
         CheckAnUnprogrammedVehicleTakesNoWork(loner, lonerStart);
 
         FinishAndQuit();
@@ -160,8 +153,8 @@ public partial class AutomationLoopSmokeTest : Node
     /// own trap).
     /// </summary>
     private void ProgramTheCrew(
-        out EntityId harvester, out EntityId truck, out EntityId loner,
-        out Vector2I lonerStart, out int preSaleBalance)
+        out EntityId harvester, out EntityId carter, out EntityId truck, out EntityId loner,
+        out Vector2I lonerStart)
     {
         Check("the field can be ploughed directly, as test setup",
             _crops.Plough(_field.Crop) == CropOpResult.Ok);
@@ -169,12 +162,15 @@ public partial class AutomationLoopSmokeTest : Node
             _crops.Sow(_field.Crop) == CropOpResult.Ok);
 
         Machine? harvesterNode = _world.SpawnMachine(MachineKind.Harvester);
+        Machine? carterNode = _world.SpawnMachine(MachineKind.Truck);
         Machine? truckNode = _world.SpawnMachine(MachineKind.Truck);
         Machine? lonerNode = _world.SpawnMachine(MachineKind.Truck);
         Check("a harvester is on the road", harvesterNode != null);
+        Check("a truck is on the road to clear the field", carterNode != null);
         Check("a truck is on the road for the sale", truckNode != null);
-        Check("a third vehicle is on the road, and gets no worker or order", lonerNode != null);
+        Check("a fourth vehicle is on the road, and gets no worker or order", lonerNode != null);
         harvester = harvesterNode?.Entity ?? EntityId.None;
+        carter = carterNode?.Entity ?? EntityId.None;
         truck = truckNode?.Entity ?? EntityId.None;
         loner = lonerNode?.Entity ?? EntityId.None;
         lonerStart = lonerNode != null ? _machines.CellOf(loner) : Vector2I.Zero;
@@ -182,57 +178,45 @@ public partial class AutomationLoopSmokeTest : Node
         Check("a worker can crew the harvester",
             _pool.TryHire(out EntityId harvesterDriver) == HireResult.Ok
             && _fleet.TryAssign(harvesterDriver, harvester) == AssignResult.Ok);
-        Check("a worker can crew the truck",
+        Check("a worker can crew the field truck",
+            _pool.TryHire(out EntityId carterDriver) == HireResult.Ok
+            && _fleet.TryAssign(carterDriver, carter) == AssignResult.Ok);
+        Check("a worker can crew the sale truck",
             _pool.TryHire(out EntityId truckDriver) == HireResult.Ok
             && _fleet.TryAssign(truckDriver, truck) == AssignResult.Ok);
 
-        _silo.Storage.Add(ItemTypes.Grain, SiloStock);
-
+        // The whole chain, authored in three orders and then left alone. The
+        // silo is not seeded: every unit that reaches the depot has to have
+        // been cut out of the field and carried by these two trucks.
         Check("the harvester accepts a standing order to harvest the field",
             _machines.SetOrder(harvester, Order.Harvest(_field.Id)) == SetOrderResult.Ok);
-        Check("the truck accepts a standing order to haul the silo's grain to the depot",
+        Check("a truck accepts a standing order to haul the field's own buffer into the silo",
+            _machines.SetOrder(carter, Order.HaulFromField(ItemTypes.Grain, _field.Id, _silo.Id))
+                == SetOrderResult.Ok);
+        Check("a truck accepts a standing order to haul the silo's grain to the depot",
             _machines.SetOrder(truck, Order.Haul(ItemTypes.Grain, _silo.Id, _depot.Id))
                 == SetOrderResult.Ok);
 
         // Nothing about the loner: no hire, no crew, no order. That absence
         // is the entire setup for the second half of this test.
-
-        preSaleBalance = _economy.Balance;
     }
 
     /// <summary>
-    /// The first headline claim, the half of it a haul order can actually
-    /// run today: a truck given one standing order drives to the silo, loads,
-    /// delivers to the depot and sells — and the balance rises — with no
-    /// further input. The exact sale amount is not asserted against an exact
-    /// balance: a run this long can cross a day boundary and pay a wage in
-    /// the same window (`orders.md`'s trap), so the rise is bounded instead —
-    /// at most the full sale (nothing else in this run adds money), at least
-    /// the sale minus one day's wage for the two hired workers (the only way
-    /// a wage tick could land inside this short a window).
+    /// M5's headline claim, whole: field to silo to depot earns money, with
+    /// no input after the orders were set. One loop drives the entire chain
+    /// and watches it, because the legs overlap — the field is ripening while
+    /// both trucks wait on <see cref="OrderBlock.SourceEmpty"/>, and a truck
+    /// may be mid-run when the next cut lands.
+    ///
+    /// <b>Revenue is summed from per-tick rises, not read off the closing
+    /// balance.</b> Only a depot sale credits this scene and only the daily
+    /// wage debits it, so every upward step is grain money and the total is
+    /// exact no matter how many pay days the run crosses — where a closing
+    /// balance would have to be given a wage-shaped tolerance and would then
+    /// no longer be measuring the sale.
     /// </summary>
-    private void CheckTheCrewEarnsMoneyUnattended(EntityId truck, int preSaleBalance)
-    {
-        bool sold = StepUntil(() => _economy.Balance > preSaleBalance, 400);
-        Check("a truck hauls the silo's grain to the depot and sells it, with no further input",
-            sold && _machines.CargoOf(truck)!.IsEmpty && _silo.Storage.IsEmpty);
-        Check("nothing blocked the delivery", _machines.BlockOf(truck) == OrderBlock.None);
-
-        int rise = _economy.Balance - preSaleBalance;
-        int saleValue = _economy.PriceOf(ItemTypes.Grain) * SiloStock;
-        int wageSlack = _pool.DailyWage * 2;
-        Check("the rise is exactly the grain sale, give or take one day's wage for the two workers",
-            rise <= saleValue && rise >= saleValue - wageSlack);
-    }
-
-    /// <summary>
-    /// The other half of the first claim: the field, worked by its own
-    /// standing harvest order, ripens and is cut with no further input, and
-    /// the yield lands in the field's own buffer — never the harvester's
-    /// cargo (`crops.md`). This is the leg a haul order cannot continue from;
-    /// see the finding in this class's own doc comment.
-    /// </summary>
-    private void CheckTheFieldIsHarvestedIntoItsOwnBufferUnattended(EntityId harvester)
+    private void CheckTheChainEarnsMoneyUnattended(
+        EntityId harvester, EntityId carter, EntityId truck)
     {
         float rate = _crops.GrowthPerTick(_field.Crop);
         Check("the field has a real growth rate to ripen at", rate > 0f);
@@ -241,16 +225,56 @@ public partial class AutomationLoopSmokeTest : Node
             return;
         }
 
-        int growTicks = (int)(_crops.TicksToRipen / rate) + 20;
-        bool ripe = StepUntil(() => _crops.StageOf(_field.Crop) == CropStage.Harvestable, growTicks);
-        Check("the field ripens on its own over the simulated days", ripe);
+        // Long enough for the field to ripen, be cut, and for both trucks to
+        // run their legs afterwards — the ripening dominates it.
+        int budget = (int)(_crops.TicksToRipen / rate) + 1200;
+        int previous = _economy.Balance;
+        int revenue = 0;
+        bool harvesterEverCarried = false;
+        bool carterEverCarried = false;
+        bool truckEverCarried = false;
 
-        bool cut = StepUntil(() => _crops.StageOf(_field.Crop) != CropStage.Harvestable, 400);
-        Check("the harvester cuts it the moment it is ready, with no further input", cut);
-        Check("the yield landed in the field's own buffer, not the harvester's",
-            _crops.OutputOf(_field.Crop)!.CountOf(ItemTypes.Grain) > 0
-            && _machines.CargoOf(harvester)!.IsEmpty);
-        Check("nothing blocked the harvester", _machines.BlockOf(harvester) == OrderBlock.None);
+        // *Cargo*, not the buffers at either end. A truck parked on a source
+        // it is blocked on loads the moment something appears there, inside
+        // the same tick that put it there, so sampling the field's buffer or
+        // the silo once a tick can read zero for a delivery that did happen.
+        // A hold, by contrast, stays full for the whole drive across.
+        for (int t = 0; t < budget && revenue == 0; t++)
+        {
+            _sim.Step();
+
+            int now = _economy.Balance;
+            if (now > previous)
+            {
+                revenue += now - previous;
+            }
+            previous = now;
+
+            harvesterEverCarried |= !_machines.CargoOf(harvester)!.IsEmpty;
+            carterEverCarried |= _machines.CargoOf(carter)!.CountOf(ItemTypes.Grain) > 0;
+            truckEverCarried |= _machines.CargoOf(truck)!.CountOf(ItemTypes.Grain) > 0;
+        }
+
+        Check("the yield went to the field's own buffer, never the harvester's cargo",
+            !harvesterEverCarried);
+        Check("a truck carried grain out of the field, so the field was cut and drained",
+            carterEverCarried);
+        Check("a truck carried grain out of the silo, which only that first truck can fill",
+            truckEverCarried);
+        Check("the depot sold it and the balance rose", revenue > 0);
+        Check("every unit sold was cut from the field this run, priced at PriceOf(grain)",
+            revenue > 0 && revenue % _economy.PriceOf(ItemTypes.Grain) == 0);
+
+        // Blocked is the ordinary state here, not a fault: a truck whose
+        // source is empty waits for the next cut. What must never happen is
+        // a vehicle that answers a block by doing something else, so the
+        // orders themselves are re-read — unchanged, still theirs.
+        Check("all three kept the exact orders they were given, start to finish",
+            _machines.OrderOf(harvester) is { Kind: OrderKind.HarvestField }
+            && _machines.OrderOf(carter) is
+                { Kind: OrderKind.HaulGoods, FromKind: HaulSourceKind.Field }
+            && _machines.OrderOf(truck) is
+                { Kind: OrderKind.HaulGoods, FromKind: HaulSourceKind.Structure });
     }
 
     /// <summary>

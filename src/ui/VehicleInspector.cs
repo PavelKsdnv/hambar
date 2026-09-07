@@ -27,11 +27,12 @@ namespace Arable;
 /// vehicle uses <see cref="MachineSystem.Occupancy"/> at that cell rather than
 /// a second spatial index.</item>
 /// <item><b>Legality at pick time is a type match, nothing finer.</b> A field
-/// order accepts any field, a haul accepts any building — exactly as far as
-/// <see cref="Order"/>'s own doc comment takes it ("existence is checked at
-/// execution, not at assignment"). Whether that field is at the right stage or
-/// that building has room is <see cref="OrderBlock"/>'s job once the vehicle
-/// gets there, not this panel's to guess at the click.</item>
+/// order accepts any field; a haul's source accepts any field or building,
+/// its destination any building — exactly as far as <see cref="Order"/>'s own
+/// doc comment takes it ("existence is checked at execution, not at
+/// assignment"). Whether that field is at the right stage or that building
+/// has room is <see cref="OrderBlock"/>'s job once the vehicle gets there, not
+/// this panel's to guess at the click.</item>
 /// </list>
 ///
 /// It is anchored to the <b>right edge, vertically centred</b> — the mirror of
@@ -108,6 +109,9 @@ public partial class VehicleInspector : Control
 
     /// <summary>The haul's source, once named — null until the first of the two picks lands.</summary>
     private int? _haulFromId;
+
+    /// <summary>Which registry <see cref="_haulFromId"/> names. Meaningless while it is null.</summary>
+    private HaulSourceKind _haulFromKind;
 
     public bool IsOpen => Selected != EntityId.None;
 
@@ -279,12 +283,13 @@ public partial class VehicleInspector : Control
         _panel.Visible = true;
     }
 
-    private static string HintFor(OrderKind kind) => kind switch
+    private string HintFor(OrderKind kind) => kind switch
     {
         OrderKind.PloughField => "pick a field to plough",
         OrderKind.SowField => "pick a field to sow",
         OrderKind.HarvestField => "pick a field to harvest",
-        OrderKind.HaulGoods => "pick a building",
+        OrderKind.HaulGoods when _haulFromId == null => "pick a field or building to load from",
+        OrderKind.HaulGoods => "pick a building to deliver to",
         _ => "",
     };
 
@@ -310,6 +315,7 @@ public partial class VehicleInspector : Control
         DisarmBuildTools();
         PickingAction = kind;
         _haulFromId = null;
+        _haulFromKind = HaulSourceKind.Structure;
         AddToGroup(PickingGroup);
         RefreshHighlight();
         Refresh();
@@ -325,6 +331,7 @@ public partial class VehicleInspector : Control
         }
         PickingAction = null;
         _haulFromId = null;
+        _haulFromKind = HaulSourceKind.Structure;
         RemoveFromGroup(PickingGroup);
         ClearHighlight();
         Refresh();
@@ -342,12 +349,12 @@ public partial class VehicleInspector : Control
     /// <summary>
     /// The programmatic equivalent of a picking click: resolves the target at
     /// <paramref name="cell"/>, refuses one of the wrong kind, and — for a
-    /// haul — takes two calls, the first naming the source and the second the
-    /// destination. This is the one door both a mouse click and a headless
-    /// test use to name a target; neither ever calls
-    /// <see cref="MachineSystem.SetOrder"/> directly. Returns whether the pick
-    /// was accepted; a refusal leaves picking mode exactly as it was so the
-    /// player can re-aim.
+    /// haul — takes two calls, the first naming the source (a field or a
+    /// building) and the second the destination (a building only). This is
+    /// the one door both a mouse click and a headless test use to name a
+    /// target; neither ever calls <see cref="MachineSystem.SetOrder"/>
+    /// directly. Returns whether the pick was accepted; a refusal leaves
+    /// picking mode exactly as it was so the player can re-aim.
     /// </summary>
     public bool PickTargetAt(Vector2I cell)
     {
@@ -358,20 +365,38 @@ public partial class VehicleInspector : Control
 
         if (kind == OrderKind.HaulGoods)
         {
-            Structure? structure = World.GetStructure(cell);
-            if (structure == null)
-            {
-                GD.Print("VehicleInspector: refused - no building there");
-                return false;
-            }
             if (_haulFromId == null)
             {
-                _haulFromId = structure.Id;
+                if (World.GetField(cell) is { } sourceField)
+                {
+                    _haulFromId = sourceField.Id;
+                    _haulFromKind = HaulSourceKind.Field;
+                }
+                else if (World.GetStructure(cell) is { } sourceStructure)
+                {
+                    _haulFromId = sourceStructure.Id;
+                    _haulFromKind = HaulSourceKind.Structure;
+                }
+                else
+                {
+                    GD.Print("VehicleInspector: refused - no field or building there");
+                    return false;
+                }
                 RefreshHighlight();
                 Refresh();
                 return true;
             }
-            World.Machines.SetOrder(Selected, Order.Haul(ItemTypes.Grain, _haulFromId.Value, structure.Id));
+
+            Structure? destination = World.GetStructure(cell);
+            if (destination == null)
+            {
+                GD.Print("VehicleInspector: refused - no building there");
+                return false;
+            }
+            Order haul = _haulFromKind == HaulSourceKind.Field
+                ? Order.HaulFromField(ItemTypes.Grain, _haulFromId.Value, destination.Id)
+                : Order.Haul(ItemTypes.Grain, _haulFromId.Value, destination.Id);
+            World.Machines.SetOrder(Selected, haul);
             CancelPicking();
             return true;
         }
@@ -509,21 +534,37 @@ public partial class VehicleInspector : Control
             return;
         }
 
-        bool wantsField = kind != OrderKind.HaulGoods;
-        float y = wantsField ? FieldHighlightY : StructureHighlightY;
-        var cells = new List<Vector2I>();
-        if (wantsField)
+        // What is legal depends on the action *and*, for a haul, which half of
+        // it is still unnamed: a load may come off a field's own harvest buffer
+        // or out of a building, while a delivery only ever goes into a
+        // building. Lighting the union while the source is open is the whole
+        // visible difference the field-as-source seam makes to the player.
+        bool pickingHaulSource = kind == OrderKind.HaulGoods && _haulFromId == null;
+        bool allowFields = kind != OrderKind.HaulGoods || pickingHaulSource;
+        bool allowStructures = kind == OrderKind.HaulGoods;
+
+        // Height is per cell, not per pick: a field's highlight has only a crop
+        // to clear and a building's has the whole silo, so a union of both
+        // drawn at one Y would sink into one or float absurdly over the other.
+        var cells = new List<(Vector2I Cell, float Y)>();
+        if (allowFields)
         {
             foreach (Field f in World.Fields)
             {
-                cells.AddRange(f.Cells);
+                foreach (Vector2I c in f.Cells)
+                {
+                    cells.Add((c, FieldHighlightY));
+                }
             }
         }
-        else
+        if (allowStructures)
         {
             foreach (Structure s in World.Structures)
             {
-                cells.AddRange(s.Cells);
+                foreach (Vector2I c in s.Cells)
+                {
+                    cells.Add((c, StructureHighlightY));
+                }
             }
         }
 
@@ -531,17 +572,23 @@ public partial class VehicleInspector : Control
         for (int i = 0; i < cells.Count; i++)
         {
             _highlightMesh.SetInstanceTransform(
-                i, new Transform3D(Basis.Identity, World.CellToWorld(cells[i]) + Vector3.Up * y));
+                i,
+                new Transform3D(
+                    Basis.Identity,
+                    World.CellToWorld(cells[i].Cell) + Vector3.Up * cells[i].Y));
             _highlightMesh.SetInstanceColor(i, LegalHighlight);
         }
 
         Vector2I? hover = CellPicker.CellUnderMouse(this, World);
         if (hover is { } cell)
         {
-            bool legal = wantsField ? World.GetField(cell) != null : World.GetStructure(cell) != null;
-            _cursor.Position = World.CellToWorld(cell) + Vector3.Up * (y + 0.02f);
+            bool overField = allowFields && World.GetField(cell) != null;
+            bool overStructure = allowStructures && World.GetStructure(cell) != null;
+            float cursorY = overField ? FieldHighlightY : StructureHighlightY;
+            _cursor.Position = World.CellToWorld(cell) + Vector3.Up * (cursorY + 0.02f);
             _cursor.Visible = true;
-            _cursorMaterial.AlbedoColor = legal ? CursorLegalColor : CursorRefusedColor;
+            _cursorMaterial.AlbedoColor =
+                overField || overStructure ? CursorLegalColor : CursorRefusedColor;
         }
         else
         {

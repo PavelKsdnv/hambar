@@ -333,7 +333,7 @@ public partial class OrderSmokeTest : Node
             _machines.SetOrder(_truck, Order.Haul(ItemTypes.Grain, _structB.Id, _structA.Id))
                 == SetOrderResult.Ok);
         Check("the loaded truck is still running the order it picked the load up under",
-            _machines.OrderOf(_truck)?.FromStructureId == _structA.Id);
+            _machines.OrderOf(_truck)?.FromId == _structA.Id);
 
         bool delivered = StepUntil(() => _machines.CargoOf(_truck)!.IsEmpty, 400, _truck, seen);
         Check("the truck finishes delivering the load it already picked up", delivered);
@@ -347,7 +347,7 @@ public partial class OrderSmokeTest : Node
 
         _sim.Step(1);
         Check("only now — its cycle finished — does the re-point take over",
-            _machines.OrderOf(_truck)?.FromStructureId == _structB.Id);
+            _machines.OrderOf(_truck)?.FromId == _structB.Id);
 
         bool reloaded = StepUntil(() => !_machines.CargoOf(_truck)!.IsEmpty, 400, _truck, seen);
         Check("and the new order runs for real, picking up from B",

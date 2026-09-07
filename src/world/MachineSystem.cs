@@ -625,7 +625,12 @@ public sealed class MachineSystem : ISimSystem, IHashableState
 
     /// <summary>
     /// Drives to the source, loads, drives to the destination, unloads,
-    /// repeat — a haul between two <see cref="Structure"/>s named by id.
+    /// repeat. The destination is always a <see cref="Structure"/>; the
+    /// source is a <see cref="Structure"/> or, per <see cref="Order.FromKind"/>,
+    /// a <see cref="Field"/>'s own harvest buffer (#39) — resolved through
+    /// <see cref="WorldGrid.GetField"/> and <see cref="CropSystem.OutputOf"/>
+    /// exactly as <see cref="RunFieldOrder"/> already reads a field, road
+    /// access included, rather than a second copy of that lookup.
     /// <b>Which leg is current is read off the cargo, not stored</b>: empty
     /// means "go load", carrying means "go deliver", so there is nothing
     /// beyond <see cref="Order"/> itself for a save to have to restore.
@@ -643,17 +648,55 @@ public sealed class MachineSystem : ISimSystem, IHashableState
         ItemBuffer cargo = _cargo[i];
         bool loaded = !cargo.IsEmpty;
         OrderStep travelStep = loaded ? OrderStep.DrivingToDestination : OrderStep.DrivingToSource;
-        int structureId = loaded ? order.ToStructureId : order.FromStructureId;
 
-        Structure? structure = _world.GetStructure(structureId);
-        if (structure == null)
+        IReadOnlyList<Vector2I> cells;
+        ItemBuffer endpoint;
+        Structure? destination = null;
+
+        if (loaded)
         {
-            _step[i] = travelStep;
-            _block[i] = OrderBlock.NoSuchStructure;
-            return;
+            destination = _world.GetStructure(order.ToStructureId);
+            if (destination == null)
+            {
+                _step[i] = travelStep;
+                _block[i] = OrderBlock.NoSuchStructure;
+                return;
+            }
+            cells = destination.Cells;
+            endpoint = destination.Storage;
+        }
+        else if (order.FromKind == HaulSourceKind.Field)
+        {
+            Field? field = _world.GetField(order.FromId);
+            // A field whose crop row has gone reads the same as a field that
+            // has gone: there is no buffer to load from. Answered as a block
+            // rather than dereferenced — OutputOf returning null is the honest
+            // answer to a dead handle, and a null here would take the whole
+            // tick down over a target the player is allowed to demolish.
+            ItemBuffer? output = field == null ? null : _world.Crops.OutputOf(field.Crop);
+            if (field == null || output == null)
+            {
+                _step[i] = travelStep;
+                _block[i] = OrderBlock.NoSuchField;
+                return;
+            }
+            cells = field.Cells;
+            endpoint = output;
+        }
+        else
+        {
+            Structure? source = _world.GetStructure(order.FromId);
+            if (source == null)
+            {
+                _step[i] = travelStep;
+                _block[i] = OrderBlock.NoSuchStructure;
+                return;
+            }
+            cells = source.Cells;
+            endpoint = source.Storage;
         }
 
-        Vector2I? access = _world.FindRoadAccess(structure.Cells);
+        Vector2I? access = _world.FindRoadAccess(cells);
         if (access == null)
         {
             _step[i] = travelStep;
@@ -671,25 +714,24 @@ public sealed class MachineSystem : ISimSystem, IHashableState
         if (!loaded)
         {
             _step[i] = OrderStep.Loading;
-            int moved = ItemBuffer.Transfer(structure.Storage, cargo, order.Good, cargo.Free);
+            int moved = ItemBuffer.Transfer(endpoint, cargo, order.Good, cargo.Free);
             _block[i] = moved > 0 ? OrderBlock.None : OrderBlock.SourceEmpty;
+            return;
         }
-        else
+
+        _step[i] = OrderStep.Unloading;
+        int amount = cargo.CountOf(order.Good);
+        int delivered = ItemBuffer.Transfer(cargo, endpoint, order.Good, amount);
+        if (destination!.Kind == StructureKind.Depot && delivered > 0)
         {
-            _step[i] = OrderStep.Unloading;
-            int amount = cargo.CountOf(order.Good);
-            int moved = ItemBuffer.Transfer(cargo, structure.Storage, order.Good, amount);
-            if (structure.Kind == StructureKind.Depot && moved > 0)
-            {
-                // #38: a depot's Storage is a mouth, not a store. What just
-                // landed is sold and removed the same tick, so Storage reads
-                // empty again before the next delivery ever arrives — capacity
-                // only has to clear one truckload, never the whole economy.
-                structure.Storage.Remove(order.Good, moved);
-                _world.Economy?.Sell(order.Good, moved);
-            }
-            _block[i] = moved >= amount ? OrderBlock.None : OrderBlock.DestinationFull;
+            // #38: a depot's Storage is a mouth, not a store. What just
+            // landed is sold and removed the same tick, so Storage reads
+            // empty again before the next delivery ever arrives — capacity
+            // only has to clear one truckload, never the whole economy.
+            destination.Storage.Remove(order.Good, delivered);
+            _world.Economy?.Sell(order.Good, delivered);
         }
+        _block[i] = delivered >= amount ? OrderBlock.None : OrderBlock.DestinationFull;
     }
 
     /// <summary>

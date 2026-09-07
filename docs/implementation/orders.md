@@ -89,18 +89,21 @@ loop's ownership already sets: a read never writes sim state. A scene with no
 reading a tool without an `Economy` has, so a dev scene can put a fabricated
 crew in a cab.
 
-**A haul's endpoints are two `Structure` ids, never a field.** A field's
-harvest still lands in the field's own output buffer (`## Crops`); moving it
-from there into a building is still nobody's job — `#38`'s depot or `#39`'s
-loop test may be first to need it. `#37`'s silo needed **no** new binding here:
-a `Structure.Id` plus its one `Storage` buffer already was the interface a
-haul names and validates against (`NoSuchStructure` on a demolished one), so
-the silo landed as a `StructureKind` and a capacity, never a new order shape.
-A load or unload still takes whatever one `ItemBuffer.Transfer` moves in a
-single call, bounded by capacity on both ends, rather than topping up over
-several ticks: nothing yet produces goods fast enough for the difference to
-matter, and a policy for "wait for a fuller load" is a decision nobody has
-asked for yet.
+**A haul loads from a field *or* a building, and always delivers into a
+building.** The source carries a `HaulSourceKind` beside its id; the
+destination needs none, because nothing sells or stores into a field. Until
+`#39` both ends were structure ids, and the chain M5 exists to demonstrate
+could not be ordered at all: a harvest lands in the field's own output buffer
+(`## Crops`), which has no id in the `Structure` registry, so no order could
+drain it. Rejected: making a field a `Structure` (it is not — it has no
+`Storage`, it shrinks cell by cell, and it is atomic in neither sense), and
+harvesting into the harvester's own hold (that reverses `## Crops`, and one
+40-unit hold does not fit a field). *Trap:* the kind must be **hashed** beside
+the id — field 3 and structure 3 are different orders and would otherwise hash
+alike. `#37`'s silo needed no new binding at all: `Structure.Id` plus its one
+`Storage` was already the interface a haul names and validates against. A load
+or unload still takes whatever one `ItemBuffer.Transfer` moves in a single
+call; "wait for a fuller load" is a policy nobody has asked for.
 
 **`#38`'s depot special-cases the unload half of that split, and only after
 the fact.** `RunHaulOrder` runs the ordinary `Transfer` into `structure.Storage`

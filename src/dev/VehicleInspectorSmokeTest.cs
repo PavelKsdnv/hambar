@@ -251,6 +251,22 @@ public partial class VehicleInspectorSmokeTest : Node
             _panel.PickTargetAt(_structB.Cells[0]) && _panel.PickingAction == null);
         Check("the truck is now queued to haul grain from the source to the destination",
             _machines.PendingOrderOf(truck) == Order.Haul(ItemTypes.Grain, _structA.Id, _structB.Id));
+
+        // A field is a legal *source* and never a destination: grain comes out
+        // of a field's own harvest buffer, and nothing sells or stores back
+        // into one. The panel is the only place that rule is enforced against
+        // a click, so it is asserted here rather than left to the sim.
+        Check("picking can start again over the same truck", _panel.BeginPicking(OrderKind.HaulGoods));
+        Check("a field is accepted as the thing to load from",
+            _panel.PickTargetAt(_field.Cells[0]) && _panel.PickingAction == OrderKind.HaulGoods);
+        Check("but a field is refused as the place to deliver to",
+            !_panel.PickTargetAt(_field.Cells[0])
+            && _panel.PickingAction == OrderKind.HaulGoods);
+        Check("a building completes the field-sourced haul",
+            _panel.PickTargetAt(_structB.Cells[0]) && _panel.PickingAction == null);
+        Check("and the order names the field, not a building, as its source",
+            _machines.PendingOrderOf(truck)
+                == Order.HaulFromField(ItemTypes.Grain, _field.Id, _structB.Id));
     }
 
     private void CheckCancelPickingLeavesTheRunningOrderAlone()

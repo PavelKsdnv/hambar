@@ -17,15 +17,29 @@ public enum OrderKind
 }
 
 /// <summary>
+/// Which registry a haul's source resolves through. A field's own harvest
+/// buffer (<see cref="CropSystem.OutputOf"/>) needed a haul endpoint too
+/// (#39), and it has no id among <see cref="Structure"/>s, so the source
+/// carries this alongside its id rather than the id alone growing a second,
+/// incompatible meaning. The destination never needs the same treatment —
+/// nothing sells or stores out of a field — so only the source has a kind.
+/// </summary>
+public enum HaulSourceKind
+{
+    Structure,
+    Field,
+}
+
+/// <summary>
 /// An action plus its targets — the whole of what a player types into a
 /// vehicle. A value type on purpose: assigning one is a copy, comparing two
 /// is <c>==</c>, and it serializes for M10's saves as the handful of ints and
-/// an enum it already is, with nothing to walk and nothing that can dangle.
+/// enums it already is, with nothing to walk and nothing that can dangle.
 ///
 /// <b>One shape for every kind, not a union.</b> A <see cref="HaulGoods"/>
 /// order leaves <see cref="FieldId"/> at 0 and a field order leaves
 /// <see cref="Good"/> at <see cref="ItemType.None"/>; the unused fields cost
-/// three ints of waste and buy a struct with no discriminated-union
+/// a few ints of waste and buy a struct with no discriminated-union
 /// boilerplate for four cases that will not grow far. Build one through the
 /// factory methods below, not the constructor: they are what keeps a
 /// <see cref="PloughField"/> order from being built with a stray
@@ -51,10 +65,13 @@ public readonly record struct Order
     /// <summary>The good a haul moves. <see cref="ItemType.None"/> for a field order.</summary>
     public ItemType Good { get; private init; }
 
-    /// <summary>Where a haul loads from.</summary>
-    public int FromStructureId { get; private init; }
+    /// <summary>Whether <see cref="FromId"/> names a <see cref="Structure"/> or a <see cref="Field"/>.</summary>
+    public HaulSourceKind FromKind { get; private init; }
 
-    /// <summary>Where a haul delivers to.</summary>
+    /// <summary>Where a haul loads from — a structure id or a field id, per <see cref="FromKind"/>.</summary>
+    public int FromId { get; private init; }
+
+    /// <summary>Where a haul delivers to. Always a structure — nothing sells or stores into a field.</summary>
     public int ToStructureId { get; private init; }
 
     public static Order Plough(int fieldId) => new() { Kind = OrderKind.PloughField, FieldId = fieldId };
@@ -67,7 +84,18 @@ public readonly record struct Order
     {
         Kind = OrderKind.HaulGoods,
         Good = good,
-        FromStructureId = fromStructureId,
+        FromKind = HaulSourceKind.Structure,
+        FromId = fromStructureId,
+        ToStructureId = toStructureId,
+    };
+
+    /// <summary>A haul whose source is a field's own harvest buffer rather than a building.</summary>
+    public static Order HaulFromField(ItemType good, int fromFieldId, int toStructureId) => new()
+    {
+        Kind = OrderKind.HaulGoods,
+        Good = good,
+        FromKind = HaulSourceKind.Field,
+        FromId = fromFieldId,
         ToStructureId = toStructureId,
     };
 
@@ -75,13 +103,17 @@ public readonly record struct Order
     /// Every field, in a fixed order — what a vehicle row hashes and, in
     /// M10, saves. Written here rather than by a walker reaching into the
     /// struct, the way <see cref="ItemBuffer.HashState"/> owns its own stacks.
+    /// <see cref="FromKind"/> is written alongside <see cref="FromId"/>: two
+    /// orders with the same id but different kinds (a field 3 and a structure
+    /// 3) are different orders, and leaving it out would hash them alike.
     /// </summary>
     public void HashState(StateHash hash)
     {
         hash.Write((int)Kind);
         hash.Write(FieldId);
         hash.Write(Good.Id);
-        hash.Write(FromStructureId);
+        hash.Write((int)FromKind);
+        hash.Write(FromId);
         hash.Write(ToStructureId);
     }
 
@@ -90,7 +122,9 @@ public readonly record struct Order
         OrderKind.PloughField => $"plough field {FieldId}",
         OrderKind.SowField => $"sow field {FieldId}",
         OrderKind.HarvestField => $"harvest field {FieldId}",
-        OrderKind.HaulGoods => $"haul {Good} from {FromStructureId} to {ToStructureId}",
+        OrderKind.HaulGoods when FromKind == HaulSourceKind.Field =>
+            $"haul {Good} from field {FromId} to {ToStructureId}",
+        OrderKind.HaulGoods => $"haul {Good} from {FromId} to {ToStructureId}",
         _ => "order",
     };
 }
