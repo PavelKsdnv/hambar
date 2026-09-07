@@ -28,6 +28,7 @@ Last updated: 2026-09-07.
 | [`implementation/world-grid.md`](implementation/world-grid.md) | touching world state, terrain, tiles, roads, how a cell draws, or screen-to-cell |
 | [`implementation/crops.md`](implementation/crops.md) | touching farmland, the crop lifecycle, growth or the yield |
 | [`implementation/machines.md`](implementation/machines.md) | touching vehicles or movement |
+| [`implementation/orders.md`](implementation/orders.md) | touching what a vehicle is told to do, or why a blocked one is idle |
 | [`implementation/labour.md`](implementation/labour.md) | hiring, the payroll, or anything that costs per day |
 | [`implementation/build.md`](implementation/build.md) | adding or changing a placement tool or rule, the toolbar, buildings, removal, prices |
 | [`implementation/ui.md`](implementation/ui.md) | touching the camera, a dev key, the hover readout or a player-facing panel |

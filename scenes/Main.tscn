@@ -58,9 +58,10 @@ WorldSeed = 20260904
 SpeedSteps = PackedFloat32Array(0, 1, 2, 3)
 StartSpeedIndex = 1
 
-[node name="World" type="Node3D" parent="."]
+[node name="World" type="Node3D" parent="." node_paths=PackedStringArray("Labour")]
 script = ExtResource("2_world")
 MachineScene = ExtResource("4_machine")
+Labour = NodePath("../LabourPool")
 
 [node name="GridMap" type="GridMap" parent="World"]
 mesh_library = ExtResource("3_tiles")

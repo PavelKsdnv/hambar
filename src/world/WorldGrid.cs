@@ -84,6 +84,16 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     [Export] public int MachineCount { get; set; } = 0;
 
     /// <summary>
+    /// The people who can be in a cab, so order execution can tell a live
+    /// driver from the handle a dismissed one left behind
+    /// (<see cref="MachineSystem.CrewOf"/> is deliberately raw). Null means
+    /// this scene has no labour at all, and a crew handle is then believed as
+    /// written — the same "no such thing in this scene" reading a
+    /// <c>BuildTool</c> with no <c>Economy</c> has.
+    /// </summary>
+    [Export] public LabourPool? Labour { get; set; }
+
+    /// <summary>
     /// The map spans cells −<c>MapHalfExtent</c>..<c>MapHalfExtent</c> on both
     /// axes. 48 → a 97×97 grid = 194 m across at 2 m cells: inside the
     /// 200×200 ground plane, and a little larger than what the camera shows
@@ -533,6 +543,24 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public Field? GetField(Vector2I cell) => _fieldOf.GetValueOrDefault(cell);
 
     /// <summary>
+    /// The field with that <see cref="Field.Id"/>, or null once it has lost
+    /// its last cell — how an order refers to a field without holding the
+    /// object or a cell that might not be its any more. Linear, the same
+    /// trade <see cref="GetStructure(int)"/> makes: fields are few.
+    /// </summary>
+    public Field? GetField(int id)
+    {
+        foreach (Field field in _fields)
+        {
+            if (field.Id == id)
+            {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Marks the cells as <b>one new field</b> — the addressable unit farmland
     /// comes in (see <see cref="Field"/>) — and returns it, or null for an
     /// empty region. Cells another field owned are transferred to the new one,
@@ -927,6 +955,38 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     }
 
     /// <summary>
+    /// The road cell an order parks a vehicle on to work a field or a
+    /// building: the first cell of the footprint with a road neighbour,
+    /// walked in footprint order so the answer never depends on a
+    /// dictionary's enumeration. Null when nothing in the footprint touches
+    /// road at all — <see cref="Field"/>s are legal without one
+    /// (<c>## Fields</c>), so this is the ordinary shape of
+    /// <see cref="OrderBlock.NoRoadAccess"/> rather than a bug.
+    ///
+    /// <b>The vehicle stops here, not on the footprint itself.</b> A
+    /// structure's cell is never road and a field's is deliberately not
+    /// required to be, so "arrived" for an order means reaching this cell —
+    /// the same neighbour <see cref="PlacementRules.HasRoadAccess"/> already
+    /// asks the structure tool to require, asked here for the actual cell
+    /// rather than a yes/no. Entering the footprint itself is #36's to add.
+    /// </summary>
+    public Vector2I? FindRoadAccess(IReadOnlyList<Vector2I> cells)
+    {
+        foreach (Vector2I cell in cells)
+        {
+            foreach (Vector2I step in Steps4)
+            {
+                Vector2I neighbor = cell + step;
+                if (IsRoad(neighbor))
+                {
+                    return neighbor;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Breadth-first shortest path over road cells, including both endpoints.
     /// Steps to all 8 neighbors; a diagonal step is only allowed past a road
     /// corner (see <see cref="CanCutCorner"/>), so a stair-stepped diagonal
@@ -1163,6 +1223,13 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         new(-1, 1),
         new(-1, -1),
     ];
+
+    // The same 4-neighbourhood PlacementRules.Neighbors uses for "touches a
+    // road": sharing an edge, not a corner. A second array rather than a
+    // slice of Steps above, so this rule cannot start including diagonals the
+    // day somebody reorders that one.
+    private static readonly Vector2I[] Steps4 =
+        [Vector2I.Right, Vector2I.Left, Vector2I.Up, Vector2I.Down];
 
     /// <summary>
     /// Generates the terrain layer from <see cref="WorldSeed"/> and redraws the

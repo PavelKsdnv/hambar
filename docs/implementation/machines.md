@@ -8,8 +8,9 @@ owns.
 
 > **Nothing in here looks for work.** The tick spends a travel budget along a
 > route somebody else put there, and an empty route is the ordinary, indefinite
-> state of a vehicle rather than a fault. Until orders land, *every* machine is
-> idle — which is the point M5 exists to demonstrate.
+> state of a vehicle rather than a fault. `#34`'s orders are the only thing
+> that ever fills one — a vehicle nobody has given an order to is still idle,
+> which is the point M5 exists to demonstrate.
 
 **Wandering is gone, not disabled.** A machine used to pick a random road cell,
 BFS to it and repeat forever. That was dev scaffolding, and it hid the one
@@ -80,9 +81,9 @@ builds for free.
 is saved, hashed and invalidated with the vehicle. A registry here instead
 would be a third thing to keep level with two entity stores that both recycle
 slots. The link is stored on the *vehicle* side because the question asked
-every tick from the pathing issue onwards is "does this one have a driver",
-which has to be O(1) on the row; the reverse lookup is a walk over a handful of
-slots and needs no index.
+every tick, from `#34`'s order execution onward, is "does this one have a
+driver", which has to be O(1) on the row; the reverse lookup is a walk over a
+handful of slots and needs no index.
 
 **Dangling handles are resolved on read, never swept.** Letting a driver go
 leaves their handle on the vehicle they drove, and nothing goes looking for it:
@@ -97,9 +98,15 @@ is what makes "nowhere to park" a free refusal; charging first and refunding on
 a failed placement would put a refund path into a purchase for a case that is
 not an error.
 
-**Deferred.** Orders — what a vehicle is told to do, and the readable reason an
-idle one is idle — are next in M5, along with driving a road path to an order's
-target. Nothing fills a route yet, so nothing moves: the smoke test's *"the
-view draws poses between ticks"* assertion was dropped with the wandering and
-should come back with the first thing that supplies a route, since it is the
-only proof interpolation runs at all.
+**Orders land in `#34`** (`## Orders`) as columns on this same row rather than
+a second registry, and their execution is what finally fills the route these
+two systems were always kept ready for — read that file for what a vehicle is
+told to do and why a blocked one reports the reason it does.
+
+**Still deferred.** The dropped *"the view draws poses between ticks"*
+assertion has not come back: `#34`'s smoke test drives the sim through
+`Simulation.Step`, which explicitly does not run the frame loop
+`Machine.Interpolate` belongs to (see `## Simulation`), so it proves orders
+move a vehicle without proving the view blends it smoothly between ticks. That
+still wants a *played*, frame-driven test — `#35`'s HUD, or the screenshot
+test, are the more natural place to look at a machine than a headless one is.
