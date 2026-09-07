@@ -5,7 +5,7 @@ What exists in the codebase today and how it fits together. Companion to
 the design decisions taken since.
 
 **Every section is written to be read *alone*** — find it in the index, read
-it, stop (`sed -n '/^## World grid/,/^#/p'`). It holds only what reading `src/`
+it, stop (`sed -n '/^## World grid/,/^## /p'`). It holds only what reading `src/`
 does not recover: why a thing is shaped as it is, what was rejected, what is
 deferred. CLAUDE.md carries the rest of the rule and the budget.
 

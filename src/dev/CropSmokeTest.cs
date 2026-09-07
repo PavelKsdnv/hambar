@@ -407,10 +407,6 @@ public partial class CropSmokeTest : Node
     }
 
     /// <summary>
-    /// Crop state has to be inside <see cref="SimStateHash"/>, or the
-    /// determinism harness would pass a run whose crops diverged on tick one.
-    /// </summary>
-    /// <summary>
     /// The stage has to be readable off the map without opening anything, which
     /// makes "every stage draws its own tile" an assertion and not a matter of
     /// taste. The ones that arrive by <i>time</i> are the interesting half: no
@@ -445,6 +441,10 @@ public partial class CropSmokeTest : Node
             && _drawn[CropStage.Harvestable] != _drawn[CropStage.Growing]);
     }
 
+    /// <summary>
+    /// Crop state has to be inside <see cref="SimStateHash"/>, or the
+    /// determinism harness would pass a run whose crops diverged on tick one.
+    /// </summary>
     private void CheckCropStateIsHashed()
     {
         Check("the crops are a hashed state source", HasState(_sim, CropSystem.StateSourceName));
