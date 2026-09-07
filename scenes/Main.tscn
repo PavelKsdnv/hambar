@@ -1,4 +1,4 @@
-[gd_scene load_steps=24 format=3]
+[gd_scene load_steps=25 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
@@ -20,6 +20,7 @@
 [ext_resource type="Script" path="res://src/ui/TimeControls.cs" id="18_timecontrols"]
 [ext_resource type="Script" path="res://src/ui/FieldInspector.cs" id="19_fieldpanel"]
 [ext_resource type="Script" path="res://src/sim/LabourPool.cs" id="20_labour"]
+[ext_resource type="Script" path="res://src/world/Fleet.cs" id="21_fleet"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -168,6 +169,12 @@ Economy = NodePath("../Economy")
 PoolSize = 4
 HireFee = 500
 DailyWage = 50
+
+[node name="Fleet" type="Node" parent="." node_paths=PackedStringArray("World", "Economy", "Labour")]
+script = ExtResource("21_fleet")
+World = NodePath("../World")
+Economy = NodePath("../Economy")
+Labour = NodePath("../LabourPool")
 
 [node name="DevShortcuts" type="Node" parent="." node_paths=PackedStringArray("World", "Inspector")]
 script = ExtResource("5_devkeys")

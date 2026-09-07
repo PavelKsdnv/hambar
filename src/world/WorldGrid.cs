@@ -61,11 +61,11 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     private const int FieldStageItemFirst = 9;
 
     /// <summary>
-    /// The stream machine spawn placement draws from. Separate from
-    /// <c>MachineSystem.StreamName</c> on purpose: spawning is the world laying
-    /// the game out, wandering is a machine deciding what to do, and a debug
-    /// session that spawns an extra tractor should not reroute the ones already
-    /// driving.
+    /// The stream machine spawn placement draws from. <b>The only randomness a
+    /// vehicle is subject to</b>: where a bought one is parked is the world
+    /// laying the game out, and everything a machine does afterwards is an
+    /// order somebody typed. The machine system used to own a stream of its own
+    /// for choosing destinations; that went with the wandering.
     /// </summary>
     public const string SpawnStreamName = "world.spawn";
 
@@ -209,14 +209,6 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// </summary>
     [Export] public int StructureStorageCapacity { get; set; } = 500;
 
-    private static readonly Color[] MachineColors =
-    [
-        new(0.75f, 0.22f, 0.17f), // tractor red
-        new(0.20f, 0.42f, 0.75f), // truck blue
-        new(0.85f, 0.70f, 0.20f), // combine yellow
-        new(0.25f, 0.55f, 0.30f), // harvester green
-    ];
-
     private GridMap _gridMap = null!;
 
     // Placement layer: sparse, the player owns it.
@@ -286,7 +278,7 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         // The streams are taken once and held: they are the same objects for
         // the life of the world, and a reseed rewrites them in place.
         _spawnRng = Streams.For(SpawnStreamName);
-        _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
+        _machines = new MachineSystem(this);
         _sim?.Register(_machines);
 
         // The crop schedule is read against the calendar's day, so the tempo
@@ -901,6 +893,40 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public Vector2I RandomRoadCell(RandomStream rng) => _roadCells[rng.NextInt(_roadCells.Count)];
 
     /// <summary>
+    /// Somewhere legal to leave a vehicle: a road cell with no machine already
+    /// standing on it. False when there is no road at all, or when every cell
+    /// of it is taken — a refusal a buyer has to be able to hear, since a farm
+    /// with nowhere to park should not be charged for a truck it cannot
+    /// receive.
+    ///
+    /// One random draw picks where to start looking and the search then walks
+    /// the road list forward, wrapping. Retrying random cells instead would
+    /// make the number of draws depend on how full the road is, which is a
+    /// determinism trap: two runs that parked the same vehicles in the same
+    /// places would leave the stream in different positions.
+    /// </summary>
+    public bool TryFindParking(RandomStream rng, out Vector2I cell)
+    {
+        cell = Vector2I.Zero;
+        if (_roadCells.Count == 0)
+        {
+            return false;
+        }
+
+        int start = rng.NextInt(_roadCells.Count);
+        for (int i = 0; i < _roadCells.Count; i++)
+        {
+            Vector2I candidate = _roadCells[(start + i) % _roadCells.Count];
+            if (_machines.Occupancy.At(candidate).Count == 0)
+            {
+                cell = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Breadth-first shortest path over road cells, including both endpoints.
     /// Steps to all 8 neighbors; a diagonal step is only allowed past a road
     /// corner (see <see cref="CanCutCorner"/>), so a stair-stepped diagonal
@@ -1341,30 +1367,47 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public CropSystem Crops => _crops;
 
     /// <summary>
-    /// Spawns one machine at a random road cell: a row in
+    /// Puts one machine of the given kind on the road network: a row in
     /// <see cref="Machines"/> for the sim, and a node bound to it for the view.
-    /// The spot comes off the world's spawn stream, so a given spawn sequence is
-    /// reproducible for a world seed. Returns null when no machine scene is
-    /// assigned.
+    /// Where it parks comes off the world's spawn stream, so a given sequence
+    /// of purchases is reproducible for a world seed. Null when there is no
+    /// machine scene assigned or nowhere legal to leave it.
+    ///
+    /// <b>The unvalidated door</b>, the way <see cref="BuildRoadLine"/> is for
+    /// road: it charges nothing and asks nobody, which is what a dev key, a
+    /// scenario and a test all want. <c>Fleet.TryBuy</c> is the one the player
+    /// goes through.
     /// </summary>
-    public Machine? SpawnMachine()
+    public Machine? SpawnMachine(MachineKind kind)
     {
-        if (MachineScene == null)
+        if (MachineScene == null || !TryFindParking(_spawnRng, out Vector2I cell))
         {
             return null;
         }
 
-        // The node is instanced first only to read the exports the scene
-        // carries — Speed, TurnSpeed and CargoCapacity are spawn input to the
-        // arrays, and the sim never looks at the node again.
+        // The node is instanced first so the kind can be written onto its
+        // exports and read back out of them: Speed, TurnSpeed and
+        // CargoCapacity are spawn input to the arrays, and the sim never looks
+        // at the node again.
         var machine = MachineScene.Instantiate<Machine>();
-        Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
+        machine.ApplyKind(kind);
+        Vector3 spawn = CellToWorld(cell) + Vector3.Up * Machine.DeckHeight;
         EntityId entity = _machines.Spawn(
-            spawn, machine.Speed, machine.TurnSpeed, machine.CargoCapacity);
-        machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
+            spawn, machine.Kind, machine.Speed, machine.TurnSpeed, machine.CargoCapacity);
+        machine.Setup(_machines, entity);
         machine.Position = spawn;
+        machine.Name = $"{MachineKinds.Name(kind)}{_machinesSpawned}";
         AddChild(machine);
         _machinesSpawned++;
         return machine;
     }
+
+    /// <summary>
+    /// The next machine in the roster: tractor, harvester, truck, round again.
+    /// What a dev key and a scenario's <see cref="MachineCount"/> want — a
+    /// vehicle of each sort without having to say which — and it cycles off the
+    /// hashed spawn counter, so the sequence is part of the world rather than
+    /// of how the caller was written.
+    /// </summary>
+    public Machine? SpawnMachine() => SpawnMachine(MachineKinds.At(_machinesSpawned));
 }

@@ -139,11 +139,12 @@ public partial class SimSmokeTest : Node
 
         Check("a world asked for its seed before the tree still takes the sim's",
             world.WorldSeed == sim.WorldSeed && world.WorldSeed != seedWhileDetached);
-        // _Ready opens both of the world's streams. They have to have been
-        // opened on the sim's registry, which is the one the walker hashes.
-        Check("and the streams it opened are on the hashed registry",
-            sim.Streams.Has(WorldGrid.SpawnStreamName)
-            && sim.Streams.Has(MachineSystem.StreamName));
+        // _Ready opens the world's spawn stream. It has to have been opened on
+        // the sim's registry, which is the one the walker hashes. There is only
+        // the one now: the machine system drew from its own while it chose its
+        // own destinations, and that went with the wandering.
+        Check("the stream it opened is on the hashed registry",
+            sim.Streams.Has(WorldGrid.SpawnStreamName));
 
         main.QueueFree();
     }
@@ -316,7 +317,7 @@ public partial class SimSmokeTest : Node
         Check($"{label} spawned the machines it was asked for",
             world.Machines.Count == Machines);
         Check($"{label} hashes the world, the machines and the balance",
-            HasState(sim, "world") && HasState(sim, MachineSystem.StreamName)
+            HasState(sim, "world") && HasState(sim, MachineSystem.StateSourceName)
             && HasState(sim, "economy"));
         Check($"{label} moved: the hash is not what it started as",
             hashes[Ticks] != hashes[0]);
@@ -365,9 +366,14 @@ public partial class SimSmokeTest : Node
     /// </summary>
     private void CheckCarrierInventoriesAreHashed(Simulation sim, WorldGrid world)
     {
+        // A truck specifically. A tractor's hold is zero on purpose — it pulls
+        // implements, it does not carry grain — so the kind that hauls is the
+        // one that can show a hold reaching the hash. Spawned before the
+        // baseline is taken, so the new row is not itself the difference.
+        Machine? hauler = world.SpawnMachine(MachineKind.Truck);
         ulong before = SimStateHash.Of(sim);
-        ItemBuffer? cargo = world.Machines.CargoOf(world.Machines.IdAt(0));
-        Check("a spawned machine has a cargo hold with room in it",
+        ItemBuffer? cargo = hauler == null ? null : world.Machines.CargoOf(hauler.Entity);
+        Check("a truck has a cargo hold with room in it",
             cargo != null && cargo.IsEmpty && cargo.Capacity > 0);
         if (cargo == null)
         {
