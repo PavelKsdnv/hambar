@@ -347,7 +347,7 @@ public partial class WorkerSmokeTest : Node
         foreach (IHashableState source in _sim.States)
         {
             if (source.StateName == LabourPool.StateSourceName
-                || source.StateName == "economy")
+                || source.StateName == _economy.StateName)
             {
                 continue;
             }

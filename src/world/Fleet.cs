@@ -150,6 +150,14 @@ public partial class Fleet : Node
     /// The worker driving this vehicle, or <see cref="EntityId.None"/>. The
     /// resolved answer: a handle left behind by somebody who has since been let
     /// go reads as nobody.
+    ///
+    /// <b>Resolved against the pool only when there is one.</b> A scene with no
+    /// <see cref="Labour"/> believes the handle as written — the same rule
+    /// <c>MachineSystem.HasDriver</c> states, and it has to be the same one:
+    /// the sim would otherwise run a dev scene's fabricated crew's orders
+    /// while this reported the cab empty, which is the exact
+    /// vehicle-works-with-nobody-in-it disagreement resolving on read exists
+    /// to prevent.
     /// </summary>
     public EntityId DriverOf(EntityId vehicle)
     {
@@ -160,7 +168,11 @@ public partial class Fleet : Node
         }
 
         EntityId crew = machines.CrewOf(vehicle);
-        return Labour != null && Labour.IsAlive(crew) ? crew : EntityId.None;
+        if (crew == EntityId.None)
+        {
+            return EntityId.None;
+        }
+        return Labour == null || Labour.IsAlive(crew) ? crew : EntityId.None;
     }
 
     /// <summary>The vehicle this worker drives, or <see cref="EntityId.None"/>.</summary>

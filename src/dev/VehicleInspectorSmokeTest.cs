@@ -284,7 +284,8 @@ public partial class VehicleInspectorSmokeTest : Node
     private void CheckStopOrderQueuesIdle()
     {
         _panel.Select(_tractor);
-        _panel.StopOrder();
+        Check("the panel's stop button reports the sim accepted it",
+            _panel.StopOrder() == SetOrderResult.Ok);
         for (int t = 0; t < 20 && _machines.OrderOf(_tractor) != null; t++)
         {
             _sim.Step();

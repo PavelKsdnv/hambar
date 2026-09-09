@@ -26,15 +26,17 @@ and "queued to go idle" are different states and a lone `Order?` cannot tell
 them apart); `AdvanceOrder` is the only thing that ever promotes it.
 
 **"Next cycle, not mid-cycle" is one predicate: `committed`.** A vehicle is
-mid-commitment while a route is still in flight or while it is holding cargo
-— the two ways a vehicle can be partway through something physical — and a
-queued order waits behind either, checked once at the top of every tick.
-Neither is true of a vehicle that arrived and is simply blocked (wrong stage,
-nothing to load, no driver): that is standing still, not a commitment, so a
-re-point there takes over the very next tick. This reads as two different
-behaviours from the player's chair — "finish the delivery already on the
-truck" and "redirect it instantly, it hadn't done anything yet" — from the one
-rule, which is the point: no order kind gets its own bespoke cutover logic.
+mid-commitment while a route is in flight or while it holds cargo *it can
+still deliver* — the two ways a vehicle can be partway through something
+physical — and a queued order waits behind either, checked once at the top of
+every tick. Neither is true of a vehicle that arrived and is simply blocked
+(wrong stage, nothing to load, no driver): that is standing still, not a
+commitment, so a re-point takes over the very next tick. Two behaviours from
+the player's chair — "finish the delivery already on the truck", "redirect it
+instantly, it hadn't done anything yet" — out of one rule, which is the point:
+no order kind gets bespoke cutover logic. *Trap:* an unqualified "holds cargo"
+commits a truck whose destination was bulldozed *forever*, with `SetOrder(null)`
+itself queued behind a hold nothing can empty — hence `CanStillDeliver`.
 
 **Trap: "arrived" has to mean the route is empty, not that the cell matches.**
 The first cut compared `_cell[i]` — the coarse, discrete cell a continuous

@@ -210,12 +210,34 @@ def check_test(report, godot, name, timeout):
     status, output = run([godot, "--headless", "--path", ".", scene], timeout)
     secs = "{0:.0f}s".format(time.monotonic() - started)
     why = godot_complaint(status, output)
+    # ANSI-stripped like godot_complaint's own scan, so a colourised
+    # verdict still starts with the word this reads.
+    verdicts = [ln.strip() for ln in ANSI.sub("", output).splitlines()
+                if VERDICT.search(ln)]
     if why is None:
-        verdicts = [ln.strip() for ln in output.splitlines() if VERDICT.search(ln)]
-        note = "{0}  {1}".format(verdicts[-1][:60], secs) if verdicts else secs
-        report.add(name, True, note)
+        # Exit status is necessary, not sufficient -- the same second opinion
+        # godot_complaint takes on a scene that logged errors and quit 0. A
+        # test that prints FAIL and then exits 0 (an early return past
+        # FinishAndQuit, a hand-written Quit(0)) would otherwise be a green
+        # run over a red test, so the printed verdicts are re-read here:
+        # every one must say PASS, and a run with none never reached its
+        # assertions at all.
+        why = verdict_complaint(verdicts)
+    if why is None:
+        report.add(name, True, "{0}  {1}".format(verdicts[-1][:60], secs))
     else:
         report.add(name, False, why.splitlines()[0], why + "\n\n" + output)
+
+
+def verdict_complaint(verdicts):
+    """Why the printed PASS/FAIL lines are not green, or None if they are."""
+    if not verdicts:
+        return "exited 0 but printed no PASS or FAIL verdict at all"
+    failed = [ln for ln in verdicts if ln.startswith("FAIL")]
+    if failed:
+        head = "exited 0 but {0} check(s) printed FAIL:".format(len(failed))
+        return "\n".join([head] + failed[:10])
+    return None
 
 
 def check_docs(report):

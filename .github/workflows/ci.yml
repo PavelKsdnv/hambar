@@ -33,8 +33,10 @@ jobs:
     # hung scene must be killed by something. That is verify.py's --timeout
     # (180s per command), which names the test that hung and still reports the
     # rest; the step and job limits below are only backstops behind it, and
-    # neither has to be re-tuned when a smoke test is added.
-    timeout-minutes: 25
+    # they earn that word only while they sit above verify.py's own worst
+    # case -- 180s times the number of discovered scenes, so the arithmetic
+    # below moves when the eleventh test becomes the fifteenth.
+    timeout-minutes: 50
 
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +82,12 @@ jobs:
       - name: Smoke tests
         # The import above already ran; --no-import keeps this step from
         # repeating it once per scene.
-        timeout-minutes: 20
+        #
+        # Above verify.py's worst case, not above the observed run: 11 scenes
+        # at the 180s per-command timeout is 33 minutes, and a limit under
+        # that turns "every test hung" into a bare GitHub kill with no output
+        # instead of the per-test table naming which ones hung.
+        timeout-minutes: 40
         run: python3 scripts/verify.py --tests --no-import
 
       # docs/implementation budget, enforced rather than merely asked for. A

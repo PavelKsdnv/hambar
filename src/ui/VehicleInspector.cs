@@ -337,13 +337,25 @@ public partial class VehicleInspector : Control
         Refresh();
     }
 
-    /// <summary>Sends the vehicle back to idle once its current cycle allows it.</summary>
-    public void StopOrder()
+    /// <summary>
+    /// Sends the vehicle back to idle once its current cycle allows it, and
+    /// says whether the sim took the instruction. A vehicle demolished while
+    /// its panel was open answers <see cref="SetOrderResult.NoSuchVehicle"/>
+    /// rather than nothing at all — the panel is not the authority on what a
+    /// stale <see cref="Selected"/> still refers to, <c>MachineSystem</c> is.
+    /// </summary>
+    public SetOrderResult StopOrder()
     {
-        if (Selected != EntityId.None)
+        if (Selected == EntityId.None || World == null)
         {
-            World?.Machines.SetOrder(Selected, null);
+            return SetOrderResult.NoSuchVehicle;
         }
+        SetOrderResult result = World.Machines.SetOrder(Selected, null);
+        if (result != SetOrderResult.Ok)
+        {
+            GD.Print($"VehicleInspector: stop refused - {result}");
+        }
+        return result;
     }
 
     /// <summary>
@@ -353,8 +365,11 @@ public partial class VehicleInspector : Control
     /// building) and the second the destination (a building only). This is
     /// the one door both a mouse click and a headless test use to name a
     /// target; neither ever calls <see cref="MachineSystem.SetOrder"/>
-    /// directly. Returns whether the pick was accepted; a refusal leaves
-    /// picking mode exactly as it was so the player can re-aim.
+    /// directly. Returns whether the pick was accepted — <b>the sim's answer,
+    /// not this panel's</b>: a target of the right kind that
+    /// <see cref="MachineSystem.SetOrder"/> then refuses is still a refusal.
+    /// A refusal leaves picking mode exactly as it was so the player can
+    /// re-aim.
     /// </summary>
     public bool PickTargetAt(Vector2I cell)
     {
@@ -396,9 +411,7 @@ public partial class VehicleInspector : Control
             Order haul = _haulFromKind == HaulSourceKind.Field
                 ? Order.HaulFromField(ItemTypes.Grain, _haulFromId.Value, destination.Id)
                 : Order.Haul(ItemTypes.Grain, _haulFromId.Value, destination.Id);
-            World.Machines.SetOrder(Selected, haul);
-            CancelPicking();
-            return true;
+            return Accepted(World.Machines.SetOrder(Selected, haul));
         }
 
         Field? field = World.GetField(cell);
@@ -414,7 +427,25 @@ public partial class VehicleInspector : Control
             OrderKind.SowField => Order.Sow(field.Id),
             _ => Order.Harvest(field.Id),
         };
-        World.Machines.SetOrder(Selected, order);
+        return Accepted(World.Machines.SetOrder(Selected, order));
+    }
+
+    /// <summary>
+    /// The last word on a pick: <see cref="MachineSystem.SetOrder"/>'s verdict,
+    /// not the panel's own. Picking mode closes only on <see cref="SetOrderResult.Ok"/>,
+    /// so a vehicle that was demolished or turns out not to take this kind of
+    /// work leaves the player still aiming, exactly as a target of the wrong
+    /// kind does — <b>the refusal a panel must never invent an acceptance
+    /// over</b>, since the whole point of #7's rule is that a vehicle standing
+    /// idle can be explained.
+    /// </summary>
+    private bool Accepted(SetOrderResult result)
+    {
+        if (result != SetOrderResult.Ok)
+        {
+            GD.Print($"VehicleInspector: refused - {result}");
+            return false;
+        }
         CancelPicking();
         return true;
     }
@@ -681,7 +712,9 @@ public partial class VehicleInspector : Control
         _haulBtn = MakeButton(_actionsRow, "haul", () => BeginPicking(OrderKind.HaulGoods));
 
         _stopBtn = new Button { Text = "stop order" };
-        _stopBtn.Pressed += StopOrder;
+        // Discards the verdict on purpose: the button has already logged it,
+        // and Pressed has nowhere to put a result.
+        _stopBtn.Pressed += () => StopOrder();
         column.AddChild(_stopBtn);
 
         _pickingRow = new VBoxContainer { Name = "Picking", MouseFilter = MouseFilterEnum.Ignore, Visible = false };

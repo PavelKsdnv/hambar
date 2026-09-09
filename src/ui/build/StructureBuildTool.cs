@@ -37,22 +37,50 @@ public partial class StructureBuildTool : BuildTool
     /// <see cref="BuildTool.CostPerCell"/> is: a playtest argues about a
     /// number, not a rebuild. <see cref="WorldGrid.PlaceStructure"/> only
     /// falls back to <see cref="StructureKinds"/>' default when something
-    /// places a building without going through a tool at all.
+    /// places a building without going through a tool at all. Left unset, this
+    /// node takes the same default in <see cref="_Ready"/>.
     /// </summary>
     [Export] public int StorageCapacity { get; set; }
 
     /// <summary>
     /// A building is the expensive decision, and its footprint is one cell, so
-    /// <see cref="BuildTool.CostPerCell"/> is simply its price. The
-    /// constructor's defaults name this instance after <see cref="Kind"/>;
-    /// Main.tscn's exports win, so a second node placing a different kind
-    /// overrides all three independently.
+    /// <see cref="BuildTool.CostPerCell"/> is simply its price. Kind-independent,
+    /// so it belongs to the constructor; the two defaults that read
+    /// <see cref="Kind"/> do not, and are in <see cref="_Ready"/> instead.
     /// </summary>
     public StructureBuildTool()
     {
-        DisplayName = StructureKinds.Name(Kind);
         CostPerCell = 250;
-        StorageCapacity = StructureKinds.DefaultStorageCapacity(Kind);
+    }
+
+    /// <summary>
+    /// Fills in the two defaults that depend on <see cref="Kind"/>, and
+    /// <b>here rather than in the constructor because that is the earliest
+    /// point where <see cref="Kind"/> is this node's own.</b> Godot applies a
+    /// scene's exports after construction, so a constructor reading
+    /// <see cref="Kind"/> reads the field initialiser — <c>Silo</c> — whatever
+    /// the node in Main.tscn says, and the depot node would have been named
+    /// "Silo" and given the silo's capacity if it did not happen to set both
+    /// itself.
+    ///
+    /// Only an unset value is filled: an empty name, or a capacity of zero,
+    /// which is what a node that named a <see cref="Kind"/> and left the rest
+    /// alone looks like. Anything the scene did set is left exactly as
+    /// configured — a deliberate zero-capacity building is not a shape
+    /// anything asks for, and a kind's default is a better answer for it than
+    /// a building that refuses every delivery.
+    /// </summary>
+    public override void _Ready()
+    {
+        base._Ready();
+        if (string.IsNullOrEmpty(DisplayName))
+        {
+            DisplayName = StructureKinds.Name(Kind);
+        }
+        if (StorageCapacity <= 0)
+        {
+            StorageCapacity = StructureKinds.DefaultStorageCapacity(Kind);
+        }
     }
 
     protected override TileType PlacedTile => TileType.Structure;

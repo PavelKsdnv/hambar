@@ -54,6 +54,11 @@ public partial class OrderSmokeTest : Node
     private Structure _structC = null!;
     private Structure _structD = null!;
 
+    // The truck CheckAStructureOnADisconnectedRoadBlocksForever leaves loaded
+    // and waiting, handed on to the section that then bulldozes what it is
+    // waiting for.
+    private EntityId _islandTruck = EntityId.None;
+
     private EntityId _tractor;
     private EntityId _truck;
     private EntityId _harvester;
@@ -108,6 +113,7 @@ public partial class OrderSmokeTest : Node
         CheckAFieldWithNoRoadAccessBlocksForever();
         CheckHaulingMovesGoodsAndFinishesBeforeRepointing();
         CheckAStructureOnADisconnectedRoadBlocksForever();
+        CheckBulldozingTheDestinationGivesTheTruckBack();
         CheckHarvestFillsTheFieldsOwnBufferNotTheVehicles();
         CheckOrdersAreHashedSimState();
 
@@ -378,6 +384,7 @@ public partial class OrderSmokeTest : Node
         Machine? node = _world.SpawnMachine(MachineKind.Truck);
         Check("a second truck is on the road", node != null);
         EntityId truck2 = node!.Entity;
+        _islandTruck = truck2;
 
         _world.BuildRoadLine(new Vector2I(-16, 10), new Vector2I(-16, 13));
         Vector2I? islandSite = FindSiteAlongRoad(-16, 10, 13);
@@ -424,6 +431,59 @@ public partial class OrderSmokeTest : Node
             && _machines.BlockOf(truck2) == OrderBlock.NoRoadAccess
             && _machines.CargoOf(truck2)!.CountOf(ItemTypes.Grain) == 50
             && _structC.Storage.IsEmpty);
+    }
+
+    /// <summary>
+    /// <b>The other half of "a loaded truck finishes its delivery first": it
+    /// must not finish one that can never finish.</b> Picks the section above
+    /// up exactly where it left off — a truck holding fifty units for a
+    /// structure it cannot reach — and bulldozes that structure, which is a
+    /// thing the player may do at any time and needs no vehicle's permission.
+    ///
+    /// Before <c>MachineSystem.CanStillDeliver</c>, this was where a vehicle
+    /// went to die: the hold made it permanently committed, only its own
+    /// delivery could empty the hold, and every order queued behind that
+    /// — <c>SetOrder(null)</c> included, so not even "stop" got it back. Both
+    /// halves are asserted here because both are the fix: stop is *taken*,
+    /// and a replacement order then carries the stranded load out.
+    /// </summary>
+    private void CheckBulldozingTheDestinationGivesTheTruckBack()
+    {
+        if (_islandTruck == EntityId.None || _structC == null)
+        {
+            return;
+        }
+
+        Check("the truck is still holding the load it could never deliver",
+            _machines.CargoOf(_islandTruck)!.CountOf(ItemTypes.Grain) == 50);
+        Check("the player may demolish the destination out from under it",
+            _world.Clear(_structC.Cells[0]) != null
+            && _world.GetStructure(_structC.Id) == null);
+
+        _sim.Step(2);
+        Check("the block changes to say the destination is simply gone",
+            _machines.BlockOf(_islandTruck) == OrderBlock.NoSuchStructure
+            && _machines.CargoOf(_islandTruck)!.CountOf(ItemTypes.Grain) == 50);
+
+        Check("stopping it is accepted", _machines.SetOrder(_islandTruck, null) == SetOrderResult.Ok);
+        _sim.Step(2);
+        Check("and actually takes, rather than queuing behind a delivery that cannot happen",
+            _machines.OrderOf(_islandTruck) == null
+            && _machines.StepOf(_islandTruck) == OrderStep.Idle
+            && _machines.BlockOf(_islandTruck) == OrderBlock.None);
+        Check("the load is not destroyed by the demolition or by the stop",
+            _machines.CargoOf(_islandTruck)!.CountOf(ItemTypes.Grain) == 50);
+
+        int before = _structD.Storage.CountOf(ItemTypes.Grain);
+        Check("a replacement order is accepted",
+            _machines.SetOrder(_islandTruck, Order.Haul(ItemTypes.Grain, _structB.Id, _structD.Id))
+                == SetOrderResult.Ok);
+
+        var seen = new HashSet<(OrderStep, OrderBlock)>();
+        bool emptied = StepUntil(
+            () => _machines.CargoOf(_islandTruck)!.IsEmpty, 400, _islandTruck, seen);
+        Check("and the stranded load leaves on it, delivered to the new destination",
+            emptied && _structD.Storage.CountOf(ItemTypes.Grain) == before + 50);
     }
 
     /// <summary>

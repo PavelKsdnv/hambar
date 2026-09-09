@@ -55,7 +55,6 @@ public partial class WorldSmokeTest : Node
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
     private bool _failed;
-    private bool _sawViewBetweenSimStates = true;
     private bool _paused;
     private ulong _pauseStartedMs;
     private long _pausedTickCount;
@@ -206,7 +205,6 @@ public partial class WorldSmokeTest : Node
                 return;
             }
 
-            SampleViewAgainstSimState();
             if (_sim.TickCount >= IdleTicks)
             {
                 CheckMachinesStayedPut();
@@ -750,8 +748,8 @@ public partial class WorldSmokeTest : Node
             _fleet.TryAssign(worker, second.Entity) == AssignResult.WorkerHasAVehicle
             && !_fleet.IsCrewed(second.Entity));
 
-        HireResult second_hire = _labour.TryHire(out EntityId mate);
-        Check("a second worker can be hired", second_hire == HireResult.Ok);
+        HireResult secondHire = _labour.TryHire(out EntityId mate);
+        Check("a second worker can be hired", secondHire == HireResult.Ok);
         Check("but not into a cab that is taken",
             _fleet.TryAssign(mate, first.Entity) == AssignResult.VehicleHasADriver
             && _fleet.DriverOf(first.Entity) == worker);
@@ -842,29 +840,6 @@ public partial class WorldSmokeTest : Node
     }
 
     /// <summary>
-    /// The ownership rule, watched every frame: the node transform is a view of
-    /// the sim state, so it must always sit on the segment between the last two
-    /// sim positions — and at least once must sit strictly between them, which
-    /// is the frame that could not have happened without interpolation.
-    /// </summary>
-    private void SampleViewAgainstSimState()
-    {
-        foreach (Machine machine in _startPositions.Keys)
-        {
-            Vector3 previous = machine.PreviousSimPosition;
-            Vector3 current = machine.SimPosition;
-            float span = previous.DistanceTo(current);
-            if (span < 0.0001f)
-            {
-                continue;
-            }
-            float detour = machine.Position.DistanceTo(previous)
-                + machine.Position.DistanceTo(current) - span;
-            _sawViewBetweenSimStates &= detour < 0.001f;
-        }
-    }
-
-    /// <summary>
     /// <b>The regression guard on M5's central design rule.</b> Automation in
     /// this game is authored, not automatic: there is no job pool and nothing
     /// that finds work for itself, so a vehicle nobody assigned a driver to and
@@ -906,7 +881,16 @@ public partial class WorldSmokeTest : Node
                 && here.Count == 1 && here[0] == id);
         }
         Check("the sim ran again after the pause", _sim.TickCount > _pausedTickCount);
-        Check("the view stays between the last two sim states", _sawViewBetweenSimStates);
+
+        // What used to close this method was a check that the node transform
+        // stayed on the segment between the last two sim positions. It went
+        // out with the wandering it was written against: every machine in this
+        // scene now stands still by design, the sampler skipped a zero-length
+        // segment, and the flag reached here still holding the true it was
+        // initialised with. A test that reports interpolation coverage without
+        // a single moving machine to observe is worse than no test — whichever
+        // milestone gives this scene a machine under orders can bring it back,
+        // against something that actually moves.
     }
 
     /// <summary>

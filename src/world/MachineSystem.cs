@@ -494,17 +494,29 @@ public sealed class MachineSystem : ISimSystem, IHashableState
     ///
     /// <b>The promotion test is the whole of "next cycle, not mid-cycle".</b>
     /// A vehicle counts as mid-commitment while a route is still in flight or
-    /// while it is holding cargo — the two ways a vehicle can be partway
-    /// through doing something physical — and a queued order waits behind
-    /// either. Neither is true of a vehicle that arrived and is simply
-    /// blocked (wrong stage, nothing to load, no driver): that is not a
+    /// while it is holding cargo it can still deliver — the two ways a vehicle
+    /// can be partway through doing something physical — and a queued order
+    /// waits behind either. Neither is true of a vehicle that arrived and is
+    /// simply blocked (wrong stage, nothing to load, no driver): that is not a
     /// commitment, it is standing still, so a re-point there takes over on
     /// the very next tick rather than waiting for a stage the standing order
     /// might never reach again.
+    ///
+    /// <b>"Can still deliver" is load-bearing, not a nicety.</b> A held load
+    /// counts as a commitment only while there is somewhere for it to go: a
+    /// truck that was carrying grain to a silo the player then bulldozed
+    /// would otherwise be committed to a delivery that can never complete,
+    /// with the hold that proves it un-emptiable and every later order —
+    /// <see cref="SetOrder"/> with null included — queued behind it forever.
+    /// That is a vehicle the player has permanently lost, reported as
+    /// <see cref="OrderBlock.NoSuchStructure"/>. Making the commitment
+    /// conditional lets Stop, or a replacement order, take it back; the hold
+    /// keeps its load, and the replacement's own delivery leg carries it.
     /// </summary>
     private void AdvanceOrder(int i)
     {
-        bool committed = _routeNext[i] < _route[i].Count || !_cargo[i].IsEmpty;
+        bool committed = _routeNext[i] < _route[i].Count
+            || (!_cargo[i].IsEmpty && CanStillDeliver(i));
         if (_hasPendingOrder[i] && !committed)
         {
             _order[i] = _pendingOrder[i];
@@ -545,6 +557,25 @@ public sealed class MachineSystem : ISimSystem, IHashableState
                 break;
         }
     }
+
+    /// <summary>
+    /// Whether the load in the hold is still on its way somewhere — the test
+    /// that keeps a held load from being an open-ended commitment. True only
+    /// for an active haul whose destination is still standing; a demolished
+    /// destination, or no haul at all, means nothing is in progress that a
+    /// re-point would interrupt.
+    ///
+    /// <i>M6, when there is a second good:</i> a repoint over a full hold
+    /// hands the replacement order a load it may not name, and
+    /// <see cref="RunHaulOrder"/>'s unload leg moves <c>order.Good</c> only —
+    /// so it would transfer nothing, never empty, and stall the new order in
+    /// turn. With grain the only good in the game the hold always matches;
+    /// the day it need not, that leg has to empty the hold rather than one
+    /// stack of it (and sell each good it drops at a depot).
+    /// </summary>
+    private bool CanStillDeliver(int i) =>
+        _order[i] is { Kind: OrderKind.HaulGoods } haul
+        && _world.GetStructure(haul.ToStructureId) != null;
 
     /// <summary>
     /// Whether somebody is actually in the cab — the <b>resolved</b> answer,

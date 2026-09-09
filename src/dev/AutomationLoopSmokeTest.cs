@@ -23,12 +23,15 @@ namespace Arable;
 /// <see cref="OrderBlock.SourceEmpty"/> until there is something to carry —
 /// waiting, which is the correct behaviour, not a stall to be fixed.
 ///
-/// <b>The sale is measured as a rise, tick by tick, never as a final
+/// <b>The sale is read off <see cref="Economy.SalesRevenue"/>, never off the
 /// balance.</b> Three hired workers draw a wage every simulated day and this
 /// run spans several, so the closing balance is worth *less* than the opening
-/// one plus the sale. Only a depot sale ever credits this scene and only a
-/// wage ever debits it, so summing the per-tick increases isolates the grain
-/// revenue exactly, and it stays exact however many pay days the run crosses.
+/// one plus the sale. Summing the per-tick rises instead was the first cut and
+/// it is subtly wrong: a wage falling in the same tick as a delivery nets off
+/// against it, and the test would then measure a sale short by a day's payroll
+/// — silently, and only on the seeds where the two land together. The takings
+/// counter is the sale and nothing else, so what this asserts about price
+/// multiples holds whatever the payroll does.
 ///
 /// <b>The second half is a regression guard on a design rule, not a
 /// functional check</b> (<see cref="CheckAnUnprogrammedVehicleTakesNoWork"/>).
@@ -143,14 +146,22 @@ public partial class AutomationLoopSmokeTest : Node
     /// through <see cref="CropSystem"/> (setup, the same convenience
     /// <c>CropSmokeTest</c> uses to reach "sown" without a tractor —
     /// ploughing and sowing via real orders is already <c>OrderSmokeTest</c>'s
-    /// job, not this one's), hire and crew a harvester and a truck, seed the
-    /// silo the way <see cref="SiloSmokeTest"/> seeds its sources (see the
-    /// finding in this class's own doc comment for why that is the source
-    /// rather than the field), and hand each vehicle exactly one standing
-    /// order. <paramref name="preSaleBalance"/> is captured last, after the
-    /// hire fees have already left the balance — comparing against a
-    /// pre-hire number would never see it rise (`orders.md`/`labour.md`'s
-    /// own trap).
+    /// job, not this one's), put four vehicles on the road, hire and crew
+    /// three of them, and hand those three exactly one standing order each.
+    ///
+    /// <b>The silo starts empty and is never seeded.</b> <see cref="SiloSmokeTest"/>
+    /// fills its sources by hand because it is testing the building; this test
+    /// is testing the chain, and grain the fixture put in the silo would let
+    /// the sale succeed with the harvest half of the chain broken. Every unit
+    /// the depot sells here has to have been cut out of the field and driven
+    /// the whole way by these two trucks.
+    ///
+    /// The fourth vehicle gets no worker and no order, and that absence is
+    /// the entire setup for <see cref="CheckAnUnprogrammedVehicleTakesNoWork"/>.
+    /// Nothing about the balance is sampled here: what the run earns is
+    /// <see cref="Economy.SalesRevenue"/>, which the hire fees do not touch,
+    /// so <see cref="CheckTheChainEarnsMoneyUnattended"/> needs no
+    /// before-picture taken after the fees have left.
     /// </summary>
     private void ProgramTheCrew(
         out EntityId harvester, out EntityId carter, out EntityId truck, out EntityId loner,
@@ -208,12 +219,21 @@ public partial class AutomationLoopSmokeTest : Node
     /// both trucks wait on <see cref="OrderBlock.SourceEmpty"/>, and a truck
     /// may be mid-run when the next cut lands.
     ///
-    /// <b>Revenue is summed from per-tick rises, not read off the closing
-    /// balance.</b> Only a depot sale credits this scene and only the daily
-    /// wage debits it, so every upward step is grain money and the total is
-    /// exact no matter how many pay days the run crosses — where a closing
-    /// balance would have to be given a wage-shaped tolerance and would then
-    /// no longer be measuring the sale.
+    /// <b>Revenue is <see cref="Economy.SalesRevenue"/>, not any reading of
+    /// the balance.</b> The balance is a till two things write to: a sale
+    /// credits it and the daily wage debits it, so neither the closing figure
+    /// nor a sum of per-tick rises is the sale — the first needs a
+    /// wage-shaped tolerance and stops measuring what it is named for, and
+    /// the second quietly loses a day's payroll on any run where a pay tick
+    /// and a delivery tick coincide. The takings counter has no second
+    /// writer, so the price-multiple check below is exact by construction
+    /// rather than by luck of the calendar.
+    ///
+    /// Nothing here asserts on the balance at all, and deliberately: with a
+    /// payroll running there is no threshold to compare it against that is
+    /// not arbitrary. That the credit lands in the account is
+    /// <c>DepotSmokeTest</c>'s check, in a scene with nobody on the payroll
+    /// to muddy it.
     /// </summary>
     private void CheckTheChainEarnsMoneyUnattended(
         EntityId harvester, EntityId carter, EntityId truck)
@@ -228,7 +248,7 @@ public partial class AutomationLoopSmokeTest : Node
         // Long enough for the field to ripen, be cut, and for both trucks to
         // run their legs afterwards — the ripening dominates it.
         int budget = (int)(_crops.TicksToRipen / rate) + 1200;
-        int previous = _economy.Balance;
+        int openingTakings = _economy.SalesRevenue;
         int revenue = 0;
         bool harvesterEverCarried = false;
         bool carterEverCarried = false;
@@ -243,12 +263,7 @@ public partial class AutomationLoopSmokeTest : Node
         {
             _sim.Step();
 
-            int now = _economy.Balance;
-            if (now > previous)
-            {
-                revenue += now - previous;
-            }
-            previous = now;
+            revenue = _economy.SalesRevenue - openingTakings;
 
             harvesterEverCarried |= !_machines.CargoOf(harvester)!.IsEmpty;
             carterEverCarried |= _machines.CargoOf(carter)!.CountOf(ItemTypes.Grain) > 0;
@@ -261,9 +276,10 @@ public partial class AutomationLoopSmokeTest : Node
             carterEverCarried);
         Check("a truck carried grain out of the silo, which only that first truck can fill",
             truckEverCarried);
-        Check("the depot sold it and the balance rose", revenue > 0);
+        Check("the depot sold it and the takings rose", revenue > 0);
         Check("every unit sold was cut from the field this run, priced at PriceOf(grain)",
             revenue > 0 && revenue % _economy.PriceOf(ItemTypes.Grain) == 0);
+
 
         // Blocked is the ordinary state here, not a fault: a truck whose
         // source is empty waits for the next cut. What must never happen is

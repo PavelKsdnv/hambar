@@ -458,13 +458,28 @@ public partial class ScreenshotTest : Node
         rig.Position = world.CellToWorld(subject);
         await ZoomTo(rig, ZoomOutSteps, zoomIn: true);
 
-        panel.Select(tractor);
-        panel.BeginPicking(OrderKind.PloughField);
+        // Every one of these can refuse, and a refusal would leave the three
+        // views below photographing a panel that never armed, an order that
+        // was never set, or an empty cab — pictures that look like the states
+        // they are named for. Checked rather than assumed, because a
+        // screenshot run's whole job is to be believed.
+        if (panel.Select(tractor) != tractor || !panel.BeginPicking(OrderKind.PloughField))
+        {
+            GD.Print("FAIL: vehicle panel — the panel would not select the tractor "
+                + "or arm for a plough pick");
+            _failed = true;
+            return;
+        }
         await Settle(0.3f);
         Capture("20-vehicle-picking",
             $"picking a plough target — \"{panel.HintText}\", legal fields lit on the map");
 
-        panel.PickTargetAt(field.Cells[0]);
+        if (!panel.PickTargetAt(field.Cells[0]))
+        {
+            GD.Print("FAIL: vehicle panel — the plough target was refused");
+            _failed = true;
+            return;
+        }
         // A picked order is queued, not active, until the next tick promotes
         // it — see Order.cs — so the panel needs one before it has a step or a
         // blocked reason to show at all.
@@ -475,8 +490,15 @@ public partial class ScreenshotTest : Node
             $"order set, nobody driving — order \"{panel.OrderLine}\", step \"{panel.StepLine}\", "
             + $"blocked \"{panel.BlockedLine}\"");
 
-        pool.TryHire(out EntityId driver);
-        fleet.TryAssign(driver, tractor);
+        HireResult hired = pool.TryHire(out EntityId driver);
+        AssignResult assigned = fleet.TryAssign(driver, tractor);
+        if (hired != HireResult.Ok || assigned != AssignResult.Ok)
+        {
+            GD.Print($"FAIL: vehicle panel — hiring said {hired} and crewing said {assigned}; "
+                + "22-vehicle-driving would show an empty cab");
+            _failed = true;
+            return;
+        }
         sim.Step(20);
         panel.Refresh();
         await Settle(0.3f);

@@ -143,8 +143,8 @@ often the ghost is recomputed. A tool with **no** `Economy` wired builds for
 free: that is "there is no money in this scene", not "the player is broke".
 
 **`Economy.Sell` (#38) is the account's other door.** A depot's delivery
-credits `PriceOf(good) * quantity` from `MachineSystem.RunHaulOrder` when a
-haul finishes, not validated up front the way a placement's cost is. `PriceOf`
-is the one function M7 swaps for a live series — see
-[`## Orders`](orders.md)'s closing section for why the depot's `Storage` is
-never where the credited amount is read from.
+credits `PriceOf(good) * quantity` from `MachineSystem.RunHaulOrder`, and adds
+it to `SalesRevenue` — takings, kept apart from the till because wages debit
+the same balance, so *no* reading of `Balance` answers "what did the chain
+earn". `PriceOf` is M7's swap point; see [`## Orders`](orders.md)'s close for
+why the depot's `Storage` is never where the credited amount is read from.
