@@ -499,7 +499,44 @@ public partial class ScreenshotTest : Node
             _failed = true;
             return;
         }
-        sim.Step(20);
+        // Stepped until the sim itself says the tractor is under way, never
+        // for a fixed count. How many ticks that takes depends on where
+        // SpawnMachine parked it and how far along the road the generated
+        // soil put the field — neither of which this scene chooses — and the
+        // caption below reads its own text off the panel, so a tractor that
+        // never got moving would be photographed and captioned "blocked: no
+        // road access" under a filename that says driving. A screenshot run
+        // that cannot be believed is worth nothing.
+        //
+        // A block here is never transient: the reasons a field order can be
+        // blocked (no such field, no road access, a stage the operation does
+        // not apply to) all persist until something outside the sim changes,
+        // so the first one seen is the verdict rather than something to
+        // wait out.
+        const int DriveTicks = 200;
+        bool underway = false;
+        for (int t = 0; t < DriveTicks && !underway; t++)
+        {
+            sim.Step();
+            OrderStep step = world.Machines.StepOf(tractor);
+            OrderBlock block = world.Machines.BlockOf(tractor);
+            if (block != OrderBlock.None)
+            {
+                GD.Print($"FAIL: vehicle panel — the crewed tractor is blocked ({block}) "
+                    + $"on step {step}; 22-vehicle-driving would not be showing driving");
+                _failed = true;
+                return;
+            }
+            underway = step is OrderStep.DrivingToField or OrderStep.Ploughing;
+        }
+        if (!underway)
+        {
+            GD.Print($"FAIL: vehicle panel — the crewed tractor never got under way in "
+                + $"{DriveTicks} ticks; it is on step {world.Machines.StepOf(tractor)}");
+            _failed = true;
+            return;
+        }
+
         panel.Refresh();
         await Settle(0.3f);
         Capture("22-vehicle-driving",
