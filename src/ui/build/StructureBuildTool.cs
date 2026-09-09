@@ -4,35 +4,83 @@ using Godot;
 namespace Arable;
 
 /// <summary>
-/// Structure-placing tool, the palette's third entry: one click drops one building
-/// on the cell under the cursor — but only where the cell shares an edge with
-/// the road network, which is the rule that makes roads load-bearing instead of
-/// decorative.
+/// Structure-placing tool, the palette's third entry: one click drops one
+/// building on the cell under the cursor — but only where the cell shares an
+/// edge with the road network, which is the rule that makes roads
+/// load-bearing instead of decorative.
 ///
-/// One generic placeholder building for now; the roster (silo in M5, cleaner,
-/// mill and bakery in M6) hangs off the same tool. What this tool commits to is
-/// placement and adjacency, and that a placement creates a
-/// <see cref="Structure"/> — an entity with an identity — rather than stamping
-/// a tile the game could only read back as an enum.
+/// <b>One tool, every kind.</b> <see cref="Kind"/> and
+/// <see cref="StorageCapacity"/> are exports, so the silo (M5) and the depot
+/// (#38) are two nodes in Main.tscn built from this one script — a different
+/// kind, name, price and capacity — never a subclass or a second placement
+/// path. What this tool commits to is placement and adjacency, and that a
+/// placement creates a <see cref="Structure"/> — an entity with an identity —
+/// rather than stamping a tile the game could only read back as an enum.
 ///
 /// Hovering, the ghost, validation and cancelling all come from
 /// <see cref="BuildTool"/>. This class says four things: buildings go on free
 /// soil beside a road, they place on a single click, the footprint is the one
-/// cell, and committing one registers the entity.
+/// cell, and committing one registers the entity as this node's exported kind.
 /// </summary>
 public partial class StructureBuildTool : BuildTool
 {
     /// <summary>
+    /// Which <see cref="StructureKind"/> a click through this node places.
+    /// Defaults to the only kind M5 has; #38's depot is a second node with
+    /// this set instead of a second script.
+    /// </summary>
+    [Export] public StructureKind Kind { get; set; } = StructureKind.Silo;
+
+    /// <summary>
+    /// Units the placed building's <see cref="Structure.Storage"/> holds — the
+    /// silo's one tunable, exported for the same reason
+    /// <see cref="BuildTool.CostPerCell"/> is: a playtest argues about a
+    /// number, not a rebuild. <see cref="WorldGrid.PlaceStructure"/> only
+    /// falls back to <see cref="StructureKinds"/>' default when something
+    /// places a building without going through a tool at all. Left unset, this
+    /// node takes the same default in <see cref="_Ready"/>.
+    /// </summary>
+    [Export] public int StorageCapacity { get; set; }
+
+    /// <summary>
     /// A building is the expensive decision, and its footprint is one cell, so
-    /// <see cref="BuildTool.CostPerCell"/> is simply its price. When the roster
-    /// arrives (M5/M6) the per-kind prices go where the kinds do; until then
-    /// there is one building and one placeholder number, overridable in
-    /// Main.tscn.
+    /// <see cref="BuildTool.CostPerCell"/> is simply its price. Kind-independent,
+    /// so it belongs to the constructor; the two defaults that read
+    /// <see cref="Kind"/> do not, and are in <see cref="_Ready"/> instead.
     /// </summary>
     public StructureBuildTool()
     {
-        DisplayName = "Structure";
         CostPerCell = 250;
+    }
+
+    /// <summary>
+    /// Fills in the two defaults that depend on <see cref="Kind"/>, and
+    /// <b>here rather than in the constructor because that is the earliest
+    /// point where <see cref="Kind"/> is this node's own.</b> Godot applies a
+    /// scene's exports after construction, so a constructor reading
+    /// <see cref="Kind"/> reads the field initialiser — <c>Silo</c> — whatever
+    /// the node in Main.tscn says, and the depot node would have been named
+    /// "Silo" and given the silo's capacity if it did not happen to set both
+    /// itself.
+    ///
+    /// Only an unset value is filled: an empty name, or a capacity of zero,
+    /// which is what a node that named a <see cref="Kind"/> and left the rest
+    /// alone looks like. Anything the scene did set is left exactly as
+    /// configured — a deliberate zero-capacity building is not a shape
+    /// anything asks for, and a kind's default is a better answer for it than
+    /// a building that refuses every delivery.
+    /// </summary>
+    public override void _Ready()
+    {
+        base._Ready();
+        if (string.IsNullOrEmpty(DisplayName))
+        {
+            DisplayName = StructureKinds.Name(Kind);
+        }
+        if (StorageCapacity <= 0)
+        {
+            StorageCapacity = StructureKinds.DefaultStorageCapacity(Kind);
+        }
     }
 
     protected override TileType PlacedTile => TileType.Structure;
@@ -66,14 +114,15 @@ public partial class StructureBuildTool : BuildTool
         [cell];
 
     /// <summary>
-    /// One click makes one building. The default <see cref="BuildTool.Apply"/>
-    /// would write the tile and leave a building nothing could address;
-    /// <see cref="WorldGrid.PlaceStructure"/> writes it <i>and</i> registers
-    /// the entity that owns it.
+    /// One click makes one building of this node's <see cref="Kind"/>. The
+    /// default <see cref="BuildTool.Apply"/> would write the tile and leave a
+    /// building nothing could address; <see cref="WorldGrid.PlaceStructure"/>
+    /// writes it <i>and</i> registers the entity that owns it, sized by
+    /// <see cref="StorageCapacity"/>.
     /// </summary>
     protected override void Apply(PlacementPlan plan)
     {
-        Structure? structure = World!.PlaceStructure(plan.Cells);
+        Structure? structure = World!.PlaceStructure(plan.Cells, Kind, StorageCapacity);
         if (structure != null)
         {
             GD.Print($"{Name}: placed {structure}");

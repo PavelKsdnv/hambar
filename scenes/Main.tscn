@@ -1,4 +1,4 @@
-[gd_scene load_steps=23 format=3]
+[gd_scene load_steps=25 format=3]
 
 [ext_resource type="Script" path="res://src/camera/CameraRig.cs" id="1_camrig"]
 [ext_resource type="Script" path="res://src/world/WorldGrid.cs" id="2_world"]
@@ -19,6 +19,9 @@
 [ext_resource type="Texture2D" path="res://assets/icons/toolbar/bulldozer.svg" id="16_icon_bulldozer"]
 [ext_resource type="Script" path="res://src/ui/TimeControls.cs" id="18_timecontrols"]
 [ext_resource type="Script" path="res://src/ui/FieldInspector.cs" id="19_fieldpanel"]
+[ext_resource type="Script" path="res://src/sim/LabourPool.cs" id="20_labour"]
+[ext_resource type="Script" path="res://src/world/Fleet.cs" id="21_fleet"]
+[ext_resource type="Script" path="res://src/ui/VehicleInspector.cs" id="22_vehiclepanel"]
 
 [sub_resource type="Environment" id="env_main"]
 background_mode = 1
@@ -56,9 +59,11 @@ WorldSeed = 20260904
 SpeedSteps = PackedFloat32Array(0, 1, 2, 3)
 StartSpeedIndex = 1
 
-[node name="World" type="Node3D" parent="."]
+[node name="World" type="Node3D" parent="." node_paths=PackedStringArray("Labour", "Economy")]
 script = ExtResource("2_world")
 MachineScene = ExtResource("4_machine")
+Labour = NodePath("../LabourPool")
+Economy = NodePath("../Economy")
 
 [node name="GridMap" type="GridMap" parent="World"]
 mesh_library = ExtResource("3_tiles")
@@ -85,9 +90,20 @@ CostPerCell = 10
 script = ExtResource("9_structuretool")
 World = NodePath("../World")
 Economy = NodePath("../Economy")
-DisplayName = "Structure"
+DisplayName = "Silo"
 Icon = ExtResource("15_icon_structure")
 CostPerCell = 250
+StorageCapacity = 500
+
+[node name="DepotTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
+script = ExtResource("9_structuretool")
+World = NodePath("../World")
+Economy = NodePath("../Economy")
+Kind = 1
+DisplayName = "Depot"
+Icon = ExtResource("15_icon_structure")
+CostPerCell = 300
+StorageCapacity = 200
 
 [node name="BulldozeTool" type="Node3D" parent="." node_paths=PackedStringArray("World", "Economy")]
 script = ExtResource("10_bulldozetool")
@@ -131,7 +147,7 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("12_palette")
-Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../BulldozeTool")]
+Tools = [NodePath("../../RoadTool"), NodePath("../../FieldTool"), NodePath("../../StructureTool"), NodePath("../../DepotTool"), NodePath("../../BulldozeTool")]
 
 [node name="TimeControls" type="Control" parent="Hud" node_paths=PackedStringArray("Sim")]
 anchor_right = 1.0
@@ -151,6 +167,16 @@ mouse_filter = 2
 script = ExtResource("19_fieldpanel")
 World = NodePath("../../World")
 
+[node name="VehicleInspector" type="Control" parent="Hud" node_paths=PackedStringArray("World", "Fleet")]
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("22_vehiclepanel")
+World = NodePath("../../World")
+Fleet = NodePath("../../Fleet")
+
 [node name="CellInspector" type="Node" parent="." node_paths=PackedStringArray("World", "Readout")]
 script = ExtResource("7_inspector")
 World = NodePath("../World")
@@ -160,6 +186,19 @@ Readout = NodePath("../Hud/CellReadout")
 script = ExtResource("11_economy")
 Readout = NodePath("../Hud/MoneyReadout")
 StartingBalance = 5000
+
+[node name="LabourPool" type="Node" parent="." node_paths=PackedStringArray("Economy")]
+script = ExtResource("20_labour")
+Economy = NodePath("../Economy")
+PoolSize = 4
+HireFee = 500
+DailyWage = 50
+
+[node name="Fleet" type="Node" parent="." node_paths=PackedStringArray("World", "Economy", "Labour")]
+script = ExtResource("21_fleet")
+World = NodePath("../World")
+Economy = NodePath("../Economy")
+Labour = NodePath("../LabourPool")
 
 [node name="DevShortcuts" type="Node" parent="." node_paths=PackedStringArray("World", "Inspector")]
 script = ExtResource("5_devkeys")

@@ -38,12 +38,15 @@ public sealed class Structure
     private readonly List<Vector2I> _cells;
     private readonly IReadOnlyList<Vector2I> _readOnlyCells;
 
-    public Structure(int id, string name, IReadOnlyList<Vector2I> cells)
+    public Structure(
+        int id, StructureKind kind, string name, IReadOnlyList<Vector2I> cells, int storageCapacity)
     {
         Id = id;
+        Kind = kind;
         Name = name;
         _cells = new List<Vector2I>(cells);
         _readOnlyCells = _cells.AsReadOnly();
+        Storage = new ItemBuffer(storageCapacity);
     }
 
     /// <summary>
@@ -53,8 +56,36 @@ public sealed class Structure
     /// </summary>
     public int Id { get; }
 
+    /// <summary>
+    /// Which <see cref="StructureKind"/> this is — a silo today, a second row
+    /// (#38's depot, M6's roster) tomorrow. Fixed at placement: nothing turns
+    /// one building into another kind after the fact.
+    /// </summary>
+    public StructureKind Kind { get; }
+
     /// <summary>What the player calls it. Defaulted at creation, renameable later.</summary>
     public string Name { get; set; }
+
+    /// <summary>
+    /// What the building is holding — the same <see cref="ItemBuffer"/> a field
+    /// and a vehicle carry, so a delivery is one
+    /// <see cref="ItemBuffer.Transfer"/> whatever the two ends are. Its id
+    /// (never a cell) is the in/out interface a haul order names and validates
+    /// against — see <see cref="Order.Haul"/> and <see cref="WorldGrid.GetStructure(int)"/>.
+    ///
+    /// <b>One buffer, not an input and an output.</b> The silo's whole job is
+    /// holding what arrives; the two-buffer shape belongs to a machine with a
+    /// recipe, and M6 is what decides whether that is a second buffer here or
+    /// a component beside it. Splitting it now would be guessing which side a
+    /// silo's single store is.
+    ///
+    /// Its size is set at placement (<see cref="WorldGrid.PlaceStructure"/>):
+    /// a placing tool's own export (<see cref="StructureBuildTool.StorageCapacity"/>)
+    /// when a player built it, <see cref="StructureKinds"/>' fallback when dev
+    /// or scenario code placed one directly. <see cref="Kind"/>, not this
+    /// buffer, is what a second building kind sizes differently.
+    /// </summary>
+    public ItemBuffer Storage { get; }
 
     /// <summary>
     /// Cells the building covers, in footprint order — one today, four for a

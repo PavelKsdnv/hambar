@@ -14,14 +14,18 @@ namespace Arable;
 /// godot --headless --path . res://scenes/dev/BuildSmokeTest.tscn
 /// Exits 0 on pass, 1 on failure.
 ///
-/// Four tools are covered, in that order: the road tool first, then the field
-/// tool — which therefore validates against a world that already holds this
-/// test's roads, and is also where the "only one tool armed at a time" rule is
-/// proven — then the structure tool, whose must-touch-a-road rule only means
-/// anything once there is a road network to touch, and last the bulldozer,
-/// which needs one of each of those on the map before it can take them off
-/// again. <b>Money comes after all four</b>, because paying for a placement is
-/// the one rule that needs every tool already proven: see
+/// Four tool *behaviours* are covered, in that order: the road tool first,
+/// then the field tool — which therefore validates against a world that
+/// already holds this test's roads, and is also where the "only one tool armed
+/// at a time" rule is proven — then the structure tool, whose must-touch-a-road
+/// rule only means anything once there is a road network to touch, and last the
+/// bulldozer, which needs one of each of those on the map before it can take
+/// them off again. The depot (#38) gets no section of its own: it is a second
+/// <see cref="StructureBuildTool"/> instance, so its only claim on this file is
+/// a fifth palette entry, exercised the same generic way every entry already
+/// is (<see cref="CheckPaletteSelectsEveryTool"/> et al.) rather than a
+/// dedicated one. <b>Money comes after all four</b>, because paying for a
+/// placement is the one rule that needs every tool already proven: see
 /// <see cref="CheckCommitChargesExactlyTheCost"/> onwards. A new tool adds its
 /// assertions the same way: give it a section like
 /// <see cref="CheckLegalPlacement"/> and reuse the cell-finding helpers at the
@@ -51,7 +55,8 @@ public partial class BuildSmokeTest : Node
     private const int RoadEntry = 0;
     private const int FieldEntry = 1;
     private const int StructureEntry = 2;
-    private const int BulldozeEntry = 3;
+    private const int DepotEntry = 3;
+    private const int BulldozeEntry = 4;
 
     /// <summary>Width and height of the rectangle the field checks mark.</summary>
     private const int FieldRectWidth = 3;
@@ -69,6 +74,7 @@ public partial class BuildSmokeTest : Node
     private RoadBuildTool _tool = null!;
     private FieldBuildTool _fieldTool = null!;
     private StructureBuildTool _structureTool = null!;
+    private StructureBuildTool _depotTool = null!;
     private BulldozeTool _bulldozeTool = null!;
     private BuildPalette _palette = null!;
     private CellInspector _inspector = null!;
@@ -119,6 +125,7 @@ public partial class BuildSmokeTest : Node
         _tool = main.GetNode<RoadBuildTool>("RoadTool");
         _fieldTool = main.GetNode<FieldBuildTool>("FieldTool");
         _structureTool = main.GetNode<StructureBuildTool>("StructureTool");
+        _depotTool = main.GetNode<StructureBuildTool>("DepotTool");
         _bulldozeTool = main.GetNode<BulldozeTool>("BulldozeTool");
         _palette = main.GetNode<BuildPalette>("Hud/BuildPalette");
         _inspector = main.GetNode<CellInspector>("CellInspector");
@@ -332,10 +339,11 @@ public partial class BuildSmokeTest : Node
 
         Check("every build tool is wired to the one account",
             _tool.Economy == _economy && _fieldTool.Economy == _economy
-            && _structureTool.Economy == _economy && _bulldozeTool.Economy == _economy);
+            && _structureTool.Economy == _economy && _depotTool.Economy == _economy
+            && _bulldozeTool.Economy == _economy);
         Check("building things costs money",
             _tool.CostPerCell > 0 && _fieldTool.CostPerCell > 0
-            && _structureTool.CostPerCell > 0);
+            && _structureTool.CostPerCell > 0 && _depotTool.CostPerCell > 0);
         Check("taking them off again does not", _bulldozeTool.CostPerCell == 0);
 
         // The readout is a visual claim, so it is checked as one: on the
@@ -367,11 +375,12 @@ public partial class BuildSmokeTest : Node
     private void CheckPaletteStartState()
     {
         Check("the palette holds one entry per build tool",
-            _palette.Count == 4 && _palette.Entries.Count == _palette.Count);
-        Check("the entries are the four tools, in bar order",
+            _palette.Count == 5 && _palette.Entries.Count == _palette.Count);
+        Check("the entries are the five tools, in bar order",
             _palette.Entry(RoadEntry)?.Tool == _tool
             && _palette.Entry(FieldEntry)?.Tool == _fieldTool
             && _palette.Entry(StructureEntry)?.Tool == _structureTool
+            && _palette.Entry(DepotEntry)?.Tool == _depotTool
             && _palette.Entry(BulldozeEntry)?.Tool == _bulldozeTool);
         Check("the palette finds an entry by its tool",
             _palette.IndexOf(_bulldozeTool) == BulldozeEntry
@@ -390,7 +399,8 @@ public partial class BuildSmokeTest : Node
             _palette.Entry(RoadEntry)?.KeyText == "1"
             && _palette.Entry(FieldEntry)?.KeyText == "2"
             && _palette.Entry(StructureEntry)?.KeyText == "3"
-            && _palette.Entry(BulldozeEntry)?.KeyText == "4");
+            && _palette.Entry(DepotEntry)?.KeyText == "4"
+            && _palette.Entry(BulldozeEntry)?.KeyText == "5");
         Check("each entry knows the slot it is in",
             AllEntries(entry => entry.Slot == _palette.IndexOf(entry.Tool) + 1));
 
@@ -598,7 +608,8 @@ public partial class BuildSmokeTest : Node
             && _palette.Entry(FieldEntry)?.CostText
                 == Money(_fieldTool.CostPerCell) + " / cell");
         Check("a single-click tool is priced as the thing it places",
-            _palette.Entry(StructureEntry)?.CostText == Money(_structureTool.CostPerCell));
+            _palette.Entry(StructureEntry)?.CostText == Money(_structureTool.CostPerCell)
+            && _palette.Entry(DepotEntry)?.CostText == Money(_depotTool.CostPerCell));
         Check("a tool that costs nothing says so rather than showing a zero",
             _bulldozeTool.CostPerCell == 0
             && _palette.Entry(BulldozeEntry)?.CostText == "free");
@@ -890,9 +901,10 @@ public partial class BuildSmokeTest : Node
         Check("the disarmed tool clears its preview", _tool.Preview == null);
         Check("the disarmed tool drops any anchor", _tool.Anchor == null);
         Check("the structure tool is not armed either", !_structureTool.Active);
+        Check("the depot tool is not armed either", !_depotTool.Active);
         Check("the bulldozer is not armed either", !_bulldozeTool.Active);
         Check("every tool joined the build-tool group",
-            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 4);
+            GetTree().GetNodesInGroup(BuildTool.ToolGroup).Count == 5);
     }
 
     /// <summary>
@@ -1266,6 +1278,10 @@ public partial class BuildSmokeTest : Node
         Check("the structure is the one the world just registered",
             _world.Structures[^1] == structure);
         Check("the structure is named", !string.IsNullOrEmpty(structure.Name));
+        Check("it is a silo — the kind this palette entry places — sized by the tool's own tunable",
+            structure.Kind == StructureKind.Silo
+            && structure.Storage.Capacity == _structureTool.StorageCapacity
+            && structure.Storage.IsEmpty);
         Check("the hover readout names the building on the cell",
             _inspector.Describe(beside).Contains($"tile: structure ({structure.Name})"));
     }
@@ -1471,8 +1487,8 @@ public partial class BuildSmokeTest : Node
     {
         Check("the palette activates the bulldozer", _bulldozeTool.Active);
         Check("arming the bulldozer disarms the structure tool", !_structureTool.Active);
-        Check("arming the bulldozer leaves the road and field tools disarmed",
-            !_tool.Active && !_fieldTool.Active);
+        Check("arming the bulldozer leaves the road, field and depot tools disarmed",
+            !_tool.Active && !_fieldTool.Active && !_depotTool.Active);
         Check("the bulldozer takes no anchor from being armed",
             _bulldozeTool.Anchor == null);
         Check("nothing has gone through the refund seam yet",

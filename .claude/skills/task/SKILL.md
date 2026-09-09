@@ -72,9 +72,9 @@ discussion did not reach.
 
 ## Done when
 - [ ] Observable, checkable outcomes — not "implement X".
-- [ ] `dotnet build Arable.sln` succeeds.
-- [ ] `godot --headless --path . res://scenes/dev/WorldSmokeTest.tscn` passes
-      (name the smoke test that actually covers this, or say a new one is needed).
+- [ ] `python scripts/verify.py` passes (build, every smoke test, doc budget).
+- [ ] Name the smoke test that actually covers this, or say a new one is needed
+      — `verify.py` picks up any new `scenes/dev/*SmokeTest.tscn` on its own.
 
 ## Out of scope
 What this task deliberately does not cover, and the follow-up issue number if

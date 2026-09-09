@@ -23,11 +23,13 @@ public partial class WorldSmokeTest : Node
     private const int RoadEntry = 0;
 
     /// <summary>
-    /// Sim ticks to let the machine drive before checking it moved. Counted in
-    /// ticks, not frames: the sim runs on its own clock now, so a frame number
-    /// says nothing about how far anything got.
+    /// Sim ticks to run before checking that the machines have <b>not</b>
+    /// moved. Counted in ticks, not frames: the sim runs on its own clock, so a
+    /// frame number says nothing about how much simulated time passed. Three
+    /// seconds at 20 Hz — long enough that anything looking for work of its own
+    /// would have found some.
     /// </summary>
-    private const long DriveTicks = 60;
+    private const long IdleTicks = 60;
 
     /// <summary>
     /// How long to hold the pause, in <b>real milliseconds</b> rather than
@@ -47,11 +49,12 @@ public partial class WorldSmokeTest : Node
     private Simulation _sim = null!;
     private TimeControls _time = null!;
     private CameraRig _rig = null!;
+    private Fleet _fleet = null!;
+    private Economy _economy = null!;
+    private LabourPool _labour = null!;
     private readonly Dictionary<Machine, Vector3> _startPositions = new();
     private int _frame;
     private bool _failed;
-    private bool _sawInterpolatedPose;
-    private bool _sawViewBetweenSimStates = true;
     private bool _paused;
     private ulong _pauseStartedMs;
     private long _pausedTickCount;
@@ -76,6 +79,9 @@ public partial class WorldSmokeTest : Node
         _sim = main.GetNode<Simulation>("Sim");
         _time = main.GetNode<TimeControls>("Hud/TimeControls");
         _rig = main.GetNode<CameraRig>("CameraRig");
+        _fleet = main.GetNode<Fleet>("Fleet");
+        _economy = main.GetNode<Economy>("Economy");
+        _labour = main.GetNode<LabourPool>("LabourPool");
     }
 
     public override void _Process(double delta)
@@ -91,6 +97,7 @@ public partial class WorldSmokeTest : Node
             CheckSpeedSchedule();
             CheckEntityStorage();
             CheckRandomStreams();
+            CheckFleet();
 
             // Dev key 9 spawns a machine — one of the shortcuts left over from
             // the number-key menu the build palette replaced.
@@ -99,16 +106,24 @@ public partial class WorldSmokeTest : Node
         }
         else if (_frame == 10)
         {
+            // CheckFleet already bought some and recorded them, so what the
+            // dev key added is whatever is in the group and not yet known.
+            int knownBefore = _startPositions.Count;
             foreach (Node node in GetTree().GetNodesInGroup("machines"))
             {
-                _startPositions[(Machine)node] = ((Machine)node).Position;
+                var machine = (Machine)node;
+                if (!_startPositions.ContainsKey(machine))
+                {
+                    _startPositions[machine] = machine.Position;
+                }
             }
-            Check("dev key 9 spawned a machine", _startPositions.Count == 1);
+            Check("dev key 9 spawned a machine", _startPositions.Count == knownBefore + 1);
             // One system for every machine, not one system per machine: the
             // sim registration count must not track the entity count, whatever
             // else the world has registered beside the machines.
             Check("the machine registered with the sim",
-                _sim.SystemCount == _systemsBeforeSpawn && _world.Machines.Count == 1);
+                _sim.SystemCount == _systemsBeforeSpawn
+                && _world.Machines.Count == _startPositions.Count);
             foreach (Machine machine in _startPositions.Keys)
             {
                 Check("the machine node draws a live sim entity",
@@ -190,10 +205,9 @@ public partial class WorldSmokeTest : Node
                 return;
             }
 
-            SampleViewAgainstSimState();
-            if (_sim.TickCount >= DriveTicks)
+            if (_sim.TickCount >= IdleTicks)
             {
-                CheckMachinesDrove();
+                CheckMachinesStayedPut();
                 GD.Print(_failed ? "SMOKE TEST FAILED" : "SMOKE TEST PASSED");
                 GetTree().Quit(_failed ? 1 : 0);
             }
@@ -549,15 +563,23 @@ public partial class WorldSmokeTest : Node
         const int worldSeed = 20260904;
         const int draws = 32;
 
+        // A stream name to derive from. A literal rather than some system's
+        // constant: the golden values below are pinned to these exact bytes,
+        // and borrowing a name a system happens to own means a rename over
+        // there silently rewrites the contract under test. "machines" is what
+        // the goldens were taken with, and it stays that whatever the machine
+        // system is called.
+        const string sampleStream = "machines";
+
         // The derivation is a contract, not an implementation detail: changing
         // it silently changes every world that was ever generated. These are
         // golden values, so moving them has to be a decision somebody makes on
         // purpose rather than a side effect of tidying the hash.
-        GD.Print($"rng: hash(machines)={RandomStream.HashName(MachineSystem.StreamName):X16} "
-            + $"seed64={RandomStream.Seed64(worldSeed, MachineSystem.StreamName):X16}");
+        GD.Print($"rng: hash({sampleStream})={RandomStream.HashName(sampleStream):X16} "
+            + $"seed64={RandomStream.Seed64(worldSeed, sampleStream):X16}");
         Check("the stream derivation is unchanged",
-            RandomStream.HashName(MachineSystem.StreamName) == 0x27B77DFCCA1759B3UL
-            && RandomStream.Seed64(worldSeed, MachineSystem.StreamName) == 0x21034AF9D3EC7C54UL);
+            RandomStream.HashName(sampleStream) == 0x27B77DFCCA1759B3UL
+            && RandomStream.Seed64(worldSeed, sampleStream) == 0x21034AF9D3EC7C54UL);
 
         // Two registries on one seed. The busy one opens two systems that do
         // not exist yet and drains one of them before it ever asks for the
@@ -572,8 +594,8 @@ public partial class WorldSmokeTest : Node
         }
         busy.For("prices");
 
-        uint[] alone = Draw(plain.For(MachineSystem.StreamName), draws);
-        uint[] crowded = Draw(busy.For(MachineSystem.StreamName), draws);
+        uint[] alone = Draw(plain.For(sampleStream), draws);
+        uint[] crowded = Draw(busy.For(sampleStream), draws);
         Check("draws in other systems do not move this system's sequence",
             SameDraws(alone, crowded));
         Check("and neither does the order the streams were opened in",
@@ -583,12 +605,12 @@ public partial class WorldSmokeTest : Node
             !SameDraws(alone, Draw(plain.For("weather"), draws)));
         Check("the same system in another world gets a different sequence",
             !SameDraws(alone, Draw(new RandomStreams(worldSeed + 1)
-                .For(MachineSystem.StreamName), draws)));
+                .For(sampleStream), draws)));
 
         // Save/load's half of the deal: the whole of a stream is one integer,
         // and restoring it has to resume mid-sequence.
         var saved = new RandomStreams(worldSeed);
-        RandomStream stream = saved.For(MachineSystem.StreamName);
+        RandomStream stream = saved.For(sampleStream);
         uint[] fromStart = Draw(stream, draws);
         ulong state = stream.State;
         uint[] next = Draw(stream, draws);
@@ -598,7 +620,7 @@ public partial class WorldSmokeTest : Node
         Check("resuming mid-sequence is not the same as starting over",
             !SameDraws(next, fromStart));
         Check("a stream is the same object every time it is asked for",
-            ReferenceEquals(stream, saved.For(MachineSystem.StreamName)));
+            ReferenceEquals(stream, saved.For(sampleStream)));
 
         saved.Reseed(worldSeed);
         Check("reseeding rewinds a stream somebody is already holding",
@@ -637,10 +659,9 @@ public partial class WorldSmokeTest : Node
             range.NextInt(1) == 0 && range.NextInt(0) == 0);
 
         // The proof above is worth nothing if the game wired its own registry:
-        // the world and the machines have to be drawing from the sim's.
-        Check("the world and the machines draw from the sim's registry",
-            _sim.Streams.Has(WorldGrid.SpawnStreamName)
-            && _sim.Streams.Has(MachineSystem.StreamName));
+        // the world has to be drawing from the sim's.
+        Check("the world draws from the sim's registry",
+            _sim.Streams.Has(WorldGrid.SpawnStreamName));
         int worldsSeed = _world.WorldSeed;
         Check("the world reads its seed from the sim's registry",
             worldsSeed == _sim.Streams.WorldSeed);
@@ -648,6 +669,123 @@ public partial class WorldSmokeTest : Node
         Check("and setting it reseeds that registry rather than a copy",
             _sim.Streams.WorldSeed == worldsSeed + 1);
         _world.WorldSeed = worldsSeed;
+    }
+
+    /// <summary>
+    /// Buying vehicles and putting people in them — the two acts M5 hands the
+    /// player, and the two the sim must never perform for them. Every machine
+    /// bought here is left <b>unassigned and unordered</b> on purpose, so the
+    /// idle assertions later in the run have subjects that were bought the
+    /// ordinary way rather than only the ones the dev key spawned.
+    /// </summary>
+    private void CheckFleet()
+    {
+        int before = _economy.Balance;
+        int countBefore = _world.Machines.Count;
+
+        // One of each kind, because what a kind costs and how much it holds is
+        // the whole of what distinguishes them today.
+        var bought = new List<Machine>();
+        bool allPriced = true;
+        foreach (MachineKind kind in new[]
+                 { MachineKind.Tractor, MachineKind.Harvester, MachineKind.Truck })
+        {
+            int price = Fleet.PriceOf(kind);
+            int balance = _economy.Balance;
+            BuyResult result = _fleet.TryBuy(kind, out Machine? machine);
+            allPriced &= result == BuyResult.Ok && machine != null
+                && _economy.Balance == balance - price
+                && _world.Machines.KindOf(machine.Entity) == kind;
+            if (machine != null)
+            {
+                bought.Add(machine);
+            }
+        }
+        Check("a vehicle of every kind can be bought, and each is charged its own price",
+            allPriced && bought.Count == MachineKinds.Count);
+        Check("buying puts them in the world",
+            _world.Machines.Count == countBefore + bought.Count);
+        Check("and the money actually left the balance", _economy.Balance < before);
+
+        bool parked = true;
+        foreach (Machine machine in bought)
+        {
+            parked &= _world.IsRoad(_world.WorldToCell(machine.SimPosition))
+                && _world.Machines.IsIdle(machine.Entity);
+        }
+        Check("every bought vehicle is parked on a road, doing nothing", parked);
+
+        // A farm that cannot pay is refused whole: no vehicle, no charge.
+        int saved = _economy.Balance;
+        _economy.SetBalance(Fleet.PriceOf(MachineKind.Truck) - 1);
+        Check("a purchase one coin short is refused",
+            _fleet.TryBuy(MachineKind.Truck, out Machine? broke) == BuyResult.CannotAfford
+            && broke == null && _world.Machines.Count == countBefore + bought.Count);
+        _economy.SetBalance(saved);
+
+        // Assignment: one worker, one cab, and no route falls out of it. The
+        // balance is topped up first — three vehicles out of the opening 5,000
+        // leaves less than a hire fee, and what is under test here is the link
+        // rather than what any of it costs.
+        _economy.SetBalance(10000);
+        Machine first = bought[0];
+        Machine second = bought[1];
+        Check("a vehicle nobody was assigned to has no driver",
+            !_fleet.IsCrewed(first.Entity)
+            && _fleet.DriverOf(first.Entity) == EntityId.None);
+
+        HireResult hired = _labour.TryHire(out EntityId worker);
+        Check("a worker is available to put in a cab", hired == HireResult.Ok);
+        Check("assigning them is accepted",
+            _fleet.TryAssign(worker, first.Entity) == AssignResult.Ok);
+        Check("the link reads back from both ends",
+            _fleet.DriverOf(first.Entity) == worker
+            && _fleet.VehicleOf(worker) == first.Entity);
+        Check("re-assigning the same pair is accepted and changes nothing",
+            _fleet.TryAssign(worker, first.Entity) == AssignResult.Ok
+            && _fleet.DriverOf(first.Entity) == worker);
+        Check("one worker cannot drive a second vehicle",
+            _fleet.TryAssign(worker, second.Entity) == AssignResult.WorkerHasAVehicle
+            && !_fleet.IsCrewed(second.Entity));
+
+        HireResult secondHire = _labour.TryHire(out EntityId mate);
+        Check("a second worker can be hired", secondHire == HireResult.Ok);
+        Check("but not into a cab that is taken",
+            _fleet.TryAssign(mate, first.Entity) == AssignResult.VehicleHasADriver
+            && _fleet.DriverOf(first.Entity) == worker);
+
+        // The whole point: a crewed vehicle is still not a working one.
+        Check("a vehicle with a driver and no order is still idle",
+            _world.Machines.IsIdle(first.Entity));
+
+        Check("a driver can be taken back out", _fleet.Unassign(first.Entity));
+        Check("leaving both of them idle and unlinked",
+            !_fleet.IsCrewed(first.Entity) && _fleet.VehicleOf(worker) == EntityId.None);
+        Check("taking out a driver twice is a no-op, not a failure",
+            !_fleet.Unassign(first.Entity));
+
+        // A dismissed driver's handle is left behind on the row on purpose;
+        // resolving it against the pool is what frees the cab.
+        Check("re-assigning after a dismissal works",
+            _fleet.TryAssign(mate, first.Entity) == AssignResult.Ok);
+        _labour.Dismiss(mate);
+        Check("a dismissed worker's vehicle reads as free again",
+            !_fleet.IsCrewed(first.Entity)
+            && _world.Machines.CrewOf(first.Entity) != EntityId.None);
+        Check("so somebody else can take the cab",
+            _fleet.TryAssign(worker, first.Entity) == AssignResult.Ok);
+        _fleet.Unassign(first.Entity);
+        _labour.Dismiss(worker);
+
+        // Leave nothing crewed: the idle assertions at the end of the run are
+        // about vehicles nobody was driving and nobody had ordered anywhere.
+        Check("the fleet is left with no drivers in it",
+            !_fleet.IsCrewed(first.Entity) && !_fleet.IsCrewed(second.Entity));
+
+        foreach (Machine machine in bought)
+        {
+            _startPositions[machine] = machine.Position;
+        }
     }
 
     private static uint[] Draw(RandomStream stream, int count)
@@ -702,54 +840,57 @@ public partial class WorldSmokeTest : Node
     }
 
     /// <summary>
-    /// The ownership rule, watched every frame: the node transform is a view of
-    /// the sim state, so it must always sit on the segment between the last two
-    /// sim positions — and at least once must sit strictly between them, which
-    /// is the frame that could not have happened without interpolation.
+    /// <b>The regression guard on M5's central design rule.</b> Automation in
+    /// this game is authored, not automatic: there is no job pool and nothing
+    /// that finds work for itself, so a vehicle nobody assigned a driver to and
+    /// nobody gave an order sits exactly where it was parked, indefinitely.
+    ///
+    /// This used to assert the opposite — machines wandered to random road
+    /// cells, and the test watched them go. That behaviour was dev scaffolding
+    /// and it hid the one thing the milestone has to be able to show. The
+    /// assertion is inverted rather than deleted because "it moved on its own"
+    /// is precisely the regression somebody adds later while trying to be
+    /// helpful.
     /// </summary>
-    private void SampleViewAgainstSimState()
-    {
-        foreach (Machine machine in _startPositions.Keys)
-        {
-            Vector3 previous = machine.PreviousSimPosition;
-            Vector3 current = machine.SimPosition;
-            float span = previous.DistanceTo(current);
-            if (span < 0.0001f)
-            {
-                continue;
-            }
-            float detour = machine.Position.DistanceTo(previous)
-                + machine.Position.DistanceTo(current) - span;
-            _sawViewBetweenSimStates &= detour < 0.001f;
-            _sawInterpolatedPose |= machine.Position.DistanceTo(current) > 0.001f;
-        }
-    }
-
-    private void CheckMachinesDrove()
+    private void CheckMachinesStayedPut()
     {
         GD.Print($"sim: {_sim.TickCount} ticks over {_frame} frames, "
             + $"{_sim.Clock.DroppedTicks} dropped");
         Check("the sim ran on its own clock, not once per frame",
-            _sim.TickCount >= DriveTicks && _sim.TickCount < _frame);
+            _sim.TickCount >= IdleTicks && _sim.TickCount < _frame);
         Check("the sim kept up without dropping ticks", _sim.Clock.DroppedTicks == 0);
         foreach ((Machine machine, Vector3 start) in _startPositions)
         {
-            Check($"{machine.Name} moved", machine.SimPosition.DistanceTo(start) > 1f);
-            Check($"{machine.Name} is on a road",
+            EntityId id = machine.Entity;
+            Check($"{machine.Name} never moved: nothing gave it an order",
+                machine.SimPosition.DistanceTo(start) < 0.0001f);
+            Check($"{machine.Name} reports itself idle", machine.Idle
+                && _world.Machines.IsIdle(id) && _world.Machines.RouteLengthOf(id) == 0);
+            Check($"{machine.Name} never found itself a driver either",
+                _world.Machines.CrewOf(id) == EntityId.None);
+            Check($"{machine.Name} is parked on a road",
                 _world.IsRoad(_world.WorldToCell(machine.SimPosition)));
 
-            // The spatial index followed it across the cells it drove through,
-            // which a rebuild-free index only does if every move re-files.
+            // The spatial index still files it where it stands: a machine that
+            // never moves must not fall out of the index either.
             Vector2I cell = _world.WorldToCell(machine.SimPosition);
             var here = new List<EntityId>();
             _world.Machines.Occupancy.Query(cell, 0, here);
-            Check($"{machine.Name} is indexed on the cell it drove to",
-                _world.Machines.CellOf(machine.Entity) == cell
-                && here.Count == 1 && here[0] == machine.Entity);
+            Check($"{machine.Name} is indexed on the cell it is parked on",
+                _world.Machines.CellOf(id) == cell
+                && here.Count == 1 && here[0] == id);
         }
         Check("the sim ran again after the pause", _sim.TickCount > _pausedTickCount);
-        Check("the view stays between the last two sim states", _sawViewBetweenSimStates);
-        Check("the view draws poses between ticks", _sawInterpolatedPose);
+
+        // What used to close this method was a check that the node transform
+        // stayed on the segment between the last two sim positions. It went
+        // out with the wandering it was written against: every machine in this
+        // scene now stands still by design, the sampler skipped a zero-length
+        // segment, and the flag reached here still holding the true it was
+        // initialised with. A test that reports interpolation coverage without
+        // a single moving machine to observe is worse than no test — whichever
+        // milestone gives this scene a machine under orders can bring it back,
+        // against something that actually moves.
     }
 
     /// <summary>

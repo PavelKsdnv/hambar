@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/dev/AutomationLoopSmokeTest.cs" id="1_automationloop"]
+
+[node name="AutomationLoopSmokeTest" type="Node"]
+script = ExtResource("1_automationloop")

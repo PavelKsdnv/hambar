@@ -23,8 +23,8 @@ namespace Arable;
 /// PCG increment, so two streams walk different sequences rather than the same
 /// one from different offsets.
 ///
-/// <b>Names live with the system that owns them</b> (<c>MachineSystem.StreamName</c>,
-/// <c>WorldGrid.SpawnStreamName</c>) rather than in one central list here.
+/// <b>Names live with the system that owns them</b>
+/// (<c>WorldGrid.SpawnStreamName</c>) rather than in one central list here.
 /// A central list is a file every new system has to edit and a merge conflict
 /// every milestone; the name belongs beside the draws it feeds. The cost is that
 /// a typo silently opens a <i>new</i> stream instead of failing — which is why

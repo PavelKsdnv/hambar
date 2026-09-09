@@ -19,9 +19,16 @@ a later step unless it was written to the repo, the issue, or a commit.
 Refuse to start, with a one-line reason, if any of these fail:
 
 - **Clean working tree.** `git status --porcelain` is empty. Uncommitted work
-  would get swept into some issue's commit.
-- **Toolchain is green.** `dotnet build Arable.sln` succeeds *before* you change
-  anything. A run must start from green or you cannot tell whose failure it is.
+  would get swept into some issue's commit. Check it again *after* the gate
+  below: Godot's import writes a `.uid` beside any script that lacks one, and
+  those are tracked files (45 of them). If some appear, a previous commit
+  shipped a script without its `.uid` — commit them on their own, before issue
+  one, rather than letting them ride along in its diff.
+- **Toolchain is green.** `python scripts/verify.py` passes *before* you change
+  anything — the whole gate, not just the build. A run must start from green or
+  you cannot tell whose failure it is. If it fails on `GODOT is not set`, stop
+  and ask the user for the path rather than guessing one: it must be the Godot 4
+  .NET **console** build, or nothing reaches stdout.
 - **The milestone exists.** Resolve it with
   `python scripts/gh_issues_read.py milestones`, accepting a number, a title, or
   a prefix like `M5`. Note its number — `list --milestone` wants the number.
@@ -88,23 +95,44 @@ Report the order as one compact list, then start.
 
 ## 5. Per issue: implement in a fresh subagent
 
-One subagent per issue, `subagent_type: "general-purpose"`. It gets the issue
-number, not your conversation — the brief is self-contained by construction, and
-the clean context is the point. Prompt it to:
+One subagent per issue, `subagent_type: "general-purpose"`, **`model: "sonnet"`**.
+It gets the issue number, not your conversation — the brief is self-contained by
+construction, and the clean context is the point.
+
+**Why Sonnet implements and you don't.** The implementer's work is mechanical
+against a vetted brief, and it lands behind a hard objective gate: you re-run
+`verify.py` yourself and read the diff against `Done when`. A bad output gets
+caught, not shipped — which is exactly the situation where the cheaper, faster
+model is the right trade. Judgement stays with you (the doc cuts, the
+screenshots, milestone acceptance), and the repair pass below escalates back to
+Opus, because a failure the first model could not avoid is not usually one it
+can diagnose. Do not quietly promote implementers to Opus because an issue
+*looks* hard: a brief that genuinely needs design judgement is one the user
+should see, which is a halt condition, not a model choice.
+
+Prompt it to:
 
 - Read the brief: `python scripts/gh_issues_read.py get <n>`.
-- **Read the `docs/implementation.md` sections covering the subsystems it is
-  about to touch — by section, not the whole file.** That file is how previous
-  issues hand over what they decided, and the rationale in it is the part not
-  recoverable from the source. Its `## Index` maps subsystem to section, and one
-  section reads out with
-  `sed -n '/^## World grid/,/^#/p' docs/implementation.md`.
+- **Read the `docs/implementation/` files covering the subsystems it is about
+  to touch — those files, not the set.** They are how previous issues hand over
+  what they decided, and the rationale in them is the part not recoverable from
+  the source. `docs/implementation.md` is the index mapping subsystem to file.
 - Implement it, following `CLAUDE.md` and the settled decisions in
   `docs/tech.md` rather than re-deciding them.
-- Make `dotnet build Arable.sln` succeed and every `scenes/dev/*SmokeTest.tscn`
-  pass; write a new smoke test if `Done when` calls for one.
-- Update `docs/implementation.md`. This is the **only** channel by which the
-  next issue's agent learns what this one decided — treat it as required output,
+- Make `python scripts/verify.py` pass — build, import, every smoke test, doc
+  budget, one command. Use `--build` or `--test <Name>` while iterating and the
+  bare form before reporting back. Write a new smoke test if `Done when` calls
+  for one; dropping the `.tscn` into `scenes/dev/` is all the wiring it needs.
+- **Work in few, large tool calls.** Every call re-reads the agent's whole
+  context, so call count is the dominant cost — far more than the size of any
+  one result. Concretely: prefer rewriting a file with `Write` over a long run
+  of small `Edit`s; read a file **once**, with a line range, instead of `cat`
+  then `sed` over the same file; never `cat` a source file over ~400 lines —
+  `grep` for the symbol and read around it; and batch independent shell commands
+  into a single call.
+- Update the `docs/implementation/` file(s) it touched, adding a new one (and
+  an index row) only for a genuinely new subsystem. This is the **only** channel
+  by which the next issue's agent learns what this one decided — treat it as required output,
   not bookkeeping. Two rules on *how*, because that file is read by every later
   agent and its size is a running cost:
   - **Write the durable half only.** Why the shape was chosen, what was
@@ -112,11 +140,12 @@ the clean context is the point. Prompt it to:
     an afternoon. Not member lists, not what a test asserts, not a restatement
     of what the code plainly says — that is derivable, and it goes stale
     silently.
-  - **Stay inside the budget: no section over ~120 lines, and the file under
-    ~700.** Adding a feature is not licence to append. If a section has outgrown
-    that, cut it back in the same commit — usually by deleting inventory that
-    has since been overtaken by the code. Prefer rewriting a section to
-    appending a paragraph to it.
+  - **Stay inside the budget: no file over ~150 lines, no section over ~120.**
+    Adding a feature is not licence to append. If a file has outgrown that, cut
+    it back in the same commit — usually by deleting inventory that has since
+    been overtaken by the code — or split it and add the index row. Prefer
+    rewriting a section to appending a paragraph to it. The budget is per file
+    so that one subsystem's notes never have to be paid for out of another's.
 - Not touch git, not commit, not close the issue. The driver does that.
 - Report back in at most 15 lines: files changed, decisions made, and anything
   in the brief it deviated from or could not do.
@@ -128,35 +157,29 @@ not merge. The parallelism is not worth the merge cost.
 ## 6. Per issue: verify, commit, close
 
 **Verify it yourself.** A subagent reporting PASS is a claim; you produce the
-evidence. The Godot binary is not on PATH — see `CLAUDE.md` and the toolchain
-memory (on this machine,
-`C:/Users/bornd/Downloads/godot/Godot_v4.7-stable_mono_win64_console.exe`, the
-console build, which gives stdout):
+evidence. One command does all of it:
 
 ```bash
-dotnet build Arable.sln
-<godot_console> --headless --path . res://scenes/dev/CameraSmokeTest.tscn
+python scripts/verify.py
 ```
 
-Run **every** smoke test in `scenes/dev/`, not only the one the issue named —
-the older ones are the regression net that catches this issue breaking an
-earlier one. Then read the diff (`git diff --stat`, then the changed files) and
-check it against `Done when` yourself.
+That is the build, the asset import, **every** smoke test in `scenes/dev/` — not
+only the one the issue named, since the older ones are the regression net that
+catches this issue breaking an earlier one — and the `docs/implementation`
+budget, in one round-trip, with every check run even after one fails. It is the
+same gate CI runs, so green here is a green PR. Never substitute a hand-rolled
+`godot ... | grep PASS`: the pipe throws away Godot's exit status and the grep
+throws away the `ERROR`/`WARNING` lines that make a run red.
 
-**Check the doc budget while you are in the diff** — a rule only the subagent is
-asked to respect is decoration:
+Then read the diff (`git diff --stat`, then the changed files) and check it
+against `Done when` yourself. That half is judgement and stays with you.
 
-```bash
-wc -l docs/implementation.md   # under ~700
-awk '/^#{2,3} /{if(h!="")printf "%5d  %s\n", NR-s, h; h=$0; s=NR} \
-     END{printf "%5d  %s\n", NR-s, h}' docs/implementation.md | sort -rn | head -5
-```
-
-If the file is over budget or a section is past ~120 lines, cut it back yourself
-before committing, and say in the report what you cut. What comes out first is
-inventory the code now states plainly — member lists, assertion narration,
-anything a reader would go to the source for anyway. What never comes out is
-rationale, rejected alternatives, deferrals and traps.
+If `verify.py` reports the doc budget over — a rule only the subagent is asked
+to respect is decoration — cut it back yourself before committing, and say in
+the report what you cut. What comes out first is inventory the code now states
+plainly: member lists, assertion narration, anything a reader would go to the
+source for anyway. What never comes out is rationale, rejected alternatives,
+deferrals and traps.
 
 ### Look at it, when the issue makes a visual claim
 
@@ -164,7 +187,7 @@ rationale, rejected alternatives, deferrals and traps.
 farm zoom" cannot be settled by an assert. For those, render and look:
 
 ```bash
-<godot_console> --path . res://scenes/dev/ScreenshotTest.tscn -- <scratchpad>/shots
+"$GODOT" --path . res://scenes/dev/ScreenshotTest.tscn -- <scratchpad>/shots
 ```
 
 **Not `--headless`** — that uses the dummy rasterizer, so there is no
@@ -207,8 +230,10 @@ One commit per issue, always — so a bad issue reverts without unwinding the
 milestone.
 
 **Red** → exactly one repair pass. Fix it yourself if it is small and obvious (a
-compile error, a wrong resource path); hand it to a *new* subagent with the
-failure output if it is not. Still red after that,
+compile error, a wrong resource path); hand it to a *new* subagent — this one on
+**Opus**, with the failure output — if it is not. Diagnosis is the part that
+needs the stronger model, and the repair agent starts cold, so paste it the
+failing output rather than telling it to re-run and find out. Still red after that,
 `git restore . && git clean -fd` to discard this issue's work, leave the issue
 open, comment on it with the failure, and halt.
 

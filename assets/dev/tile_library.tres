@@ -1,4 +1,4 @@
-[gd_resource type="MeshLibrary" load_steps=31 format=3]
+[gd_resource type="MeshLibrary" load_steps=35 format=3]
 
 [sub_resource type="StandardMaterial3D" id="mat_road"]
 albedo_color = Color(0.32, 0.33, 0.35, 1)
@@ -50,6 +50,25 @@ size = Vector3(2, 0.04, 2)
 [sub_resource type="BoxMesh" id="mesh_structure"]
 material = SubResource("mat_structure")
 size = Vector3(1.7, 1.4, 1.7)
+
+[sub_resource type="StandardMaterial3D" id="mat_silo"]
+albedo_color = Color(0.62, 0.64, 0.68, 1)
+roughness = 0.5
+metallic = 0.2
+
+[sub_resource type="CylinderMesh" id="mesh_silo"]
+material = SubResource("mat_silo")
+top_radius = 0.7
+bottom_radius = 0.85
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="mat_depot"]
+albedo_color = Color(0.82, 0.62, 0.18, 1)
+roughness = 0.6
+
+[sub_resource type="BoxMesh" id="mesh_depot"]
+material = SubResource("mat_depot")
+size = Vector3(1.9, 0.6, 1.9)
 
 [sub_resource type="BoxMesh" id="mesh_soil_0"]
 material = SubResource("mat_soil_0")
@@ -176,3 +195,11 @@ item/14/name = "Field: stubble"
 item/14/mesh = SubResource("mesh_crop_stubble")
 item/14/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
 item/14/shapes = []
+item/15/name = "Silo"
+item/15/mesh = SubResource("mesh_silo")
+item/15/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+item/15/shapes = []
+item/16/name = "Depot"
+item/16/mesh = SubResource("mesh_depot")
+item/16/mesh_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+item/16/shapes = []

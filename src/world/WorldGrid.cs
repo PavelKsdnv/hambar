@@ -46,7 +46,12 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     private const int SoilItemFirst = 4;
     private const int SoilTiers = 4;
 
-    /// <summary>Dev art for a placed building: a tall box, so it reads as one.</summary>
+    /// <summary>
+    /// Dev art fallback for a structure whose <see cref="StructureKind"/> is
+    /// out of range (a corrupt or future save) — a tall box, so it still reads
+    /// as a building. A recognised kind draws its own item instead (see
+    /// <see cref="SiloItem"/>).
+    /// </summary>
     private const int StructureItem = 8;
 
     /// <summary>
@@ -60,12 +65,18 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// </summary>
     private const int FieldStageItemFirst = 9;
 
+    /// <summary>Dev art for a silo: a squat cylinder, distinct from the generic box.</summary>
+    private const int SiloItem = 15;
+
+    /// <summary>Dev art for a depot: a low gold platform, distinct from the silo and the box.</summary>
+    private const int DepotItem = 16;
+
     /// <summary>
-    /// The stream machine spawn placement draws from. Separate from
-    /// <c>MachineSystem.StreamName</c> on purpose: spawning is the world laying
-    /// the game out, wandering is a machine deciding what to do, and a debug
-    /// session that spawns an extra tractor should not reroute the ones already
-    /// driving.
+    /// The stream machine spawn placement draws from. <b>The only randomness a
+    /// vehicle is subject to</b>: where a bought one is parked is the world
+    /// laying the game out, and everything a machine does afterwards is an
+    /// order somebody typed. The machine system used to own a stream of its own
+    /// for choosing destinations; that went with the wandering.
     /// </summary>
     public const string SpawnStreamName = "world.spawn";
 
@@ -82,6 +93,26 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
 
     [Export] public PackedScene? MachineScene { get; set; }
     [Export] public int MachineCount { get; set; } = 0;
+
+    /// <summary>
+    /// Where a depot delivery's money goes (#38). Read only by
+    /// <see cref="MachineSystem.RunHaulOrder"/>, and only for a
+    /// <see cref="StructureKind.Depot"/> unload; null means this scene has no
+    /// money at all, the same "no such thing here" reading a build tool with no
+    /// <see cref="Economy"/> already has — a dev scene can haul into a depot
+    /// with nothing credited.
+    /// </summary>
+    [Export] public Economy? Economy { get; set; }
+
+    /// <summary>
+    /// The people who can be in a cab, so order execution can tell a live
+    /// driver from the handle a dismissed one left behind
+    /// (<see cref="MachineSystem.CrewOf"/> is deliberately raw). Null means
+    /// this scene has no labour at all, and a crew handle is then believed as
+    /// written — the same "no such thing in this scene" reading a
+    /// <c>BuildTool</c> with no <c>Economy</c> has.
+    /// </summary>
+    [Export] public LabourPool? Labour { get; set; }
 
     /// <summary>
     /// The map spans cells −<c>MapHalfExtent</c>..<c>MapHalfExtent</c> on both
@@ -199,14 +230,6 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// </summary>
     [Export] public int FieldOutputHarvests { get; set; } = CropSystem.DefaultOutputHarvests;
 
-    private static readonly Color[] MachineColors =
-    [
-        new(0.75f, 0.22f, 0.17f), // tractor red
-        new(0.20f, 0.42f, 0.75f), // truck blue
-        new(0.85f, 0.70f, 0.20f), // combine yellow
-        new(0.25f, 0.55f, 0.30f), // harvester green
-    ];
-
     private GridMap _gridMap = null!;
 
     // Placement layer: sparse, the player owns it.
@@ -276,7 +299,7 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         // The streams are taken once and held: they are the same objects for
         // the life of the world, and a reseed rewrites them in place.
         _spawnRng = Streams.For(SpawnStreamName);
-        _machines = new MachineSystem(this, Streams.For(MachineSystem.StreamName));
+        _machines = new MachineSystem(this);
         _sim?.Register(_machines);
 
         // The crop schedule is read against the calendar's day, so the tempo
@@ -531,6 +554,24 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public Field? GetField(Vector2I cell) => _fieldOf.GetValueOrDefault(cell);
 
     /// <summary>
+    /// The field with that <see cref="Field.Id"/>, or null once it has lost
+    /// its last cell — how an order refers to a field without holding the
+    /// object or a cell that might not be its any more. Linear, the same
+    /// trade <see cref="GetStructure(int)"/> makes: fields are few.
+    /// </summary>
+    public Field? GetField(int id)
+    {
+        foreach (Field field in _fields)
+        {
+            if (field.Id == id)
+            {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Marks the cells as <b>one new field</b> — the addressable unit farmland
     /// comes in (see <see cref="Field"/>) — and returns it, or null for an
     /// empty region. Cells another field owned are transferred to the new one,
@@ -609,19 +650,27 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     }
 
     /// <summary>
-    /// Places the cells as <b>one new building</b> — the addressable unit
-    /// buildings come in (see <see cref="Structure"/>) — and returns it, or
-    /// null for an empty footprint. Whatever held those cells is cleared
-    /// first, so the cell → structure map can never disagree with the tile
-    /// layer; the structure tool refuses an occupied cell in the first place,
-    /// but dev and scenario code calls this directly, the way
+    /// Places the cells as <b>one new building</b> of <paramref name="kind"/> —
+    /// the addressable unit buildings come in (see <see cref="Structure"/>) —
+    /// and returns it, or null for an empty footprint. Whatever held those
+    /// cells is cleared first, so the cell → structure map can never disagree
+    /// with the tile layer; a build tool refuses an occupied cell in the first
+    /// place, but dev and scenario code calls this directly, the way
     /// <see cref="BuildRoadLine"/> is the unvalidated way to lay road and
     /// <see cref="MarkField"/> is for farmland.
+    ///
+    /// <paramref name="storageCapacity"/> is what a placing tool's own export
+    /// supplies (<see cref="StructureBuildTool.StorageCapacity"/>); left null
+    /// it falls back to <see cref="StructureKinds"/>' default for
+    /// <paramref name="kind"/> — what every call that skips the tool gets.
     ///
     /// The footprint is a list, so a multi-cell building needs nothing here
     /// beyond a wider list from the tool.
     /// </summary>
-    public Structure? PlaceStructure(IReadOnlyList<Vector2I> cells)
+    public Structure? PlaceStructure(
+        IReadOnlyList<Vector2I> cells,
+        StructureKind kind = StructureKind.Silo,
+        int? storageCapacity = null)
     {
         if (cells.Count == 0)
         {
@@ -629,17 +678,32 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         }
 
         _structuresCreated++;
+        int capacity = storageCapacity ?? StructureKinds.DefaultStorageCapacity(kind);
         var structure = new Structure(
-            _structuresCreated, $"Structure {_structuresCreated}", cells);
+            _structuresCreated, kind, $"{StructureKinds.Name(kind)} {_structuresCreated}", cells,
+            capacity);
         foreach (Vector2I cell in cells)
         {
             DemolishStructureAt(cell);
         }
         _structures.Add(structure);
+
+        // Registered before any tile is written, and redrawn after. SetTile
+        // refreshes the cell as it writes, and ViewItem reads the kind back
+        // out of this map to pick the mesh — so filling it afterwards drew
+        // every building as the generic fallback box, silo or not. The
+        // explicit refresh covers the other half: SetTile returns early when
+        // the cell already read as a structure (the footprint this one just
+        // replaced), which would otherwise leave the demolished building's
+        // mesh standing under the new one's name.
+        foreach (Vector2I cell in cells)
+        {
+            _structureOf[cell] = structure;
+        }
         foreach (Vector2I cell in cells)
         {
             SetTile(cell, TileType.Structure);
-            _structureOf[cell] = structure;
+            RefreshCell(cell);
         }
         return structure;
     }
@@ -816,7 +880,10 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
                     ? FieldStageItemFirst + (int)_crops.StageOf(field.Crop)
                     : FieldItem;
             case TileType.Structure:
-                return StructureItem;
+                // Read through to the entity for the same reason a field cell
+                // is: the tile layer only says "a building", which one it
+                // draws is per-kind dev art.
+                return GetStructure(cell) is { } structure ? MeshItemFor(structure.Kind) : StructureItem;
         }
 
         return GetTerrain(cell) switch
@@ -832,6 +899,14 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     /// <summary>Pushes one cell's current state to the GridMap view.</summary>
     private void RefreshCell(Vector2I cell) =>
         _gridMap.SetCellItem(new Vector3I(cell.X, 0, cell.Y), ViewItem(cell));
+
+    /// <summary>The MeshLibrary item a building of this kind draws as.</summary>
+    private static int MeshItemFor(StructureKind kind) => kind switch
+    {
+        StructureKind.Silo => SiloItem,
+        StructureKind.Depot => DepotItem,
+        _ => StructureItem,
+    };
 
     /// <summary>
     /// <b>How a crop stage the sim moved reaches the GridMap.</b> Every other
@@ -888,6 +963,74 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     }
 
     public Vector2I RandomRoadCell(RandomStream rng) => _roadCells[rng.NextInt(_roadCells.Count)];
+
+    /// <summary>
+    /// Somewhere legal to leave a vehicle: a road cell with no machine already
+    /// standing on it. False when there is no road at all, or when every cell
+    /// of it is taken — a refusal a buyer has to be able to hear, since a farm
+    /// with nowhere to park should not be charged for a truck it cannot
+    /// receive.
+    ///
+    /// One random draw picks where to start looking and the search then walks
+    /// the road list forward, wrapping. Retrying random cells instead would
+    /// make the number of draws depend on how full the road is, which is a
+    /// determinism trap: two runs that parked the same vehicles in the same
+    /// places would leave the stream in different positions.
+    /// </summary>
+    public bool TryFindParking(RandomStream rng, out Vector2I cell)
+    {
+        cell = Vector2I.Zero;
+        if (_roadCells.Count == 0)
+        {
+            return false;
+        }
+
+        int start = rng.NextInt(_roadCells.Count);
+        for (int i = 0; i < _roadCells.Count; i++)
+        {
+            Vector2I candidate = _roadCells[(start + i) % _roadCells.Count];
+            if (_machines.Occupancy.At(candidate).Count == 0)
+            {
+                cell = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The road cell an order parks a vehicle on to work a field or a
+    /// building: the first cell of the footprint with a road neighbour,
+    /// walked in footprint order so the answer never depends on a
+    /// dictionary's enumeration. Null when nothing in the footprint touches
+    /// road at all — <see cref="Field"/>s are legal without one
+    /// (<c>## Fields</c>), so this is the ordinary shape of
+    /// <see cref="OrderBlock.NoRoadAccess"/> rather than a bug.
+    ///
+    /// <b>The vehicle stops here, not on the footprint itself.</b> A
+    /// structure's cell is never road and a field's is deliberately not
+    /// required to be, so "arrived" for an order means reaching this cell —
+    /// the same neighbour <see cref="PlacementRules.HasRoadAccess"/> already
+    /// asks the structure tool to require, asked here for the actual cell
+    /// rather than a yes/no. `#36` closed road pathing on this reading of
+    /// arrival; entering the footprint, lane discipline and multiple vehicles
+    /// sharing one door stay out of scope, not queued to any issue.
+    /// </summary>
+    public Vector2I? FindRoadAccess(IReadOnlyList<Vector2I> cells)
+    {
+        foreach (Vector2I cell in cells)
+        {
+            foreach (Vector2I step in Steps4)
+            {
+                Vector2I neighbor = cell + step;
+                if (IsRoad(neighbor))
+                {
+                    return neighbor;
+                }
+            }
+        }
+        return null;
+    }
 
     /// <summary>
     /// Breadth-first shortest path over road cells, including both endpoints.
@@ -1127,6 +1270,13 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         new(-1, -1),
     ];
 
+    // The same 4-neighbourhood PlacementRules.Neighbors uses for "touches a
+    // road": sharing an edge, not a corner. A second array rather than a
+    // slice of Steps above, so this rule cannot start including diagonals the
+    // day somebody reorders that one.
+    private static readonly Vector2I[] Steps4 =
+        [Vector2I.Right, Vector2I.Left, Vector2I.Up, Vector2I.Down];
+
     /// <summary>
     /// Generates the terrain layer from <see cref="WorldSeed"/> and redraws the
     /// view. Two <c>FastNoiseLite</c> fields, both derived from that one seed:
@@ -1295,11 +1445,17 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
         {
             member.Reset();
             member.Write(structure.Id);
+            member.Write((int)structure.Kind);
             member.Write(structure.Name);
             foreach (Vector2I cell in structure.Cells)
             {
                 member.Write(cell);
             }
+            // What it is holding. A building is not an entity row yet, so its
+            // store is hashed here with the rest of it rather than by a system
+            // walking slots — the line moves with the object when M5 or M6
+            // gives buildings state worth ticking.
+            structure.Storage.HashState(member);
             fold = StateHash.Fold(fold, member.Value);
         }
         hash.WriteUnordered(fold, _structures.Count);
@@ -1325,29 +1481,47 @@ public partial class WorldGrid : Node3D, IHashableState, ISimView
     public CropSystem Crops => _crops;
 
     /// <summary>
-    /// Spawns one machine at a random road cell: a row in
+    /// Puts one machine of the given kind on the road network: a row in
     /// <see cref="Machines"/> for the sim, and a node bound to it for the view.
-    /// The spot comes off the world's spawn stream, so a given spawn sequence is
-    /// reproducible for a world seed. Returns null when no machine scene is
-    /// assigned.
+    /// Where it parks comes off the world's spawn stream, so a given sequence
+    /// of purchases is reproducible for a world seed. Null when there is no
+    /// machine scene assigned or nowhere legal to leave it.
+    ///
+    /// <b>The unvalidated door</b>, the way <see cref="BuildRoadLine"/> is for
+    /// road: it charges nothing and asks nobody, which is what a dev key, a
+    /// scenario and a test all want. <c>Fleet.TryBuy</c> is the one the player
+    /// goes through.
     /// </summary>
-    public Machine? SpawnMachine()
+    public Machine? SpawnMachine(MachineKind kind)
     {
-        if (MachineScene == null)
+        if (MachineScene == null || !TryFindParking(_spawnRng, out Vector2I cell))
         {
             return null;
         }
 
-        // The node is instanced first only to read the exports the scene
-        // carries — Speed and TurnSpeed are spawn input to the arrays, and the
-        // sim never looks at the node again.
+        // The node is instanced first so the kind can be written onto its
+        // exports and read back out of them: Speed, TurnSpeed and
+        // CargoCapacity are spawn input to the arrays, and the sim never looks
+        // at the node again.
         var machine = MachineScene.Instantiate<Machine>();
-        Vector3 spawn = CellToWorld(RandomRoadCell(_spawnRng)) + Vector3.Up * Machine.DeckHeight;
-        EntityId entity = _machines.Spawn(spawn, machine.Speed, machine.TurnSpeed);
-        machine.Setup(_machines, entity, MachineColors[_machinesSpawned % MachineColors.Length]);
+        machine.ApplyKind(kind);
+        Vector3 spawn = CellToWorld(cell) + Vector3.Up * Machine.DeckHeight;
+        EntityId entity = _machines.Spawn(
+            spawn, machine.Kind, machine.Speed, machine.TurnSpeed, machine.CargoCapacity);
+        machine.Setup(_machines, entity);
         machine.Position = spawn;
+        machine.Name = $"{MachineKinds.Name(kind)}{_machinesSpawned}";
         AddChild(machine);
         _machinesSpawned++;
         return machine;
     }
+
+    /// <summary>
+    /// The next machine in the roster: tractor, harvester, truck, round again.
+    /// What a dev key and a scenario's <see cref="MachineCount"/> want — a
+    /// vehicle of each sort without having to say which — and it cycles off the
+    /// hashed spawn counter, so the sequence is part of the world rather than
+    /// of how the caller was written.
+    /// </summary>
+    public Machine? SpawnMachine() => SpawnMachine(MachineKinds.At(_machinesSpawned));
 }
